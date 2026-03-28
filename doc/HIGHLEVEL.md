@@ -45,7 +45,7 @@ locally by a per-node process over a Unix domain socket and TCP port.
    │    Hyperdisk ML     │        │  ┌──────────────▼───────────────┐  │
    │    per version      │        │  │   KV Server                  │  │
    │                     │        │  │   Rust · unprivileged        │  │
-   │  part-NNN/          │        │  │  - mmap index.idx            │  │
+   │  data/part-NN/      │        │  │  - mmap index.idx            │  │
    │    index.idx        │        │  │  - pread data.bin            │  │
    │    data.bin         │        │  │  - MGET over UDS + TCP       │  │
    │  meta.json          │        │  │  - atomic version swap       │  │
@@ -120,7 +120,7 @@ Responsibilities:
 
 **Language:** Rust
 **Deployment:** Kubernetes Job (runs to completion)
-**Shared library:** `kv-format`
+**Shared library:** `frostmap-format`
 
 Stateless. Triggered by the control plane, reports completion and exits.
 
@@ -154,7 +154,7 @@ the canonical type definitions for the system's wire contracts:
 | `CatalogEntry` | Per-dataset entry written to `catalog.json` |
 | `NodeStatus` | Per-node version acknowledgement reported to the control plane |
 
-### `rust/crates/kv-format`
+### `rust/crates/frostmap-format`
 
 Rust library crate that is the single implementation of the on-disk format described
 in `FORMAT.md`. Compiled into both the snapshot builder (write path) and the KV
