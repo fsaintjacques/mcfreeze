@@ -11,11 +11,12 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 const OFFSET_SHIFT: u8 = SIZE_BITS + PSL_BITS; // 30 — bits [63:30]
-const SIZE_SHIFT:   u8 = PSL_BITS;             //  8 — bits [29:8]
-const SIZE_MASK:   u64 = (1u64 << SIZE_BITS) - 1; // 0x3FFFFF
-const PSL_MASK:    u64 = (1u64 << PSL_BITS)  - 1; // 0xFF
+const SIZE_SHIFT:   u8 = PSL_BITS;             //  7 — bits [29:7]
+const SIZE_MASK:   u64 = (1u64 << SIZE_BITS) - 1; // 0x7FFFFF
+const PSL_MASK:    u64 = (1u64 << PSL_BITS)  - 1; // 0x7F
 const MAX_OFFSET:  u64 = (1u64 << OFFSET_BITS) - 1;
-const MAX_SIZE:    u32 = (1u32 << SIZE_BITS)   - 1; // 4 MiB - 1
+const MAX_SIZE:    u32 = (1u32 << SIZE_BITS)   - 1; // 8 MiB - 1
+const MAX_PSL:      u8 = (1u8  << PSL_BITS)   - 1; // 127
 
 pub const INDEX_MAGIC: [u8; 8] = *b"KVFXIDX\n";
 pub const INDEX_HEADER_SIZE: usize = 64;
@@ -207,7 +208,8 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) {
         }
 
         pos = (pos + 1) % n;
-        psl = psl.saturating_add(1);
+        assert!(psl < MAX_PSL, "PSL overflow ({psl}): table is full or fill rate too high");
+        psl += 1;
     }
 }
 
@@ -274,7 +276,7 @@ mod tests {
         let cases: &[(u64, u32, u8)] = &[
             (0, 0, 0),
             (1, 100, 2),
-            (MAX_OFFSET, MAX_SIZE, u8::MAX),
+            (MAX_OFFSET, MAX_SIZE, MAX_PSL),
             ((1 << 17), 4096, 42),
         ];
         for &(off, sz, psl) in cases {

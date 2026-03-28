@@ -13,11 +13,13 @@ pub const HASH_ALGORITHM: &str  = "xxhash64";
 /// Max per-partition addressable space: 2^OFFSET_BITS × 64 bytes = 1 TiB.
 pub const OFFSET_BITS: u8 = 34;
 
-/// Bits allocated to value size. Max value: 2^22 - 1 = 4 MiB - 1 bytes.
-pub const SIZE_BITS: u8 = 22;
+/// Bits allocated to value size. Max value: 2^23 - 1 = 8 MiB - 1 bytes.
+pub const SIZE_BITS: u8 = 23;
 
-/// Bits allocated to the probe sequence length. Max PSL: 255.
-pub const PSL_BITS: u8 = 8;
+/// Bits allocated to the probe sequence length. Max PSL: 127.
+/// Robin Hood hashing at 95% fill rate peaks well below 50 in practice,
+/// so 127 provides ~2.5× safety margin while freeing one bit for `SIZE_BITS`.
+pub const PSL_BITS: u8 = 7;
 
 // Sanity check: the three fields must exactly fill a u64.
 const _: () = assert!(OFFSET_BITS as u32 + SIZE_BITS as u32 + PSL_BITS as u32 == 64);

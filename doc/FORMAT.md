@@ -44,8 +44,8 @@ Partition directory names are zero-padded to the width of `N-1`
   "n_partitions":    64,
   "hash_algorithm":  "xxhash64",
   "offset_bits":     34,
-  "size_bits":       22,
-  "psl_bits":        8,
+  "size_bits":       23,
+  "psl_bits":        7,
   "n_keys":          1000000000,
   "created_at":      "2026-03-27T00:00:00Z"
 }
@@ -57,8 +57,8 @@ Partition directory names are zero-padded to the width of `N-1`
 | `n_partitions` | Number of partitions N; must be a power of two |
 | `hash_algorithm` | Key hash function; currently only `xxhash64` |
 | `offset_bits` | Bits allocated to the aligned offset in the `loc` field; equals `40 - log2(N)` |
-| `size_bits` | Bits allocated to the value size in the `loc` field; currently `22` (max 4 MiB) |
-| `psl_bits` | Bits allocated to the probe sequence length; currently `8` (max 255) |
+| `size_bits` | Bits allocated to the value size in the `loc` field; currently `23` (max 8 MiB) |
+| `psl_bits` | Bits allocated to the probe sequence length; currently `7` (max 127); Robin Hood at 95% fill peaks well below 50 in practice |
 | `n_keys` | Total key count across all partitions |
 | `created_at` | ISO 8601 UTC timestamp |
 
@@ -112,12 +112,12 @@ with no spare bits:
  └──────────────────────┴───────────────────┴──────────────────┘
 ```
 
-**Concrete layout for N=64** (`offset_bits`=34, `size_bits`=22, `psl_bits`=8):
+**Concrete layout for N=64** (`offset_bits`=34, `size_bits`=23, `psl_bits`=7):
 
 ```
 bits 63..30  aligned_offset  (34 bits)  ← in 64-byte units
-bits 29..8   size            (22 bits)  ← value size in bytes, max 4 MiB
-bits  7..0   psl             (8 bits)   ← probe sequence length
+bits 29..7   size            (23 bits)  ← value size in bytes, max 8 MiB
+bits  6..0   psl             (7 bits)   ← probe sequence length, max 127
 ```
 
 Decode:
@@ -217,7 +217,7 @@ For each partition, the reader maintains:
 - `madvise(MADV_RANDOM)` on the mapped region — index access is random; readahead
   wastes I/O and pollutes the page cache.
 - An open file descriptor to `data.bin` for `pread` calls.
-- `n_buckets` and the `loc` field widths loaded from the header and `meta.json`.
+- `n_buckets` loaded from the header; `loc` field widths are format constants validated against `meta.json`.
 
 `data.bin` is not memory-mapped. Values are read on demand via `pread`.
 
@@ -242,7 +242,7 @@ lookup(key) → value | NOT_FOUND:
 
     if bucket.fingerprint == h:
       offset = (bucket.loc >> 30) << 6   // decode byte_offset for N=64
-      size   = (bucket.loc >> 8) & 0x3FFFFF
+      size   = (bucket.loc >> 7) & 0x7FFFFF
       return pread(data_fd[partition], size, offset)
 
     pos      = (pos + 1) % n_buckets[partition]
