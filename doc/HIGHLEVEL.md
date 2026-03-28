@@ -35,7 +35,7 @@ locally by a per-node process over a Unix domain socket and TCP port.
    │   Snapshot Builder  │        │     DaemonSet Pod  (per node)      │
    │      Rust · Job     │        │                                    │
    │                     │        │  ┌──────────────────────────────┐  │
-   │  - parallel BQ read │        │  │   Lifecycle Manager          │  │
+   │  - parallel BQ read │        │  │   node-agent                 │  │
    │  - write kv format  │        │  │   Go · privileged            │  │
    │                     │        │  │  - attach / detach disks     │  │
    └──────────┬──────────┘        │  │  - mount / umount            │  │
@@ -72,9 +72,9 @@ Responsibilities:
 - Monitor Job completion and promote finished snapshots to active
 - Track per-node acknowledgement of the active version (`NodeStatus`)
 - Drive rollout (advance active version) and rollback (revert to previous)
-- Expose a watched API that lifecycle-managers poll for version changes
+- Expose a watched API that node-agents poll for version changes
 
-### Lifecycle Manager
+### node-agent
 
 **Language:** Go
 **Deployment:** DaemonSet, privileged container

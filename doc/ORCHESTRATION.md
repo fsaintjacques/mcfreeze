@@ -85,10 +85,6 @@ Responsibilities:
 **Deployment:** Kubernetes `DaemonSet`, privileged container
 **Communicates with:** control-plane API (outbound), KV server (shared EmptyDir)
 
-> **Terminology note:** `node-agent` is the binary name for the component referred to as
-> "Lifecycle Manager" in `HIGHLEVEL.md`. The names are interchangeable; this document uses
-> the binary name to stay consistent with `fmtctl` subcommand conventions.
-
 One instance per node. Performs all privileged OS and GCP operations required
 to materialise a dataset version onto the local node.
 
