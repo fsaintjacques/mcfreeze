@@ -222,13 +222,11 @@ async fn run_bq(
     let output = output.context("--output is required unless --download-benchmark is set")?;
 
     let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
-    let index_reporter   = ProgressReporter::new("index", Some(partitions as u64), progress_secs);
     let loader_config = LoaderConfig {
-        n_partitions:       partitions,
+        n_partitions:      partitions,
         index_parallelism,
-        progress_fn:        Some(scatter_reporter.updater()),
-        index_progress_fn:  Some(index_reporter.updater()),
-        progress_interval:  0, // reporter's ticker handles rate-limiting
+        progress_fn:       Some(scatter_reporter.updater()),
+        progress_interval: 0, // reporter's ticker handles rate-limiting
         ..LoaderConfig::default()
     };
 
@@ -237,12 +235,19 @@ async fn run_bq(
     let loader = SnapshotLoader::new(&output, loader_config)
         .context("failed to create SnapshotLoader")?;
 
-    let stats = loader
-        .load_parallel(sources)
+    let scatter_result = loader
+        .scatter_parallel(sources)
         .await
-        .context("load failed")?;
+        .context("scatter failed")?;
 
     scatter_reporter.stop();
+
+    let index_reporter = ProgressReporter::new("index", Some(partitions as u64), progress_secs);
+    let stats = loader
+        .finalize(scatter_result, Some(index_reporter.updater()))
+        .await
+        .context("index/finalize failed")?;
+
     index_reporter.stop();
 
     info!(

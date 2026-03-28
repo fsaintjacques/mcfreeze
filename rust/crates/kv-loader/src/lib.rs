@@ -144,10 +144,6 @@ pub struct LoaderConfig {
 
     /// Optional progress callback: `fn(keys_processed, unpadded_bytes_written)`.
     pub progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
-
-    /// Optional progress callback for the index build phase.
-    /// Called with `(1, 0)` after each partition is indexed.
-    pub index_progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for LoaderConfig {
@@ -160,7 +156,6 @@ impl std::fmt::Debug for LoaderConfig {
             .field("index_parallelism", &self.index_parallelism)
             .field("progress_interval", &self.progress_interval)
             .field("progress_fn",       &self.progress_fn.as_ref().map(|_| "<fn>"))
-            .field("index_progress_fn", &self.index_progress_fn.as_ref().map(|_| "<fn>"))
             .finish()
     }
 }
@@ -175,7 +170,6 @@ impl Default for LoaderConfig {
             index_parallelism: 2,
             progress_interval: 100_000,
             progress_fn:       None,
-            index_progress_fn: None,
         }
     }
 }
@@ -190,6 +184,17 @@ pub struct LoadStats {
     pub data_bytes:       u64,
     pub scatter_duration: Duration,
     pub index_duration:   Duration,
+}
+
+// ---------------------------------------------------------------------------
+// ScatterResult
+// ---------------------------------------------------------------------------
+
+/// Opaque result of a completed scatter phase, consumed by [`SnapshotLoader::finalize`].
+pub struct ScatterResult {
+    layout:   Layout,
+    stats:    scatter::ScatterStats,
+    duration: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,29 +219,82 @@ impl SnapshotLoader {
         Ok(Self { root, config })
     }
 
-    /// Load from multiple concurrent sources (e.g. BigQuery parallel read streams).
+    /// Scatter sources into partition files, returning a [`ScatterResult`] that
+    /// can be passed to [`finalize`] to build indexes and write `meta.json`.
     ///
-    /// Each source is driven by its own `tokio::spawn` task, each with its own
-    /// [`Fanout`].  All fanouts write to the same set of partition writers via
-    /// cloned channel senders — no locking, no serialization.
+    /// Splitting the two phases lets callers create phase-specific resources
+    /// (e.g. a progress reporter) at exactly the right time.
+    pub async fn scatter_parallel<S>(&self, sources: Vec<S>) -> Result<ScatterResult, LoaderError>
+    where
+        S: KvSource + Send + 'static,
+        S::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let layout        = Layout::new(self.config.n_partitions)?;
+        let scatter_start = Instant::now();
+
+        let (stats, duration) =
+            if let Some(stats) = check_scatter_done(&self.root, layout).await? {
+                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
+                (stats, Duration::ZERO)
+            } else {
+                let stats = self.run_scatter_sources(layout, sources.into_iter(), scatter_start).await?;
+                (stats, scatter_start.elapsed())
+            };
+
+        Ok(ScatterResult { layout, stats, duration })
+    }
+
+    /// Build indexes and write `meta.json` from a completed [`ScatterResult`].
+    ///
+    /// `index_progress_fn` is called with `(1, 0)` after each partition is
+    /// indexed.  Pass `None` if progress reporting is not needed.
+    pub async fn finalize(
+        &self,
+        scatter_result:   ScatterResult,
+        index_progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> Result<LoadStats, LoaderError> {
+        let ScatterResult { layout, stats: scatter_stats, duration: scatter_duration } = scatter_result;
+
+        let index_start = Instant::now();
+        let root2       = self.root.clone();
+        let parallelism = self.config.index_parallelism;
+
+        let index_done = tokio::task::spawn_blocking(move || {
+            IndexBuildPhase::new(&root2, layout, parallelism, index_progress_fn).run()
+        })
+        .await??;
+
+        let index_duration = index_start.elapsed();
+
+        let meta = Meta {
+            format_version: FORMAT_VERSION,
+            n_partitions:   self.config.n_partitions,
+            hash_algorithm: HASH_ALGORITHM.to_string(),
+            offset_bits:    OFFSET_BITS,
+            size_bits:      SIZE_BITS,
+            psl_bits:       PSL_BITS,
+            n_keys:         index_done.n_keys,
+            created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        };
+        let json = serde_json::to_string_pretty(&meta).map_err(kv_format::Error::from)?;
+        tokio::fs::write(self.root.join("meta.json"), json).await?;
+
+        Ok(LoadStats {
+            n_keys:           index_done.n_keys,
+            data_bytes:       scatter_stats.data_bytes,
+            scatter_duration,
+            index_duration,
+        })
+    }
+
+    /// Convenience method: scatter + finalize with no index progress reporting.
     pub async fn load_parallel<S>(&self, sources: Vec<S>) -> Result<LoadStats, LoaderError>
     where
         S: KvSource + Send + 'static,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        let layout = Layout::new(self.config.n_partitions)?;
-
-        let scatter_start = Instant::now();
-        let (scatter_stats, scatter_duration) =
-            if let Some(stats) = check_scatter_done(&self.root, layout).await? {
-                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
-                (stats, Duration::ZERO)
-            } else {
-                let stats = self.scatter_sources(layout, sources.into_iter(), scatter_start).await?;
-                (stats, scatter_start.elapsed())
-            };
-
-        self.build_and_finalize(layout, scatter_stats, scatter_duration).await
+        let sr = self.scatter_parallel(sources).await?;
+        self.finalize(sr, None).await
     }
 
     pub async fn load<S>(&self, source: &mut S) -> Result<LoadStats, LoaderError>
@@ -244,10 +302,10 @@ impl SnapshotLoader {
         S: KvSource + Send,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        let layout = Layout::new(self.config.n_partitions)?;
-
+        let layout        = Layout::new(self.config.n_partitions)?;
         let scatter_start = Instant::now();
-        let (scatter_stats, scatter_duration) =
+
+        let (stats, duration) =
             if let Some(stats) = check_scatter_done(&self.root, layout).await? {
                 tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
                 (stats, Duration::ZERO)
@@ -280,19 +338,14 @@ impl SnapshotLoader {
                 (stats, scatter_start.elapsed())
             };
 
-        self.build_and_finalize(layout, scatter_stats, scatter_duration).await
+        self.finalize(ScatterResult { layout, stats, duration }, None).await
     }
 
     // -----------------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Drive `sources` concurrently through the fan-out, then join writers.
-    ///
-    /// Each source gets its own [`Fanout`] and runs in a `tokio::spawn` task.
-    /// For the single-source `load` path this degenerates to one task with
-    /// zero extra overhead.
-    async fn scatter_sources<S, I>(
+    async fn run_scatter_sources<S, I>(
         &self,
         layout:  Layout,
         sources: I,
@@ -344,45 +397,5 @@ impl SnapshotLoader {
         }
 
         phase.finish(fanouts, start).await
-    }
-
-    /// Index build + meta.json write, shared by `load` and `load_parallel`.
-    async fn build_and_finalize(
-        &self,
-        layout:           Layout,
-        scatter_stats:    scatter::ScatterStats,
-        scatter_duration: Duration,
-    ) -> Result<LoadStats, LoaderError> {
-        let index_start   = Instant::now();
-        let root2         = self.root.clone();
-        let parallelism   = self.config.index_parallelism;
-        let index_prog_fn = self.config.index_progress_fn.clone();
-
-        tokio::task::spawn_blocking(move || {
-            IndexBuildPhase::new(&root2, layout, parallelism, index_prog_fn).run()
-        })
-        .await??;
-
-        let index_duration = index_start.elapsed();
-
-        let meta = Meta {
-            format_version: FORMAT_VERSION,
-            n_partitions:   self.config.n_partitions,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            offset_bits:    OFFSET_BITS,
-            size_bits:      SIZE_BITS,
-            psl_bits:       PSL_BITS,
-            n_keys:         scatter_stats.n_keys,
-            created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        };
-        let json = serde_json::to_string_pretty(&meta).map_err(kv_format::Error::from)?;
-        tokio::fs::write(self.root.join("meta.json"), json).await?;
-
-        Ok(LoadStats {
-            n_keys:           scatter_stats.n_keys,
-            data_bytes:       scatter_stats.data_bytes,
-            scatter_duration,
-            index_duration,
-        })
     }
 }
