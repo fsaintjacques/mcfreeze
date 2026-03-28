@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use kv_format::reader::SnapshotReader;
+use frostmap_format::reader::SnapshotReader;
 
 #[derive(Parser)]
 #[command(

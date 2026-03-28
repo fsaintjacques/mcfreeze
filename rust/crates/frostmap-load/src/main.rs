@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use kv_bq::{BqReadSession, BqSourceConfig};
-use kv_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
+use frostmap_bq::{BqReadSession, BqSourceConfig};
+use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
 // CLI definition

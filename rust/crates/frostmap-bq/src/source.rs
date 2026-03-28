@@ -9,7 +9,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
 };
 use tonic::Streaming;
 
-use kv_loader::{KvSource, SourceMetadata};
+use frostmap_loader::{KvSource, SourceMetadata};
 
 use crate::{
     batch::ArrowBatch,

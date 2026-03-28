@@ -1,5 +1,5 @@
 [package]
-name    = "kv-loader"
+name    = "frostmap-loader"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ adbc = ["dep:arrow"]
 [dependencies]
 tracing      = "0.1"
 hdrhistogram = "7"
-kv-format  = { path = "../kv-format" }
+frostmap-format = { path = "../frostmap-format" }
 bytemuck   = { version = "1", features = ["derive"] }
 thiserror  = "2"
 csv        = "1"

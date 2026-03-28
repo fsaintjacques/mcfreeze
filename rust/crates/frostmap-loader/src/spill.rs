@@ -81,7 +81,7 @@ impl SpillReader {
         file.read_exact(&mut hdr)?;
 
         if hdr[..8] != SPILL_MAGIC {
-            return Err(kv_format::Error::InvalidMagic.into());
+            return Err(frostmap_format::Error::InvalidMagic.into());
         }
         let count = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
         Ok(Self { file, count })

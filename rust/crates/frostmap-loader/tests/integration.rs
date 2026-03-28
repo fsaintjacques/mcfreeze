@@ -4,8 +4,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use tempfile::TempDir;
 
-use kv_format::reader::SnapshotReader;
-use kv_loader::{LoaderConfig, SnapshotLoader, source::CsvSource};
+use frostmap_format::reader::SnapshotReader;
+use frostmap_loader::{LoaderConfig, SnapshotLoader, source::CsvSource};
 
 // ---------------------------------------------------------------------------
 // Helpers

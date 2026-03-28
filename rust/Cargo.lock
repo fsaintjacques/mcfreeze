@@ -765,6 +765,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "frostmap-bq"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "bytes",
+ "frostmap-loader",
+ "gcloud-sdk",
+ "thiserror",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "frostmap-format"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "bytes",
+ "chrono",
+ "log",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "frostmap-load"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "frostmap-bq",
+ "frostmap-format",
+ "frostmap-loader",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "frostmap-loader"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "base64 0.22.1",
+ "bytemuck",
+ "chrono",
+ "csv",
+ "frostmap-format",
+ "hdrhistogram",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1335,72 +1401,6 @@ dependencies = [
  "serde_json",
  "signature",
  "simple_asn1",
-]
-
-[[package]]
-name = "kv-bq"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "bytes",
- "gcloud-sdk",
- "kv-loader",
- "thiserror",
- "tokio",
- "tonic",
-]
-
-[[package]]
-name = "kv-format"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "bytes",
- "chrono",
- "log",
- "memmap2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "xxhash-rust",
-]
-
-[[package]]
-name = "kv-load"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "kv-bq",
- "kv-format",
- "kv-loader",
- "rustls",
- "tokio",
- "tracing",
- "tracing-log",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "kv-loader"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "base64 0.22.1",
- "bytemuck",
- "chrono",
- "csv",
- "hdrhistogram",
- "kv-format",
- "rand",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]

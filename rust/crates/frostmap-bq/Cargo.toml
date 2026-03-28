@@ -1,10 +1,10 @@
 [package]
-name    = "kv-bq"
+name    = "frostmap-bq"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-kv-loader  = { path = "../kv-loader" }
+frostmap-loader = { path = "../frostmap-loader" }
 thiserror  = "2"
 tokio      = { version = "1", features = ["rt-multi-thread"] }
 bytes      = "1"

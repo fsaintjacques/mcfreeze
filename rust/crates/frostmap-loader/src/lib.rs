@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use kv_format::meta::{
+use frostmap_format::meta::{
     FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, PSL_BITS, SIZE_BITS, Layout, Meta,
 };
 
@@ -55,7 +55,7 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
     let mut data_bytes   = 0u64;
 
     for i in 0..n {
-        let dir = kv_format::meta::partition_dir(root, layout.n_partitions, i);
+        let dir = frostmap_format::meta::partition_dir(root, layout.n_partitions, i);
         let data_path  = dir.join("data.bin");
         let spill_path = dir.join("spill.bin");
         let idx_path   = dir.join("index.idx");
@@ -82,9 +82,9 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
         } else if idx_path.exists() {
             use std::io::Read;
             let mut f   = std::fs::File::open(&idx_path)?;
-            let mut buf = [0u8; kv_format::index::INDEX_HEADER_SIZE];
+            let mut buf = [0u8; frostmap_format::index::INDEX_HEADER_SIZE];
             f.read_exact(&mut buf)?;
-            let n_part = kv_format::index::IndexHeader::from_bytes(&buf)?.n_keys;
+            let n_part = frostmap_format::index::IndexHeader::from_bytes(&buf)?.n_keys;
             partitions.push(PartitionDone { n_keys: n_part, value_sizes: None });
         } else {
             return Ok(None);
@@ -289,7 +289,7 @@ impl SnapshotLoader {
             scatter:        scatter_val,
             index:          index_val,
         };
-        let json = serde_json::to_string_pretty(&meta).map_err(kv_format::Error::from)?;
+        let json = serde_json::to_string_pretty(&meta).map_err(frostmap_format::Error::from)?;
         tokio::fs::write(self.root.join("meta.json"), json).await?;
 
         // Remove sentinels — their data is now in meta.json.

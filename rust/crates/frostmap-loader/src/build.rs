@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use rayon::prelude::*;
 
-use kv_format::{
+use frostmap_format::{
     index::{Bucket, IndexHeader, RawEntry, INDEX_HEADER_SIZE},
     meta::Layout,
 };
@@ -101,7 +101,7 @@ impl IndexBuildPhase {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
-                    let dir = kv_format::meta::partition_dir(root, self.layout.n_partitions, i);
+                    let dir = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i);
                     let part   = build_partition(&dir)?;
                     if let Some(ref f) = cb {
                         f(1, 0);
@@ -206,7 +206,7 @@ fn build_partition(dir: &Path) -> Result<PartitionIndexDone, LoaderError> {
         })
         .collect::<Result<_, _>>()?;
 
-    let (table, retries) = kv_format::index::build(&entries)?;
+    let (table, retries) = frostmap_format::index::build(&entries)?;
     let n_buckets        = table.len() as u64;
     let index_bytes      = INDEX_HEADER_SIZE as u64 + n_buckets * size_of::<Bucket>() as u64;
     let fill_rate        = if n_buckets > 0 { n as f64 / n_buckets as f64 } else { 0.0 };
@@ -247,13 +247,13 @@ mod tests {
     use super::*;
     use crate::scatter::ScatterPhase;
     use crate::source::VecBatch;
-    use kv_format::index::IndexHeader;
+    use frostmap_format::index::IndexHeader;
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
 
     fn part_dir(root: &std::path::Path, n: u32, i: usize) -> std::path::PathBuf {
-        kv_format::meta::partition_dir(root, n, i)
+        frostmap_format::meta::partition_dir(root, n, i)
     }
 
     async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {

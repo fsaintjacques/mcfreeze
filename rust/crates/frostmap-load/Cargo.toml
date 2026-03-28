@@ -1,20 +1,20 @@
 [package]
-name    = "kv-load"
+name    = "frostmap-load"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "kv-load"
+name = "frostmap-load"
 path = "src/main.rs"
 
 [[bin]]
-name = "kv-get"
+name = "frostmap-get"
 path = "src/get.rs"
 
 [dependencies]
-kv-loader  = { path = "../kv-loader" }
-kv-bq      = { path = "../kv-bq" }
-kv-format  = { path = "../kv-format" }
+frostmap-loader = { path = "../frostmap-loader" }
+frostmap-bq     = { path = "../frostmap-bq" }
+frostmap-format = { path = "../frostmap-format" }
 clap                 = { version = "4", features = ["derive"] }
 tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 anyhow               = "1"

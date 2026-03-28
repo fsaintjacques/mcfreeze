@@ -3,7 +3,7 @@ use arrow::{
     datatypes::DataType,
     record_batch::RecordBatch,
 };
-use kv_loader::KvBatch;
+use frostmap_loader::KvBatch;
 
 // ---------------------------------------------------------------------------
 // BinaryCol — type-erased byte-column accessor

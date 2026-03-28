@@ -13,7 +13,7 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
 /// The official Go client uses math.MaxInt32 (~2 GiB); we match that.
 const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
-use kv_loader::SourceMetadata;
+use frostmap_loader::SourceMetadata;
 
 use crate::{BqStreamSource, error::BqError};
 
