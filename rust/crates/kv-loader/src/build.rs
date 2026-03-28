@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use bytemuck::cast_slice;
-use log::info;
+use tracing::info;
 use rayon::prelude::*;
 
 use kv_format::{
@@ -101,8 +101,11 @@ fn build_partition(dir: &Path) -> Result<u64, LoaderError> {
 
     if retries > 0 {
         info!(
-            "{}: PSL overflow — rebuilt index {} time(s), final table {} buckets ({} keys)",
-            dir.display(), retries, n_buckets, n,
+            partition = %dir.display(),
+            retries,
+            n_buckets,
+            n_keys = n,
+            "PSL overflow: index rebuilt",
         );
     }
 

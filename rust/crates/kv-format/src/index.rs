@@ -1,6 +1,5 @@
 use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh64::xxh64;
-use log::debug;
 
 use crate::{
     meta::{FILL_RATE, OFFSET_BITS, PSL_BITS, SIZE_BITS, VALUE_ALIGNMENT},
@@ -180,7 +179,7 @@ pub fn build(entries: &[RawEntry]) -> Result<(Vec<Bucket>, usize)> {
             return Ok((table, retries));
         }
         let next = ((n_buckets as f64) * 1.5).ceil() as usize;
-        debug!(
+        log::debug!(
             "Robin Hood PSL overflow at {} buckets ({} keys, {:.0}% fill); \
              growing to {} buckets",
             n_buckets,

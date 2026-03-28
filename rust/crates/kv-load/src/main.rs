@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 
 use kv_bq::{BqReadSession, BqSourceConfig};
 use kv_loader::{LoaderConfig, SnapshotLoader};
@@ -31,7 +32,7 @@ struct Cli {
     #[arg(long, default_value = "2")]
     index_parallelism: usize,
 
-    /// Report progress to stderr every 100k keys
+    /// Set log level to DEBUG (default: INFO). Overridden by RUST_LOG.
     #[arg(short, long)]
     verbose: bool,
 
@@ -85,12 +86,25 @@ enum Source {
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+
+    let default_level = if cli.verbose { "debug" } else { "info" };
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+
+    // Bridge `log` crate calls (kv-format) into tracing.
+    tracing_log::LogTracer::init().ok();
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    if let Err(e) = run(Cli::parse()).await {
-        eprintln!("error: {e:#}");
+    if let Err(e) = run(cli).await {
+        tracing::error!(error = format!("{e:#}"), "fatal");
         std::process::exit(1);
     }
 }
@@ -110,7 +124,6 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.output,
                 cli.partitions,
                 cli.index_parallelism,
-                cli.verbose,
                 cli.dry_run,
                 project,
                 table,
@@ -134,7 +147,6 @@ async fn run_bq(
     output:            PathBuf,
     partitions:        u32,
     index_parallelism: usize,
-    verbose:           bool,
     dry_run:           bool,
     project:           Option<String>,
     table:             String,
@@ -156,64 +168,60 @@ async fn run_bq(
         disable_compression: no_compression,
     };
 
-    eprintln!("Opening BigQuery read session…");
-    eprintln!("  billing project : {billing_project}");
-    eprintln!("  table           : {table}");
-    eprintln!("  key / value     : {key_column} / {value_column}");
-    if let Some(ref r) = row_restriction {
-        eprintln!("  row restriction : {r}");
-    }
-    eprintln!("  compression     : {}", if no_compression { "off" } else { "LZ4_FRAME" });
+    info!(
+        billing_project = %billing_project,
+        table           = %table,
+        key_column      = %key_column,
+        value_column    = %value_column,
+        compression     = if no_compression { "off" } else { "LZ4_FRAME" },
+        row_restriction = row_restriction.as_deref().unwrap_or(""),
+        "opening BigQuery read session",
+    );
 
     let session = BqReadSession::open(config)
         .await
         .context("failed to open BigQuery read session")?;
 
     let meta = session.metadata();
-    eprintln!("  streams         : {}", session.n_streams());
-    if let Some(rows) = meta.estimated_rows {
-        eprintln!("  estimated rows  : {rows}");
-    }
-    if let Some(bytes) = meta.estimated_bytes {
-        eprintln!("  estimated bytes : {}", human_bytes(bytes));
-    }
+    info!(
+        n_streams       = session.n_streams(),
+        estimated_rows  = meta.estimated_rows,
+        estimated_bytes = meta.estimated_bytes,
+        "BigQuery read session opened",
+    );
 
     if dry_run {
-        eprintln!("dry-run: skipping load.");
+        info!("dry-run: skipping load");
         return Ok(());
     }
 
     let loader_config = LoaderConfig {
         n_partitions:      partitions,
         index_parallelism,
-        progress_fn:       verbose.then(|| make_progress_fn()),
+        progress_fn:       Some(make_progress_fn()),
         ..LoaderConfig::default()
     };
 
-    eprintln!("\nLoading into {}…", output.display());
+    info!(output = %output.display(), "loading snapshot");
+
     let loader = SnapshotLoader::new(&output, loader_config)
         .context("failed to create SnapshotLoader")?;
 
     let sources = session.into_sources()
         .context("failed to split session into sources")?;
 
-    let t0    = Instant::now();
     let stats = loader
         .load_parallel(sources)
         .await
         .context("load failed")?;
 
-    let elapsed = t0.elapsed();
-    eprintln!("\nDone.");
-    eprintln!("  keys written    : {}", stats.n_keys);
-    eprintln!("  data bytes      : {}", human_bytes(stats.data_bytes));
-    eprintln!("  scatter         : {:.1}s", stats.scatter_duration.as_secs_f64());
-    eprintln!("  index build     : {:.1}s", stats.index_duration.as_secs_f64());
-    eprintln!("  total           : {:.1}s", elapsed.as_secs_f64());
-    if elapsed.as_secs_f64() > 0.0 {
-        let throughput = stats.n_keys as f64 / elapsed.as_secs_f64();
-        eprintln!("  throughput      : {:.0} keys/s", throughput);
-    }
+    info!(
+        n_keys           = stats.n_keys,
+        data_bytes       = stats.data_bytes,
+        scatter_secs     = stats.scatter_duration.as_secs_f64(),
+        index_secs       = stats.index_duration.as_secs_f64(),
+        "load complete",
+    );
 
     Ok(())
 }
@@ -227,7 +235,6 @@ async fn run_bq(
 /// `(billing_project, full_resource_name)`.
 fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, String)> {
     let (project, resource) = if table.starts_with("projects/") {
-        // Already a resource name.
         let project = table
             .split('/')
             .nth(1)
@@ -235,7 +242,6 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
             .to_string();
         (project, table.to_string())
     } else {
-        // Dotted notation: project.dataset.table
         let parts: Vec<&str> = table.splitn(3, '.').collect();
         if parts.len() != 3 {
             bail!("--table must be in dotted notation project.dataset.table or full resource name projects/P/datasets/D/tables/T");
@@ -252,18 +258,7 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
 }
 
 fn make_progress_fn() -> Arc<dyn Fn(u64, u64) + Send + Sync> {
-    Arc::new(|keys, bytes| {
-        eprintln!("  progress: {} keys  {}  written", keys, human_bytes(bytes));
+    Arc::new(|n_keys, data_bytes| {
+        debug!(n_keys, data_bytes, "scatter progress");
     })
-}
-
-fn human_bytes(b: u64) -> String {
-    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = b as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < UNITS.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", UNITS[i]) }
 }

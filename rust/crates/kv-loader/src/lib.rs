@@ -223,7 +223,7 @@ impl SnapshotLoader {
         let scatter_start = Instant::now();
         let (scatter_stats, scatter_duration) =
             if let Some(stats) = check_scatter_done(&self.root, layout).await? {
-                log::info!("scatter already complete ({} keys), skipping", stats.n_keys);
+                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
                 (stats, Duration::ZERO)
             } else {
                 let stats = self.scatter_sources(layout, sources.into_iter(), scatter_start).await?;
@@ -243,7 +243,7 @@ impl SnapshotLoader {
         let scatter_start = Instant::now();
         let (scatter_stats, scatter_duration) =
             if let Some(stats) = check_scatter_done(&self.root, layout).await? {
-                log::info!("scatter already complete ({} keys), skipping", stats.n_keys);
+                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
                 (stats, Duration::ZERO)
             } else {
                 let phase = ScatterPhase::new(

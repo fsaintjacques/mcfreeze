@@ -7,7 +7,7 @@ edition = "2021"
 adbc = ["dep:arrow"]
 
 [dependencies]
-log          = "0.4"
+tracing      = "0.1"
 hdrhistogram = "7"
 kv-format  = { path = "../kv-format" }
 bytemuck   = { version = "1", features = ["derive"] }
