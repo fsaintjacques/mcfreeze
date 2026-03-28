@@ -7,9 +7,14 @@ edition = "2021"
 name = "kv-load"
 path = "src/main.rs"
 
+[[bin]]
+name = "kv-get"
+path = "src/get.rs"
+
 [dependencies]
-kv-loader = { path = "../kv-loader" }
-kv-bq     = { path = "../kv-bq" }
+kv-loader  = { path = "../kv-loader" }
+kv-bq      = { path = "../kv-bq" }
+kv-format  = { path = "../kv-format" }
 clap      = { version = "4", features = ["derive"] }
 tokio     = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow    = "1"

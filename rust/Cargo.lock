@@ -1337,6 +1337,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kv-bq",
+ "kv-format",
  "kv-loader",
  "rustls",
  "tokio",
