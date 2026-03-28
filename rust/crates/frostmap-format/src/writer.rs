@@ -6,7 +6,7 @@ use chrono::Utc;
 use crate::{
     data::AlignedWriter,
     index::{self, IndexHeader, RawEntry, fingerprint},
-    meta::{FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, PSL_BITS, SIZE_BITS, Layout, Meta, partition_dir},
+    meta::{FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta, partition_dir},
     Result,
 };
 
@@ -124,7 +124,6 @@ impl SnapshotWriter {
             hash_algorithm: HASH_ALGORITHM.to_string(),
             offset_bits:    OFFSET_BITS,
             size_bits:      SIZE_BITS,
-            psl_bits:       PSL_BITS,
             n_keys:         n_keys_total,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             scatter:        None,
@@ -211,7 +210,6 @@ mod tests {
         assert_eq!(meta.n_keys,         1);
         assert_eq!(meta.offset_bits,    OFFSET_BITS);
         assert_eq!(meta.size_bits,      SIZE_BITS);
-        assert_eq!(meta.psl_bits,       PSL_BITS);
     }
 
     #[test]

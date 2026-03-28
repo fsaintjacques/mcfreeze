@@ -6,23 +6,18 @@ use crate::{Error, Result};
 // Format-wide constants
 // ---------------------------------------------------------------------------
 
-pub const FORMAT_VERSION: u32   = 1;
+pub const FORMAT_VERSION: u32   = 2;
 pub const HASH_ALGORITHM: &str  = "xxhash64";
 
 /// Bits allocated to the aligned offset in the `loc` field.
-/// Max per-partition addressable space: 2^OFFSET_BITS × 64 bytes = 1 TiB.
-pub const OFFSET_BITS: u8 = 34;
+/// Max per-partition addressable space: 2^37 × 64 bytes = 8 TiB.
+pub const OFFSET_BITS: u8 = 37;
 
-/// Bits allocated to value size. Max value: 2^23 - 1 = 8 MiB - 1 bytes.
-pub const SIZE_BITS: u8 = 23;
+/// Bits allocated to value size. Max value: 2^27 - 1 = 128 MiB - 1 bytes.
+pub const SIZE_BITS: u8 = 27;
 
-/// Bits allocated to the probe sequence length. Max PSL: 127.
-/// Robin Hood hashing at 95% fill rate peaks well below 50 in practice,
-/// so 127 provides ~2.5× safety margin while freeing one bit for `SIZE_BITS`.
-pub const PSL_BITS: u8 = 7;
-
-// Sanity check: the three fields must exactly fill a u64.
-const _: () = assert!(OFFSET_BITS as u32 + SIZE_BITS as u32 + PSL_BITS as u32 == 64);
+// Sanity check: the two fields must exactly fill a u64.
+const _: () = assert!(OFFSET_BITS as u32 + SIZE_BITS as u32 == 64);
 
 /// Value alignment in bytes. Every value in `data.bin` starts at a multiple of this.
 pub const VALUE_ALIGNMENT: u64 = 64;
@@ -38,8 +33,8 @@ pub const FILL_RATE: f64 = 0.95;
 
 /// Partition-count-dependent parameters derived from `n_partitions`.
 ///
-/// The bit widths in `loc` are fixed ([`OFFSET_BITS`], [`SIZE_BITS`],
-/// [`PSL_BITS`]). `Layout` provides the derived masks and the routing helper.
+/// The bit widths in `loc` are fixed ([`OFFSET_BITS`], [`SIZE_BITS`]).
+/// `Layout` provides the derived masks and the routing helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
     pub n_partitions: u32,
@@ -102,7 +97,6 @@ pub struct Meta {
     pub hash_algorithm:  String,
     pub offset_bits:     u8,
     pub size_bits:       u8,
-    pub psl_bits:        u8,
     pub n_keys:          u64,
     pub created_at:      String,
     /// Embedded contents of `scatter.done` (opaque to kv-format).
@@ -117,14 +111,10 @@ impl Meta {
     /// Validate the stored bit widths against the compiled-in constants and
     /// return the derived [`Layout`].
     pub fn layout(&self) -> Result<Layout> {
-        if self.offset_bits != OFFSET_BITS
-            || self.size_bits != SIZE_BITS
-            || self.psl_bits  != PSL_BITS
-        {
+        if self.offset_bits != OFFSET_BITS || self.size_bits != SIZE_BITS {
             return Err(Error::LayoutMismatch {
                 offset_bits: self.offset_bits,
                 size_bits:   self.size_bits,
-                psl_bits:    self.psl_bits,
             });
         }
         Layout::new(self.n_partitions)
@@ -141,7 +131,7 @@ mod tests {
 
     #[test]
     fn bit_fields_sum_to_64() {
-        assert_eq!(OFFSET_BITS as u32 + SIZE_BITS as u32 + PSL_BITS as u32, 64);
+        assert_eq!(OFFSET_BITS as u32 + SIZE_BITS as u32, 64);
     }
 
     #[test]
@@ -189,7 +179,6 @@ mod tests {
             hash_algorithm: HASH_ALGORITHM.to_string(),
             offset_bits:    OFFSET_BITS,
             size_bits:      SIZE_BITS,
-            psl_bits:       PSL_BITS,
             n_keys:         0,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
             scatter:        None,
@@ -207,7 +196,6 @@ mod tests {
             hash_algorithm: HASH_ALGORITHM.to_string(),
             offset_bits:    OFFSET_BITS + 1, // wrong
             size_bits:      SIZE_BITS,
-            psl_bits:       PSL_BITS,
             n_keys:         0,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
             scatter:        None,

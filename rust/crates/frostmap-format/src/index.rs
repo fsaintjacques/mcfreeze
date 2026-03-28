@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh64::xxh64;
 
 use crate::{
-    meta::{FILL_RATE, OFFSET_BITS, PSL_BITS, SIZE_BITS, VALUE_ALIGNMENT},
+    meta::{FILL_RATE, OFFSET_BITS, SIZE_BITS, VALUE_ALIGNMENT},
     Error, Result,
 };
 
@@ -10,13 +10,11 @@ use crate::{
 // Constants derived from bit-field widths
 // ---------------------------------------------------------------------------
 
-const OFFSET_SHIFT: u8 = SIZE_BITS + PSL_BITS; // 30 — bits [63:30]
-const SIZE_SHIFT:   u8 = PSL_BITS;             //  7 — bits [29:7]
-const SIZE_MASK:   u64 = (1u64 << SIZE_BITS) - 1; // 0x7FFFFF
-const PSL_MASK:    u64 = (1u64 << PSL_BITS)  - 1; // 0x7F
+const OFFSET_SHIFT: u8 = SIZE_BITS;                 // 27 — bits [63:27]
+const SIZE_MASK:   u64 = (1u64 << SIZE_BITS) - 1;   // 0x7FF_FFFF
 const MAX_OFFSET:  u64 = (1u64 << OFFSET_BITS) - 1;
-const MAX_SIZE:    u32 = (1u32 << SIZE_BITS)   - 1; // 8 MiB - 1
-const MAX_PSL:      u8 = (1u8  << PSL_BITS)   - 1; // 127
+const MAX_SIZE:    u32 = (1u32 << SIZE_BITS)   - 1;  // 128 MiB - 1
+const MAX_PSL:      u8 = u8::MAX;
 
 pub const INDEX_MAGIC: [u8; 8] = *b"KVFXIDX\n";
 pub const INDEX_HEADER_SIZE: usize = 64;
@@ -43,12 +41,11 @@ pub fn fingerprint(key: &[u8]) -> u64 {
 ///
 /// Two fields occupy one `u64` each, giving 4 buckets per 64-byte cache line.
 ///
-/// `loc` packs three sub-fields (MSB → LSB):
+/// `loc` packs two sub-fields (MSB → LSB):
 ///
 /// ```text
-/// bits [63:30]  aligned_offset  (OFFSET_BITS = 34)  in VALUE_ALIGNMENT units
-/// bits [29: 8]  size            (SIZE_BITS   = 22)  in bytes
-/// bits [ 7: 0]  psl             (PSL_BITS    =  8)  probe sequence length
+/// bits [63:27]  aligned_offset  (OFFSET_BITS = 37)  in VALUE_ALIGNMENT units
+/// bits [26: 0]  size            (SIZE_BITS   = 27)  in bytes
 /// ```
 ///
 /// A bucket with `fingerprint == 0` is empty.
@@ -65,10 +62,10 @@ impl Bucket {
         self.fingerprint == 0
     }
 
-    /// Encode `(aligned_offset, size, psl)` into the `loc` field.
+    /// Encode `(aligned_offset, size)` into the `loc` field.
     #[inline]
-    pub fn encode_loc(aligned_offset: u64, size: u32, psl: u8) -> u64 {
-        (aligned_offset << OFFSET_SHIFT) | ((size as u64) << SIZE_SHIFT) | (psl as u64)
+    pub fn encode_loc(aligned_offset: u64, size: u32) -> u64 {
+        (aligned_offset << OFFSET_SHIFT) | (size as u64)
     }
 
     /// Byte offset in `data.bin` (`aligned_offset × VALUE_ALIGNMENT`).
@@ -80,13 +77,7 @@ impl Bucket {
     /// Value size in bytes.
     #[inline]
     pub fn size(self) -> u32 {
-        ((self.loc >> SIZE_SHIFT) & SIZE_MASK) as u32
-    }
-
-    /// Probe sequence length stored in this bucket.
-    #[inline]
-    pub fn psl(self) -> u8 {
-        (self.loc & PSL_MASK) as u8
+        (self.loc & SIZE_MASK) as u32
     }
 }
 
@@ -161,6 +152,9 @@ impl RawEntry {
 /// Starts at `ceil(n_keys / FILL_RATE)` buckets. On PSL overflow, retries
 /// with a 1.5× larger table until insertion succeeds.
 ///
+/// PSL is tracked in a temporary columnar `Vec<u8>` during construction and
+/// discarded once the table is built — it is not stored in the on-disk format.
+///
 /// Returns `(table, retries)` where `retries` is the number of times the
 /// table was grown due to PSL overflow (0 = no overflow occurred).
 pub fn build(entries: &[RawEntry]) -> Result<(Vec<Bucket>, usize)> {
@@ -168,9 +162,10 @@ pub fn build(entries: &[RawEntry]) -> Result<(Vec<Bucket>, usize)> {
     let mut retries   = 0usize;
     loop {
         let mut table    = vec![Bucket::default(); n_buckets];
+        let mut psls     = vec![0u8; n_buckets];
         let mut overflow = false;
         for &e in entries {
-            if let Err(Error::PslOverflow { .. }) = insert(&mut table, e) {
+            if let Err(Error::PslOverflow { .. }) = insert(&mut table, &mut psls, e) {
                 overflow = true;
                 break;
             }
@@ -199,9 +194,12 @@ pub fn bucket_count(n_keys: usize) -> usize {
 
 /// Insert one entry into `table` using Robin Hood displacement.
 ///
+/// `psls` is a parallel columnar array of probe sequence lengths, one `u8`
+/// per bucket. It is allocated by `build()` and discarded after construction.
+///
 /// Returns `Err(Error::PslOverflow)` if the probe sequence exceeds `MAX_PSL`,
 /// which indicates the table is full or the fill rate is too high.
-pub fn insert(table: &mut [Bucket], mut entry: RawEntry) -> Result<()> {
+pub fn insert(table: &mut [Bucket], psls: &mut [u8], mut entry: RawEntry) -> Result<()> {
     let n   = table.len();
     let mut pos = entry.fingerprint as usize % n;
     let mut psl = 0u8;
@@ -211,15 +209,18 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) -> Result<()> {
 
         if slot.is_empty() {
             table[pos].fingerprint = entry.fingerprint;
-            table[pos].loc         = Bucket::encode_loc(entry.aligned_offset, entry.size, psl);
+            table[pos].loc         = Bucket::encode_loc(entry.aligned_offset, entry.size);
+            psls[pos]              = psl;
             return Ok(());
         }
 
         // Robin Hood: evict the "rich" occupant (lower PSL) in favour of
         // the "poor" incoming entry (higher PSL).
-        if slot.psl() < psl {
+        if psls[pos] < psl {
+            let evicted_psl        = psls[pos];
             table[pos].fingerprint = entry.fingerprint;
-            table[pos].loc         = Bucket::encode_loc(entry.aligned_offset, entry.size, psl);
+            table[pos].loc         = Bucket::encode_loc(entry.aligned_offset, entry.size);
+            psls[pos]              = psl;
 
             // Continue reinserting the evicted entry.
             entry = RawEntry {
@@ -227,7 +228,7 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) -> Result<()> {
                 aligned_offset: slot.loc >> OFFSET_SHIFT,
                 size:           slot.size(),
             };
-            psl = slot.psl();
+            psl = evicted_psl;
         }
 
         pos = (pos + 1) % n;
@@ -254,16 +255,13 @@ fn n_occupied(table: &[Bucket]) -> usize {
 ///
 /// Returns `(byte_offset, size)` on a hit, or `None` on a miss.
 ///
-/// The Robin Hood invariant allows early termination: if the stored PSL at the
-/// current position is less than the expected PSL, the key cannot exist further
-/// along the probe sequence.
+/// Terminates at the first empty bucket (fingerprint == 0).
 pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
     let n = table.len();
     if n == 0 {
         return None;
     }
-    let mut pos      = fingerprint as usize % n;
-    let mut expected = 0u8;
+    let mut pos = fingerprint as usize % n;
 
     loop {
         let bucket = table[pos];
@@ -272,16 +270,11 @@ pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
             return None;
         }
 
-        if bucket.psl() < expected {
-            return None; // Robin Hood invariant: key is absent.
-        }
-
         if bucket.fingerprint == fingerprint {
             return Some((bucket.byte_offset(), bucket.size()));
         }
 
-        pos      = (pos + 1) % n;
-        expected = expected.saturating_add(1);
+        pos = (pos + 1) % n;
     }
 }
 
@@ -309,18 +302,17 @@ mod tests {
 
     #[test]
     fn bucket_encode_decode_roundtrip() {
-        let cases: &[(u64, u32, u8)] = &[
-            (0, 0, 0),
-            (1, 100, 2),
-            (MAX_OFFSET, MAX_SIZE, MAX_PSL),
-            ((1 << 17), 4096, 42),
+        let cases: &[(u64, u32)] = &[
+            (0, 0),
+            (1, 100),
+            (MAX_OFFSET, MAX_SIZE),
+            (1 << 17, 4096),
         ];
-        for &(off, sz, psl) in cases {
-            let loc = Bucket::encode_loc(off, sz, psl);
+        for &(off, sz) in cases {
+            let loc = Bucket::encode_loc(off, sz);
             let b = Bucket { fingerprint: 1, loc };
             assert_eq!(b.byte_offset(), off << 6, "byte_offset for off={off}");
             assert_eq!(b.size(),        sz,       "size for sz={sz}");
-            assert_eq!(b.psl(),         psl,      "psl for psl={psl}");
         }
     }
 

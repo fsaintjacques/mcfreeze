@@ -42,12 +42,11 @@ root. Partition directory names are zero-padded to the width of `N-1`
 
 ```json
 {
-  "format_version":  1,
+  "format_version":  2,
   "n_partitions":    64,
   "hash_algorithm":  "xxhash64",
-  "offset_bits":     34,
-  "size_bits":       23,
-  "psl_bits":        7,
+  "offset_bits":     37,
+  "size_bits":       27,
   "n_keys":          1000000000,
   "created_at":      "2026-03-27T00:00:00Z",
   "scatter":         { ... },
@@ -60,15 +59,14 @@ root. Partition directory names are zero-padded to the width of `N-1`
 | `format_version` | Increment on incompatible format changes |
 | `n_partitions` | Number of partitions N; must be a power of two |
 | `hash_algorithm` | Key hash function; currently only `xxhash64` |
-| `offset_bits` | Bits allocated to the aligned offset in the `loc` field; equals `40 - log2(N)` |
-| `size_bits` | Bits allocated to the value size in the `loc` field; currently `23` (max 8 MiB) |
-| `psl_bits` | Bits allocated to the probe sequence length; currently `7` (max 127); Robin Hood at 95% fill peaks well below 50 in practice |
+| `offset_bits` | Bits allocated to the aligned offset in the `loc` field; currently `37` (max 8 TiB per partition) |
+| `size_bits` | Bits allocated to the value size in the `loc` field; currently `27` (max 128 MiB) |
 | `n_keys` | Total key count across all partitions |
 | `created_at` | ISO 8601 UTC timestamp |
 | `scatter` | _(optional)_ Embedded contents of `scatter.done`; opaque to the format layer |
 | `index` | _(optional)_ Embedded contents of `index.done`; opaque to the format layer |
 
-`offset_bits + size_bits + psl_bits` must equal 64. There are no spare bits.
+`offset_bits + size_bits` must equal 64. There are no spare bits.
 
 ---
 
@@ -94,7 +92,7 @@ Buckets immediately follow the 64-byte header. Each bucket is **16 bytes**:
 | Bytes | Field | Description |
 |---|---|---|
 | 0–7 | `fingerprint` | `xxhash64(key)`; zero indicates an empty slot |
-| 8–15 | `loc` | Packed: aligned offset, value size, and PSL |
+| 8–15 | `loc` | Packed: aligned offset and value size |
 
 ```
 n_buckets = ceil(n_keys / 0.95)
@@ -111,28 +109,26 @@ Bit widths are taken from `meta.json`. Fields are packed from the most significa
 with no spare bits:
 
 ```
- 63                      64-offset_bits       psl_bits-1       0
- ┌──────────────────────┬───────────────────┬──────────────────┐
- │  aligned_offset      │       size        │       psl        │
- │  (offset_bits wide)  │  (size_bits wide) │  (psl_bits wide) │
- └──────────────────────┴───────────────────┴──────────────────┘
+ 63                          size_bits-1       0
+ ┌──────────────────────────┬──────────────────┐
+ │      aligned_offset      │       size       │
+ │    (offset_bits wide)    │  (size_bits wide) │
+ └──────────────────────────┴──────────────────┘
 ```
 
-**Concrete layout for N=64** (`offset_bits`=34, `size_bits`=23, `psl_bits`=7):
+**Concrete layout** (`offset_bits`=37, `size_bits`=27):
 
 ```
-bits 63..30  aligned_offset  (34 bits)  ← in 64-byte units
-bits 29..7   size            (23 bits)  ← value size in bytes, max 8 MiB
-bits  6..0   psl             (7 bits)   ← probe sequence length, max 127
+bits 63..27  aligned_offset  (37 bits)  ← in 64-byte units, max 8 TiB
+bits 26..0   size            (27 bits)  ← value size in bytes, max 128 MiB
 ```
 
 Decode:
 
 ```
-aligned_offset = loc >> (size_bits + psl_bits)          →  loc >> 30
-byte_offset    = aligned_offset << 6                    (multiply by 64)
-size           = (loc >> psl_bits) & ((1 << size_bits) - 1)
-psl            = loc & ((1 << psl_bits) - 1)
+aligned_offset = loc >> size_bits          →  loc >> 27
+byte_offset    = aligned_offset << 6       (multiply by 64)
+size           = loc & ((1 << size_bits) - 1)
 ```
 
 ### Empty Bucket Sentinel
@@ -185,7 +181,10 @@ Partitions are independent; all N partition writers can run concurrently.
 For each partition independently:
 
 1. Allocate `n_buckets = ceil(n_keys / 0.95)` buckets, all zeroed (empty).
-2. Insert each `(fingerprint, aligned_offset, size)` tuple using Robin Hood insertion:
+2. Allocate a parallel `psl[n_buckets]` array of `u8`, all zeroed. This array
+   tracks probe sequence lengths during construction only; it is never written
+   to disk.
+3. Insert each `(fingerprint, aligned_offset, size)` tuple using Robin Hood insertion:
 
 ```
 home = fingerprint % n_buckets
@@ -194,17 +193,20 @@ psl  = 0
 
 loop:
   if bucket[pos] is empty:
-    write (fingerprint, aligned_offset, size, psl) → bucket[pos]
+    write (fingerprint, aligned_offset, size) → bucket[pos]
+    psl[pos] = psl
     break
 
-  if bucket[pos].psl < psl:          // robin hood: evict the "rich"
+  if psl[pos] < psl:                 // robin hood: evict the "rich"
     swap current entry with bucket[pos]
+    swap psl[pos] with psl
 
   pos = (pos + 1) % n_buckets
   psl++
 ```
 
-3. Write the 64-byte header followed by the bucket array.
+4. Discard the `psl` array.
+5. Write the 64-byte header followed by the bucket array.
 
 ### Step 3 — Write meta.json
 
@@ -235,7 +237,6 @@ lookup(key) → value | NOT_FOUND:
   h          = xxhash64(key)
   partition  = h & (N - 1)
   pos        = h % n_buckets[partition]
-  expected   = 0                          // expected PSL
 
   loop:
     bucket = index[partition][pos]
@@ -243,16 +244,12 @@ lookup(key) → value | NOT_FOUND:
     if bucket.fingerprint == 0:           // empty slot
       return NOT_FOUND
 
-    if bucket.psl < expected:             // robin hood invariant: key cannot exist further
-      return NOT_FOUND
-
     if bucket.fingerprint == h:
-      offset = (bucket.loc >> 30) << 6   // decode byte_offset for N=64
-      size   = (bucket.loc >> 7) & 0x7FFFFF
+      offset = (bucket.loc >> 27) << 6   // decode byte_offset
+      size   = bucket.loc & 0x7FFFFFF
       return pread(data_fd[partition], size, offset)
 
-    pos      = (pos + 1) % n_buckets[partition]
-    expected = expected + 1
+    pos = (pos + 1) % n_buckets[partition]
 ```
 
 ### Multi-Key Lookup (MGET)
