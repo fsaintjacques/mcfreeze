@@ -25,6 +25,9 @@ pub enum Error {
     #[error("format version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u32, got: u32 },
 
+    #[error("PSL overflow at {psl}: hash table is full (n_keys={n_keys}, n_buckets={n_buckets}); reduce fill rate or increase PSL_BITS")]
+    PslOverflow { psl: u8, n_keys: usize, n_buckets: usize },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

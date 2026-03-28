@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
+use hdrhistogram::Histogram;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -27,6 +29,100 @@ type PartitionBatch = Vec<(u64, Vec<u8>)>;
 pub struct ScatterStats {
     pub n_keys:     u64,
     pub data_bytes: u64,
+}
+
+// ---------------------------------------------------------------------------
+// scatter.done JSON
+// ---------------------------------------------------------------------------
+
+/// Upper bounds (inclusive, bytes) for Prometheus-style histogram buckets.
+/// Powers of two from 64 B (VALUE_ALIGNMENT) up to 8 MiB (MAX_SIZE).
+pub const SIZE_BUCKETS: &[u64] = &[
+    64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192,
+    16_384, 32_768, 65_536, 131_072, 262_144, 524_288,
+    1_048_576, 2_097_152, 4_194_304, 8_388_607,
+];
+
+/// One bucket in a Prometheus-style cumulative histogram.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SizeBucket {
+    /// Upper bound in bytes (`le` in Prometheus notation).
+    pub le:    u64,
+    /// Cumulative count of values with size ≤ `le`.
+    pub count: u64,
+}
+
+/// Value-size distribution stored in `scatter.done`.
+///
+/// Mirrors the Prometheus histogram exposition format:
+/// cumulative bucket counts, plus summary fields (`count`, `sum`, `min`, `max`).
+/// `sample_keys` may be less than `count` on the fallback path when some
+/// partitions were already indexed and their spill files are gone.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ValueSizeHistogram {
+    pub count:       u64,
+    pub sum:         u64,
+    pub min:         u64,
+    pub max:         u64,
+    pub mean:        f64,
+    pub sample_keys: u64,
+    pub buckets:     Vec<SizeBucket>,
+}
+
+impl ValueSizeHistogram {
+    pub fn from_histogram(hist: &Histogram<u64>, sum: u64, sample_keys: u64) -> Self {
+        let mut cumulative = 0u64;
+        let mut recorded   = hist.iter_recorded().peekable();
+        let mut buckets    = Vec::with_capacity(SIZE_BUCKETS.len());
+
+        for &le in SIZE_BUCKETS {
+            while recorded.peek().map_or(false, |v| v.value_iterated_to() <= le) {
+                cumulative += recorded.next().unwrap().count_at_value();
+            }
+            buckets.push(SizeBucket { le, count: cumulative });
+        }
+
+        ValueSizeHistogram {
+            count: hist.len(),
+            sum,
+            min:  if hist.is_empty() { 0 } else { hist.min() },
+            max:  if hist.is_empty() { 0 } else { hist.max() },
+            mean: hist.mean(),
+            sample_keys,
+            buckets,
+        }
+    }
+}
+
+/// Per-partition stats stored in `scatter.done`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PartitionDone {
+    pub n_keys:      u64,
+    /// `None` when size data was unavailable (already-indexed partition on the fallback path).
+    pub value_sizes: Option<ValueSizeHistogram>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ScatterDone {
+    pub n_keys:       u64,
+    pub n_partitions: u32,
+    /// Aggregate value-size histogram across all partitions.
+    pub value_sizes:  Option<ValueSizeHistogram>,
+    /// Per-partition stats, indexed by partition number.
+    pub partitions:   Vec<PartitionDone>,
+}
+
+/// Create a fresh value-size histogram covering 1 B … 8 MiB with 3 sig-figs.
+pub fn new_size_histogram() -> Histogram<u64> {
+    Histogram::<u64>::new_with_bounds(1, 8_388_607, 3)
+        .expect("histogram bounds are valid constants")
+}
+
+// Internal: what each partition_writer task returns.
+struct PartitionStats {
+    n_keys:    u64,
+    sum_bytes: u64,
+    histogram: Histogram<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -100,9 +196,10 @@ impl Fanout {
 /// When all producers are done, call [`finish`] with the completed fanouts
 /// to aggregate stats, drain the channels, and join the writers.
 pub struct ScatterPhase {
+    root:    std::path::PathBuf,
     layout:  Layout,
     senders: Vec<mpsc::Sender<PartitionBatch>>,
-    handles: Vec<JoinHandle<Result<(), LoaderError>>>,
+    handles: Vec<JoinHandle<Result<PartitionStats, LoaderError>>>,
 }
 
 impl ScatterPhase {
@@ -132,7 +229,7 @@ impl ScatterPhase {
             handles.push(handle);
         }
 
-        Ok(Self { layout, senders, handles })
+        Ok(Self { root: root.to_path_buf(), layout, senders, handles })
     }
 
     /// Create a [`Fanout`] for one concurrent producer.
@@ -156,17 +253,46 @@ impl ScatterPhase {
     /// `fanouts` must include every fanout created by this phase; dropping
     /// them here (together with the phase's own sender copies) closes the
     /// channels so writers can flush and exit.
+    ///
+    /// On success writes `<root>/scatter.done` (JSON) containing per-partition
+    /// key counts and value-size quantiles, so a subsequent run can skip the
+    /// scatter phase entirely.
     pub async fn finish(self, fanouts: Vec<Fanout>) -> Result<ScatterStats, LoaderError> {
-        let n_keys     = fanouts.iter().map(|f| f.n_keys).sum();
         let data_bytes = fanouts.iter().map(|f| f.data_bytes).sum();
 
         // Close all sender ends so each writer's blocking_recv() returns None.
         drop(fanouts);
         drop(self.senders);
 
+        let mut partition_stats: Vec<PartitionStats> = Vec::with_capacity(self.handles.len());
         for handle in self.handles {
-            handle.await??;
+            partition_stats.push(handle.await??);
         }
+
+        let mut merged    = new_size_histogram();
+        let mut total_sum = 0u64;
+        let mut partitions: Vec<PartitionDone> = Vec::with_capacity(partition_stats.len());
+
+        for ps in partition_stats {
+            merged.add(&ps.histogram)
+                .expect("all partition histograms share the same bounds");
+            total_sum += ps.sum_bytes;
+            let part_sizes = ValueSizeHistogram::from_histogram(&ps.histogram, ps.sum_bytes, ps.n_keys);
+            partitions.push(PartitionDone { n_keys: ps.n_keys, value_sizes: Some(part_sizes) });
+        }
+
+        let n_keys      = partitions.iter().map(|p| p.n_keys).sum();
+        let value_sizes = Some(ValueSizeHistogram::from_histogram(&merged, total_sum, n_keys));
+
+        let done = ScatterDone {
+            n_keys,
+            n_partitions: self.layout.n_partitions,
+            partitions,
+            value_sizes,
+        };
+        let json = serde_json::to_string_pretty(&done)
+            .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        tokio::fs::write(self.root.join("scatter.done"), json).await?;
 
         Ok(ScatterStats { n_keys, data_bytes })
     }
@@ -181,15 +307,22 @@ fn partition_writer(
     mut rx:          mpsc::Receiver<PartitionBatch>,
     data_buf_bytes:  usize,
     spill_buf_bytes: usize,
-) -> Result<(), LoaderError> {
+) -> Result<PartitionStats, LoaderError> {
     let mut data  = AlignedWriter::new(BufWriter::with_capacity(
         data_buf_bytes,
         File::create(dir.join("data.bin"))?,
     ));
-    let mut spill = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
+    let mut spill     = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
+    let mut histogram = new_size_histogram();
+    let mut sum_bytes = 0u64;
+    let mut n_keys    = 0u64;
 
     while let Some(batch) = rx.blocking_recv() {
         for (fp, value) in batch {
+            let size = value.len() as u64;
+            // record(0) is invalid; empty values map to 1 for histogram purposes.
+            histogram.record(size.max(1)).unwrap_or_default();
+            sum_bytes += size;
             let aligned_offset = data.write_value(&value)?;
             spill.push(SpillRecord {
                 fingerprint:    fp,
@@ -197,12 +330,13 @@ fn partition_writer(
                 size:           value.len() as u32,
                 _pad:           0,
             })?;
+            n_keys += 1;
         }
     }
 
     data.finish()?;
     spill.finish()?;
-    Ok(())
+    Ok(PartitionStats { n_keys, sum_bytes, histogram })
 }
 
 // ---------------------------------------------------------------------------

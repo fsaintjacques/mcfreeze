@@ -19,7 +19,92 @@ use kv_format::meta::{
 };
 
 use build::IndexBuildPhase;
-use scatter::{Fanout, ScatterPhase};
+use scatter::{Fanout, PartitionDone, ScatterDone, ScatterPhase, ScatterStats, ValueSizeHistogram, new_size_histogram};
+use spill::SpillReader;
+
+// ---------------------------------------------------------------------------
+// Scatter completion detection
+// ---------------------------------------------------------------------------
+
+/// Check whether the scatter phase has already completed for `root`.
+///
+/// Two paths:
+/// 1. `scatter.done` exists and parses as JSON  →  fast path.
+/// 2. Fallback (no sentinel): every partition must have `data.bin` plus either
+///    `spill.bin` or `index.idx`.  Key counts and any available value sizes are
+///    collected from those files, a `scatter.done` JSON is written, and scatter
+///    is skipped.
+///
+/// Returns `Some(ScatterStats)` when scatter can be skipped, `None` otherwise.
+async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<ScatterStats>, LoaderError> {
+    let sentinel = root.join("scatter.done");
+
+    // Fast path: sentinel already written.
+    if sentinel.exists() {
+        let json  = tokio::fs::read_to_string(&sentinel).await?;
+        let done: ScatterDone = serde_json::from_str(&json)
+            .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        return Ok(Some(ScatterStats { n_keys: done.n_keys, data_bytes: 0 }));
+    }
+
+    // Fallback: derive completion from per-partition files.
+    let n     = layout.n_partitions as usize;
+    let width = format!("{}", layout.n_partitions - 1).len();
+    let mut partitions   = Vec::with_capacity(n);
+    let mut merged       = new_size_histogram();
+    let mut total_sum    = 0u64;
+
+    for i in 0..n {
+        let dir        = root.join(format!("part-{:0>width$}", i, width = width));
+        let data_path  = dir.join("data.bin");
+        let spill_path = dir.join("spill.bin");
+        let idx_path   = dir.join("index.idx");
+
+        if !data_path.exists() {
+            return Ok(None);
+        }
+
+        if spill_path.exists() {
+            let reader       = SpillReader::open(&spill_path)?;
+            let n_part       = reader.count();
+            let mut part_hist = new_size_histogram();
+            let mut part_sum  = 0u64;
+            for rec in reader.records() {
+                let size = rec?.size as u64;
+                part_hist.record(size.max(1)).unwrap_or_default();
+                part_sum += size;
+            }
+            merged.add(&part_hist).expect("compatible bounds");
+            total_sum += part_sum;
+            let vs = ValueSizeHistogram::from_histogram(&part_hist, part_sum, n_part);
+            partitions.push(PartitionDone { n_keys: n_part, value_sizes: Some(vs) });
+        } else if idx_path.exists() {
+            use std::io::Read;
+            let mut f   = std::fs::File::open(&idx_path)?;
+            let mut buf = [0u8; kv_format::index::INDEX_HEADER_SIZE];
+            f.read_exact(&mut buf)?;
+            let n_part = kv_format::index::IndexHeader::from_bytes(&buf)?.n_keys;
+            partitions.push(PartitionDone { n_keys: n_part, value_sizes: None });
+        } else {
+            return Ok(None);
+        }
+    }
+
+    let n_keys      = partitions.iter().map(|p| p.n_keys).sum();
+    let sample_keys = merged.len();
+    let value_sizes = if merged.is_empty() {
+        None
+    } else {
+        Some(ValueSizeHistogram::from_histogram(&merged, total_sum, sample_keys))
+    };
+
+    let done = ScatterDone { n_keys, n_partitions: layout.n_partitions, value_sizes, partitions };
+    let json = serde_json::to_string_pretty(&done)
+        .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+    tokio::fs::write(&sentinel, json).await?;
+
+    Ok(Some(ScatterStats { n_keys, data_bytes: 0 }))
+}
 
 // ---------------------------------------------------------------------------
 // LoaderConfig
@@ -126,8 +211,14 @@ impl SnapshotLoader {
         let layout = Layout::new(self.config.n_partitions)?;
 
         let scatter_start = Instant::now();
-        let scatter_stats = self.scatter_sources(layout, sources.into_iter()).await?;
-        let scatter_duration = scatter_start.elapsed();
+        let (scatter_stats, scatter_duration) =
+            if let Some(stats) = check_scatter_done(&self.root, layout).await? {
+                log::info!("scatter already complete ({} keys), skipping", stats.n_keys);
+                (stats, Duration::ZERO)
+            } else {
+                let stats = self.scatter_sources(layout, sources.into_iter()).await?;
+                (stats, scatter_start.elapsed())
+            };
 
         self.build_and_finalize(layout, scatter_stats, scatter_duration).await
     }
@@ -138,32 +229,39 @@ impl SnapshotLoader {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let layout = Layout::new(self.config.n_partitions)?;
-        let phase  = ScatterPhase::new(
-            &self.root, layout,
-            self.config.channel_capacity,
-            self.config.data_buf_bytes,
-            self.config.spill_buf_bytes,
-        )?;
 
-        let scatter_start    = Instant::now();
-        let mut fanout       = phase.fanout();
-        let progress_fn      = self.config.progress_fn.clone();
-        let interval         = self.config.progress_interval;
-        let mut last_reported = 0u64;
+        let scatter_start = Instant::now();
+        let (scatter_stats, scatter_duration) =
+            if let Some(stats) = check_scatter_done(&self.root, layout).await? {
+                log::info!("scatter already complete ({} keys), skipping", stats.n_keys);
+                (stats, Duration::ZERO)
+            } else {
+                let phase = ScatterPhase::new(
+                    &self.root, layout,
+                    self.config.channel_capacity,
+                    self.config.data_buf_bytes,
+                    self.config.spill_buf_bytes,
+                )?;
+                let mut fanout        = phase.fanout();
+                let progress_fn       = self.config.progress_fn.clone();
+                let interval          = self.config.progress_interval;
+                let mut last_reported = 0u64;
 
-        while let Some(batch) = source.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
-            fanout.scatter_batch(&batch).await?;
-            if let Some(ref cb) = progress_fn {
-                let (n, b) = fanout.counters();
-                if n - last_reported >= interval {
-                    cb(n, b);
-                    last_reported = n;
+                while let Some(batch) = source.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
+                    fanout.scatter_batch(&batch).await?;
+                    if let Some(ref cb) = progress_fn {
+                        let (n, b) = fanout.counters();
+                        if n - last_reported >= interval {
+                            cb(n, b);
+                            last_reported = n;
+                        }
+                    }
                 }
-            }
-        }
 
-        let scatter_stats    = phase.finish(vec![fanout]).await?;
-        let scatter_duration = scatter_start.elapsed();
+                let stats = phase.finish(vec![fanout]).await?;
+                (stats, scatter_start.elapsed())
+            };
+
         self.build_and_finalize(layout, scatter_stats, scatter_duration).await
     }
 

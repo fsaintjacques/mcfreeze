@@ -1,5 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh64::xxh64;
+use log::debug;
 
 use crate::{
     meta::{FILL_RATE, OFFSET_BITS, PSL_BITS, SIZE_BITS, VALUE_ALIGNMENT},
@@ -158,14 +159,38 @@ impl RawEntry {
 
 /// Allocate a hash table and insert all `entries` using Robin Hood hashing.
 ///
-/// Returns the bucket slice sized to `ceil(n_keys / FILL_RATE)`.
-pub fn build(entries: &[RawEntry]) -> Vec<Bucket> {
-    let n_buckets = bucket_count(entries.len());
-    let mut table = vec![Bucket::default(); n_buckets];
-    for &e in entries {
-        insert(&mut table, e);
+/// Starts at `ceil(n_keys / FILL_RATE)` buckets. On PSL overflow, retries
+/// with a 1.5× larger table until insertion succeeds.
+///
+/// Returns `(table, retries)` where `retries` is the number of times the
+/// table was grown due to PSL overflow (0 = no overflow occurred).
+pub fn build(entries: &[RawEntry]) -> Result<(Vec<Bucket>, usize)> {
+    let mut n_buckets = bucket_count(entries.len());
+    let mut retries   = 0usize;
+    loop {
+        let mut table    = vec![Bucket::default(); n_buckets];
+        let mut overflow = false;
+        for &e in entries {
+            if let Err(Error::PslOverflow { .. }) = insert(&mut table, e) {
+                overflow = true;
+                break;
+            }
+        }
+        if !overflow {
+            return Ok((table, retries));
+        }
+        let next = ((n_buckets as f64) * 1.5).ceil() as usize;
+        debug!(
+            "Robin Hood PSL overflow at {} buckets ({} keys, {:.0}% fill); \
+             growing to {} buckets",
+            n_buckets,
+            entries.len(),
+            entries.len() as f64 / n_buckets as f64 * 100.0,
+            next,
+        );
+        n_buckets = next;
+        retries  += 1;
     }
-    table
 }
 
 /// Compute the number of buckets for `n_keys` at the target fill rate.
@@ -175,10 +200,9 @@ pub fn bucket_count(n_keys: usize) -> usize {
 
 /// Insert one entry into `table` using Robin Hood displacement.
 ///
-/// # Panics
-/// Panics if the table is full (all buckets occupied). Callers must ensure the
-/// table is sized with sufficient headroom via [`bucket_count`].
-pub fn insert(table: &mut [Bucket], mut entry: RawEntry) {
+/// Returns `Err(Error::PslOverflow)` if the probe sequence exceeds `MAX_PSL`,
+/// which indicates the table is full or the fill rate is too high.
+pub fn insert(table: &mut [Bucket], mut entry: RawEntry) -> Result<()> {
     let n   = table.len();
     let mut pos = entry.fingerprint as usize % n;
     let mut psl = 0u8;
@@ -189,7 +213,7 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) {
         if slot.is_empty() {
             table[pos].fingerprint = entry.fingerprint;
             table[pos].loc         = Bucket::encode_loc(entry.aligned_offset, entry.size, psl);
-            return;
+            return Ok(());
         }
 
         // Robin Hood: evict the "rich" occupant (lower PSL) in favour of
@@ -208,9 +232,19 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) {
         }
 
         pos = (pos + 1) % n;
-        assert!(psl < MAX_PSL, "PSL overflow ({psl}): table is full or fill rate too high");
+        if psl == MAX_PSL {
+            return Err(Error::PslOverflow {
+                psl,
+                n_keys:    n_occupied(table),
+                n_buckets: n,
+            });
+        }
         psl += 1;
     }
+}
+
+fn n_occupied(table: &[Bucket]) -> usize {
+    table.iter().filter(|b| !b.is_empty()).count()
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +373,7 @@ mod tests {
             make_entry(b"foo",     128, 3),
             make_entry(b"bar",     192, 3),
         ];
-        let table = build(&entries);
+        let (table, _) = build(&entries).unwrap();
 
         for e in &entries {
             let result = probe(&table, e.fingerprint);
@@ -352,9 +386,9 @@ mod tests {
 
     #[test]
     fn probe_miss() {
-        let entries = vec![make_entry(b"hello", 0, 5)];
-        let table   = build(&entries);
-        let absent  = fingerprint(b"absent");
+        let entries    = vec![make_entry(b"hello", 0, 5)];
+        let (table, _) = build(&entries).unwrap();
+        let absent     = fingerprint(b"absent");
         assert_eq!(probe(&table, absent), None);
     }
 
@@ -369,7 +403,7 @@ mod tests {
             })
             .collect();
 
-        let table = build(&entries);
+        let (table, _) = build(&entries).unwrap();
 
         for e in &entries {
             assert!(

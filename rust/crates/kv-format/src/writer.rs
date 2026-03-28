@@ -59,9 +59,9 @@ impl PartitionWriter {
     pub fn finish(self) -> Result<u64> {
         self.data.finish()?;
 
-        let n_keys   = self.entries.len() as u64;
-        let table    = index::build(&self.entries);
-        let n_buckets = table.len() as u64;
+        let n_keys        = self.entries.len() as u64;
+        let (table, _)    = index::build(&self.entries)?;
+        let n_buckets     = table.len() as u64;
 
         let header = IndexHeader { n_buckets, n_keys };
         let mut idx = File::create(self.dir.join("index.idx"))?;

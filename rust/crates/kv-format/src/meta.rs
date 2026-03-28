@@ -28,6 +28,8 @@ const _: () = assert!(OFFSET_BITS as u32 + SIZE_BITS as u32 + PSL_BITS as u32 ==
 pub const VALUE_ALIGNMENT: u64 = 64;
 
 /// Target hash-table fill rate used during index construction.
+/// 0.95 keeps the table compact; `build()` retries with a 1.5× larger table
+/// on PSL overflow, so the fill rate only affects the common-case table size.
 pub const FILL_RATE: f64 = 0.95;
 
 // ---------------------------------------------------------------------------

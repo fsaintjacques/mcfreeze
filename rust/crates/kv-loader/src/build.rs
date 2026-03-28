@@ -3,10 +3,11 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use bytemuck::cast_slice;
+use log::info;
 use rayon::prelude::*;
 
 use kv_format::{
-    index::{Bucket, IndexHeader, RawEntry, bucket_count, insert},
+    index::{IndexHeader, RawEntry},
     meta::Layout,
 };
 
@@ -63,28 +64,61 @@ impl IndexBuildPhase {
 // ---------------------------------------------------------------------------
 
 /// Load `spill.bin`, build Robin Hood table, write `index.idx`.
-/// Streams spill records directly into the bucket table — no intermediate Vec.
+///
+/// Idempotent: if `index.idx` already exists (and `spill.bin` is absent) the
+/// partition was successfully indexed in a previous run — skip it and return
+/// the key count from the header.
+///
+/// To avoid leaving a partial index visible on failure, the file is written to
+/// `index.idx.tmp` and renamed to `index.idx` only after a successful flush.
+/// `spill.bin` is removed only after the rename succeeds.
 fn build_partition(dir: &Path) -> Result<u64, LoaderError> {
-    let spill = SpillReader::open(&dir.join("spill.bin"))?;
-    let n     = spill.count() as usize;
+    let idx_path   = dir.join("index.idx");
+    let spill_path = dir.join("spill.bin");
 
-    let n_buckets = bucket_count(n);
-    let mut table = vec![Bucket::default(); n_buckets];
-
-    for record in spill.records() {
-        let r     = record?;
-        let entry = RawEntry::new(r.fingerprint, r.aligned_offset, r.size)?;
-        insert(&mut table, entry);
+    // --- Skip if already indexed ---
+    if idx_path.exists() && !spill_path.exists() {
+        use std::io::Read;
+        let mut f   = File::open(&idx_path)?;
+        let mut buf = [0u8; kv_format::index::INDEX_HEADER_SIZE];
+        f.read_exact(&mut buf)?;
+        let hdr = IndexHeader::from_bytes(&buf)?;
+        return Ok(hdr.n_keys);
     }
 
-    let header = IndexHeader { n_buckets: n_buckets as u64, n_keys: n as u64 };
-    let mut f  = BufWriter::new(File::create(dir.join("index.idx"))?);
-    f.write_all(&header.to_bytes())?;
-    f.write_all(cast_slice::<Bucket, u8>(&table))?;
-    f.flush()?;
+    let spill = SpillReader::open(&spill_path)?;
+    let n     = spill.count() as usize;
 
-    // Clean up spill file after successful index build.
-    std::fs::remove_file(dir.join("spill.bin"))?;
+    let entries: Vec<RawEntry> = spill.records()
+        .map(|r| -> Result<RawEntry, LoaderError> {
+            let r = r?;
+            Ok(RawEntry::new(r.fingerprint, r.aligned_offset, r.size)?)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let (table, retries) = kv_format::index::build(&entries)?;
+    let n_buckets = table.len();
+
+    if retries > 0 {
+        info!(
+            "{}: PSL overflow — rebuilt index {} time(s), final table {} buckets ({} keys)",
+            dir.display(), retries, n_buckets, n,
+        );
+    }
+
+    // Write to a tmp file, then atomically rename.
+    let tmp_path = dir.join("index.idx.tmp");
+    {
+        let mut f = BufWriter::new(File::create(&tmp_path)?);
+        let header = IndexHeader { n_buckets: n_buckets as u64, n_keys: n as u64 };
+        f.write_all(&header.to_bytes())?;
+        f.write_all(cast_slice::<kv_format::index::Bucket, u8>(&table))?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp_path, &idx_path)?;
+
+    // Remove spill only after the index is durably in place.
+    std::fs::remove_file(&spill_path)?;
 
     Ok(n as u64)
 }
@@ -160,5 +194,28 @@ mod tests {
             let idx = part_dir(dir.path(), 4, i).join("index.idx");
             assert!(idx.exists());
         }
+    }
+
+    #[tokio::test]
+    async fn index_build_is_idempotent() {
+        let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2")];
+        let dir = scatter_and_build(pairs, 1).await;
+
+        let idx      = part_dir(dir.path(), 1, 0).join("index.idx");
+        let tmp      = part_dir(dir.path(), 1, 0).join("index.idx.tmp");
+        let snapshot = std::fs::read(&idx).unwrap();
+
+        // Second run: spill.bin is gone, index.idx exists → skip.
+        let n_keys = IndexBuildPhase::new(dir.path(), layout(1), 1).run().unwrap();
+        assert_eq!(n_keys, 2, "key count must be preserved on skip");
+        assert_eq!(std::fs::read(&idx).unwrap(), snapshot, "index.idx must be unchanged");
+        assert!(!tmp.exists(), "skip path must not leave a tmp file");
+    }
+
+    #[tokio::test]
+    async fn tmp_file_removed_on_success() {
+        let dir = scatter_and_build(&[(b"k", b"v")], 1).await;
+        let tmp = part_dir(dir.path(), 1, 0).join("index.idx.tmp");
+        assert!(!tmp.exists(), "index.idx.tmp should be gone after successful build");
     }
 }
