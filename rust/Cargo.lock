@@ -837,6 +837,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "frostmap-format",
+ "nom",
  "tempfile",
  "thiserror",
  "tokio",

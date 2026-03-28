@@ -9,6 +9,7 @@ async-trait     = "0.1"
 bytes           = "1"
 thiserror       = "2"
 tokio           = { version = "1", features = ["rt"] }
+nom             = "7"
 
 [dev-dependencies]
 tempfile = "3"
