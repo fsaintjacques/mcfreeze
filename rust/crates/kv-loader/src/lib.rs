@@ -48,15 +48,14 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
     }
 
     // Fallback: derive completion from per-partition files.
-    let n     = layout.n_partitions as usize;
-    let width = format!("{}", layout.n_partitions - 1).len();
+    let n = layout.n_partitions as usize;
     let mut partitions   = Vec::with_capacity(n);
     let mut merged       = new_size_histogram();
     let mut total_sum    = 0u64;
     let mut data_bytes   = 0u64;
 
     for i in 0..n {
-        let dir        = root.join(format!("part-{:0>width$}", i, width = width));
+        let dir = kv_format::meta::partition_dir(root, layout.n_partitions, i);
         let data_path  = dir.join("data.bin");
         let spill_path = dir.join("spill.bin");
         let idx_path   = dir.join("index.idx");

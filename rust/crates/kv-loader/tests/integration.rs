@@ -252,7 +252,9 @@ async fn progress_callback_fires() {
 
     let recorded = calls.lock().unwrap();
     assert!(recorded.len() >= 2, "expected progress callbacks, got {}", recorded.len());
-    for w in recorded.windows(2) {
-        assert!(w[1].0 > w[0].0);
+    // Each callback receives deltas: both keys and bytes must be positive.
+    for (n, b) in recorded.iter() {
+        assert!(*n > 0, "delta keys must be positive");
+        assert!(*b > 0, "delta bytes must be positive");
     }
 }

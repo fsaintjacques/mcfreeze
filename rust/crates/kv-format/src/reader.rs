@@ -98,10 +98,9 @@ impl SnapshotReader {
         let meta: Meta = serde_json::from_str(&json)?;
         let layout = meta.layout()?;
 
-        let width = format!("{}", layout.n_partitions - 1).len();
         let partitions = (0..layout.n_partitions as usize)
             .map(|i| {
-                let dir = root.join(format!("part-{:0>width$}", i, width = width));
+                let dir = crate::meta::partition_dir(root, layout.n_partitions, i);
                 PartitionReader::open(&dir)
             })
             .collect::<Result<Vec<_>>>()?;

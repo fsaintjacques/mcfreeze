@@ -216,14 +216,13 @@ impl ScatterPhase {
         data_buf_bytes:   usize,
         spill_buf_bytes:  usize,
     ) -> Result<Self, LoaderError> {
-        let n     = layout.n_partitions as usize;
-        let width = format!("{}", layout.n_partitions - 1).len();
+        let n = layout.n_partitions as usize;
 
         let mut senders  = Vec::with_capacity(n);
         let mut handles  = Vec::with_capacity(n);
 
         for i in 0..n {
-            let dir = root.join(format!("part-{:0>width$}", i, width = width));
+            let dir = kv_format::meta::partition_dir(root, layout.n_partitions, i);
             std::fs::create_dir_all(&dir)?;
 
             let (tx, rx) = mpsc::channel::<PartitionBatch>(channel_capacity.max(1));
@@ -390,11 +389,11 @@ mod tests {
         let pairs: &[(&[u8], &[u8])] = &[(b"hello", b"world"), (b"foo", b"bar")];
         let (dir, _) = scatter(pairs, 1).await;
 
-        let spill_path = dir.path().join("part-0").join("spill.bin");
+        let spill_path = kv_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin");
         let reader     = SpillReader::open(&spill_path).unwrap();
         assert_eq!(reader.count(), 2);
 
-        let data_file = File::open(dir.path().join("part-0").join("data.bin")).unwrap();
+        let data_file = File::open(kv_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin")).unwrap();
         for rec in reader.records() {
             let rec = rec.unwrap();
             let val = pread(&data_file, rec.aligned_offset * VALUE_ALIGNMENT, rec.size).unwrap();
@@ -405,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn data_bin_alignment() {
         let (dir, _) = scatter(&[(b"k", b"v")], 1).await;
-        let meta = std::fs::metadata(dir.path().join("part-0").join("data.bin")).unwrap();
+        let meta = std::fs::metadata(kv_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin")).unwrap();
         assert_eq!(meta.len() % VALUE_ALIGNMENT, 0);
         assert_eq!(meta.len(), 64);
     }
@@ -439,7 +438,7 @@ mod tests {
         let stats = phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
         assert_eq!(stats.n_keys, 10);
 
-        let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
+        let spill = SpillReader::open(&kv_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin")).unwrap();
         assert_eq!(spill.count(), 10);
     }
 
@@ -465,7 +464,7 @@ mod tests {
         let stats = phase.finish(vec![f0, f1], std::time::Instant::now()).await.unwrap();
         assert_eq!(stats.n_keys, 1000);
 
-        let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
+        let spill = SpillReader::open(&kv_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin")).unwrap();
         assert_eq!(spill.count(), 1000);
     }
 

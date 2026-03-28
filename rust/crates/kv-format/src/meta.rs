@@ -75,6 +75,22 @@ impl Layout {
 }
 
 // ---------------------------------------------------------------------------
+// Directory helpers
+// ---------------------------------------------------------------------------
+
+/// Returns the `data/` subdirectory of a snapshot root.
+/// All partition directories live under this path.
+pub fn data_dir(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("data")
+}
+
+/// Zero-padded partition directory path (e.g. `<root>/data/part-07` for N=64, i=7).
+pub fn partition_dir(root: &std::path::Path, n_partitions: u32, i: usize) -> std::path::PathBuf {
+    let width = format!("{}", n_partitions - 1).len();
+    data_dir(root).join(format!("part-{:0>width$}", i, width = width))
+}
+
+// ---------------------------------------------------------------------------
 // Meta
 // ---------------------------------------------------------------------------
 

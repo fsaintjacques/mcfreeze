@@ -89,10 +89,9 @@ impl IndexBuildPhase {
         }
 
         let start = Instant::now();
-        let n     = self.layout.n_partitions as usize;
-        let width = format!("{}", self.layout.n_partitions - 1).len();
-        let root  = &self.root;
-        let cb    = &self.progress_fn;
+        let n    = self.layout.n_partitions as usize;
+        let root = &self.root;
+        let cb   = &self.progress_fn;
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.parallelism)
@@ -102,7 +101,7 @@ impl IndexBuildPhase {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
-                    let dir    = root.join(format!("part-{:0>width$}", i, width = width));
+                    let dir = kv_format::meta::partition_dir(root, self.layout.n_partitions, i);
                     let part   = build_partition(&dir)?;
                     if let Some(ref f) = cb {
                         f(1, 0);
@@ -254,8 +253,7 @@ mod tests {
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
 
     fn part_dir(root: &std::path::Path, n: u32, i: usize) -> std::path::PathBuf {
-        let width = format!("{}", n - 1).len();
-        root.join(format!("part-{:0>width$}", i, width = width))
+        kv_format::meta::partition_dir(root, n, i)
     }
 
     async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
@@ -322,8 +320,8 @@ mod tests {
         let snapshot = std::fs::read(&idx).unwrap();
 
         // Second run: spill.bin is gone, index.idx exists → skip.
-        let n_keys = IndexBuildPhase::new(dir.path(), layout(1), 1, None).run().unwrap();
-        assert_eq!(n_keys, 2, "key count must be preserved on skip");
+        let done = IndexBuildPhase::new(dir.path(), layout(1), 1, None).run().unwrap();
+        assert_eq!(done.n_keys, 2, "key count must be preserved on skip");
         assert_eq!(std::fs::read(&idx).unwrap(), snapshot, "index.idx must be unchanged");
         assert!(!tmp.exists(), "skip path must not leave a tmp file");
     }

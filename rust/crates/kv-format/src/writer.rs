@@ -6,19 +6,9 @@ use chrono::Utc;
 use crate::{
     data::AlignedWriter,
     index::{self, IndexHeader, RawEntry, fingerprint},
-    meta::{FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, PSL_BITS, SIZE_BITS, Layout, Meta},
+    meta::{FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, PSL_BITS, SIZE_BITS, Layout, Meta, partition_dir},
     Result,
 };
-
-// ---------------------------------------------------------------------------
-// Partition directory naming
-// ---------------------------------------------------------------------------
-
-/// Zero-padded partition directory name (e.g. `part-007` for N=64, i=7).
-fn partition_dir(root: &Path, n_partitions: u32, i: usize) -> PathBuf {
-    let width = format!("{}", n_partitions - 1).len();
-    root.join(format!("part-{:0>width$}", i, width = width))
-}
 
 // ---------------------------------------------------------------------------
 // PartitionWriter
@@ -167,15 +157,15 @@ mod tests {
     #[test]
     fn partition_dir_padding_n64() {
         let root = Path::new("/snap");
-        assert_eq!(partition_dir(root, 64, 0),  Path::new("/snap/part-00"));
-        assert_eq!(partition_dir(root, 64, 7),  Path::new("/snap/part-07"));
-        assert_eq!(partition_dir(root, 64, 63), Path::new("/snap/part-63"));
+        assert_eq!(partition_dir(root, 64, 0),  Path::new("/snap/data/part-00"));
+        assert_eq!(partition_dir(root, 64, 7),  Path::new("/snap/data/part-07"));
+        assert_eq!(partition_dir(root, 64, 63), Path::new("/snap/data/part-63"));
     }
 
     #[test]
     fn partition_dir_padding_n1() {
         let root = Path::new("/snap");
-        assert_eq!(partition_dir(root, 1, 0), Path::new("/snap/part-0"));
+        assert_eq!(partition_dir(root, 1, 0), Path::new("/snap/data/part-0"));
     }
 
     // --- SnapshotWriter: directory creation ---
