@@ -47,6 +47,10 @@ pub struct BqSourceConfig {
 
     /// Optional SQL `WHERE` predicate pushed down to BQ.
     pub row_restriction: Option<String>,
+
+    /// Disable LZ4 buffer compression on Arrow column data.
+    /// Useful when values are already compressed or high-entropy (hashes, ciphertext).
+    pub disable_compression: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,17 +90,25 @@ impl BqReadSession {
         // compressed per-buffer inside the IPC RecordBatch message.  This is
         // separate from gRPC-level compression; arrow-ipc decompresses
         // transparently via the `ipc_compression` feature.
-        let arrow_serial_opts = ArrowSerializationOptions {
-            buffer_compression: CompressionCodec::Lz4Frame as i32,
-            ..Default::default()
+        // Skip for high-entropy data (hashes, ciphertext) where compression adds
+        // CPU overhead with no size benefit.
+        let serialization_opts = if config.disable_compression {
+            None
+        } else {
+            Some(
+                gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options
+                    ::OutputFormatSerializationOptions::ArrowSerializationOptions(
+                    ArrowSerializationOptions {
+                        buffer_compression: CompressionCodec::Lz4Frame as i32,
+                        ..Default::default()
+                    },
+                ),
+            )
         };
 
         let read_options = Some(TableReadOptions {
             row_restriction: config.row_restriction.unwrap_or_default(),
-            output_format_serialization_options: Some(
-                gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options
-                    ::OutputFormatSerializationOptions::ArrowSerializationOptions(arrow_serial_opts),
-            ),
+            output_format_serialization_options: serialization_opts,
             ..Default::default()
         });
 

@@ -1,0 +1,15 @@
+[package]
+name    = "kv-load"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "kv-load"
+path = "src/main.rs"
+
+[dependencies]
+kv-loader = { path = "../kv-loader" }
+kv-bq     = { path = "../kv-bq" }
+clap      = { version = "4", features = ["derive"] }
+tokio     = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow    = "1"

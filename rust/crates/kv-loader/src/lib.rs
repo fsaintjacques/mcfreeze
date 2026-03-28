@@ -121,7 +121,7 @@ impl SnapshotLoader {
     pub async fn load_parallel<S>(&self, sources: Vec<S>) -> Result<LoadStats, LoaderError>
     where
         S: KvSource + Send + 'static,
-        LoaderError: From<S::Error>,
+        S::Error: std::error::Error + Send + Sync + 'static,
     {
         let layout = Layout::new(self.config.n_partitions)?;
 
@@ -135,7 +135,7 @@ impl SnapshotLoader {
     pub async fn load<S>(&self, source: &mut S) -> Result<LoadStats, LoaderError>
     where
         S: KvSource + Send,
-        LoaderError: From<S::Error>,
+        S::Error: std::error::Error + Send + Sync + 'static,
     {
         let layout = Layout::new(self.config.n_partitions)?;
         let phase  = ScatterPhase::new(
@@ -151,7 +151,7 @@ impl SnapshotLoader {
         let interval         = self.config.progress_interval;
         let mut last_reported = 0u64;
 
-        while let Some(batch) = source.next_batch().await.map_err(LoaderError::from)? {
+        while let Some(batch) = source.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
             fanout.scatter_batch(&batch).await?;
             if let Some(ref cb) = progress_fn {
                 let (n, b) = fanout.counters();
@@ -184,7 +184,7 @@ impl SnapshotLoader {
     where
         S: KvSource + Send + 'static,
         I: IntoIterator<Item = S>,
-        LoaderError: From<S::Error>,
+        S::Error: std::error::Error + Send + Sync + 'static,
     {
         let phase = ScatterPhase::new(
             &self.root,
@@ -204,7 +204,7 @@ impl SnapshotLoader {
                 let progress_fn = progress_fn.clone();
                 tokio::spawn(async move {
                     let mut last_reported = 0u64;
-                    while let Some(batch) = src.next_batch().await.map_err(LoaderError::from)? {
+                    while let Some(batch) = src.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
                         fanout.scatter_batch(&batch).await?;
                         if let Some(ref cb) = progress_fn {
                             let (n, b) = fanout.counters();
