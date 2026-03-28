@@ -1,5 +1,35 @@
 # High-Level Architecture
 
+## Product Goal
+
+The system's success is measured by a single outcome: **a team can export a
+massive BigQuery table and start serving it at high volume, low latency, across
+multiple regions — with minimal operational effort.**
+
+Concretely: draft a BigQuery table in a `(key, value)` schema, run a job, and
+within minutes that dataset is queryable at sub-millisecond latency from any
+node in any region. No cache cluster to deploy, no statefulset to manage, no
+replication topology to reason about. The data plane is a shared network disk
+— attaching it to a node *is* the deployment.
+
+This is deliberately a separation of compute and storage. The KV server is a
+thin serving layer: it holds no data, owns no state, and can be restarted
+freely. All durability lives in the snapshot on the Hyperdisk ML volume. The
+operational surface shrinks to:
+
+1. **Build** — push a BigQuery query, get back a versioned snapshot on disk.
+2. **Attach** — mount the snapshot read-only on every node in the fleet.
+3. **Serve** — answer MGET requests directly from the local mmap; no network
+   hop to a remote cache.
+
+The cheapness comes from the storage model: a single Hyperdisk ML volume can
+be attached to up to 2,500 nodes simultaneously, so the marginal cost of
+adding readers is zero. The simplicity comes from immutability: snapshots are
+write-once, so there are no consistency protocols, no write conflicts, and no
+split-brain scenarios.
+
+---
+
 ## Problem Statement
 
 Standard Kubernetes storage is designed for persistent, long-lived volumes attached to
