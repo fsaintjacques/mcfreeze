@@ -20,7 +20,9 @@
       "Bash(grep -r \"pub.*schema\\\\|arrow\\\\|read_session\\\\|struct ReadSession\" ~/.cargo/registry/src/index.crates.io-*/googleapis-tonic-google-cloud-bigquery-storage-v1-*/src/)",
       "Bash(find ~/.cargo/registry/src -name *.rs -path *bigquery*storage*)",
       "Bash(find ~/.cargo/registry/src -name *.rs)",
-      "Bash(grep -A30 [features] ~/.cargo/registry/src/index.crates.io-*/arrow-54*/Cargo.toml)"
+      "Bash(grep -A30 [features] ~/.cargo/registry/src/index.crates.io-*/arrow-54*/Cargo.toml)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

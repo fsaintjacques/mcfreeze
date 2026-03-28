@@ -9,8 +9,9 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     ArrowSerializationOptions, CreateReadSessionRequest, DataFormat, ReadSession,
 };
 
-/// gRPC max decoding message size — BQ responses can reach 128 MiB.
-const MAX_DECODING_BYTES: usize = 256 * 1024 * 1024;
+/// gRPC max decoding message size.
+/// The official Go client uses math.MaxInt32 (~2 GiB); we match that.
+const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
 use kv_loader::SourceMetadata;
 
