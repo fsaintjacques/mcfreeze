@@ -30,38 +30,88 @@ pub struct ScatterStats {
 }
 
 // ---------------------------------------------------------------------------
+// Fanout
+// ---------------------------------------------------------------------------
+
+/// Lightweight fan-out handle: hashes keys, buckets values by partition, and
+/// sends sub-batches to the per-partition writer channels.
+///
+/// `Fanout` is intentionally cheap to create — it clones the channel senders
+/// (which are `Arc`-backed) and allocates one empty `Vec` per partition for
+/// the reusable sub-batch buffer.  Multiple `Fanout` instances can run
+/// concurrently on different async tasks with zero contention; each has its
+/// own sub-batch buffer and the underlying `mpsc::Sender` allows multiple
+/// producers.
+pub struct Fanout {
+    layout:      Layout,
+    senders:     Vec<mpsc::Sender<PartitionBatch>>,
+    /// Reusable per-partition accumulation buffer.  `mem::take` moves the
+    /// populated Vec into the channel and leaves an empty one in its place,
+    /// so the grown capacity is reused on the next batch.
+    sub_batches: Vec<PartitionBatch>,
+    pub n_keys:      u64,
+    pub data_bytes:  u64,
+}
+
+impl Fanout {
+    /// Bucket one source batch by partition and send each non-empty sub-batch.
+    ///
+    /// Blocks (async-awaits) only if the target partition's channel is full,
+    /// providing natural backpressure from slow writers to the source.
+    pub async fn scatter_batch(&mut self, batch: &impl KvBatch) -> Result<(), LoaderError> {
+        for (key, value) in batch.iter() {
+            let fp  = fingerprint(key);
+            let idx = self.layout.partition_of(fp);
+            self.sub_batches[idx].push((fp, value.to_vec()));
+            self.n_keys    += 1;
+            self.data_bytes += value.len() as u64;
+        }
+
+        for (idx, slot) in self.sub_batches.iter_mut().enumerate() {
+            if slot.is_empty() {
+                continue;
+            }
+            let sub_batch = std::mem::take(slot);
+            self.senders[idx].send(sub_batch).await.map_err(|_| {
+                LoaderError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "partition writer task exited unexpectedly",
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Current `(n_keys, data_bytes)` counters for progress reporting.
+    pub fn counters(&self) -> (u64, u64) {
+        (self.n_keys, self.data_bytes)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScatterPhase
 // ---------------------------------------------------------------------------
 
-/// Async fan-out scatter with one `spawn_blocking` writer per partition.
+/// Owns the per-partition `spawn_blocking` writer tasks and the channel
+/// senders used to reach them.
 ///
-/// `scatter_batch` buckets a source batch by partition and sends each
-/// non-empty sub-batch to the corresponding writer via a bounded channel.
-/// Backpressure propagates naturally: if a writer falls behind, the channel
-/// fill causes `scatter_batch` to await, slowing the source.
-///
-/// Each writer runs in `spawn_blocking`, calling `blocking_recv()` in a
-/// tight loop and writing to `BufWriter<File>` — pure sync I/O off the
-/// async executor.
+/// Call [`fanout`] to obtain a [`Fanout`] for each concurrent producer.
+/// When all producers are done, call [`finish`] with the completed fanouts
+/// to aggregate stats, drain the channels, and join the writers.
 pub struct ScatterPhase {
-    layout:      Layout,
-    senders:     Vec<mpsc::Sender<PartitionBatch>>,
-    handles:     Vec<JoinHandle<Result<(), LoaderError>>>,
-    /// Reusable fanout buffers — one per partition, cleared between batches
-    /// via `mem::take` so the (grown) Vec is reused as the new slot after
-    /// the previous contents are sent to the channel.
-    sub_batches: Vec<PartitionBatch>,
-    n_keys:      u64,
-    data_bytes:  u64,
+    layout:  Layout,
+    senders: Vec<mpsc::Sender<PartitionBatch>>,
+    handles: Vec<JoinHandle<Result<(), LoaderError>>>,
 }
 
 impl ScatterPhase {
     pub fn new(
-        root:            &Path,
-        layout:          Layout,
+        root:             &Path,
+        layout:           Layout,
         channel_capacity: usize,
-        data_buf_bytes:  usize,
-        spill_buf_bytes: usize,
+        data_buf_bytes:   usize,
+        spill_buf_bytes:  usize,
     ) -> Result<Self, LoaderError> {
         let n     = layout.n_partitions as usize;
         let width = format!("{}", layout.n_partitions - 1).len();
@@ -82,64 +132,43 @@ impl ScatterPhase {
             handles.push(handle);
         }
 
-        Ok(Self {
-            layout,
-            senders,
-            handles,
+        Ok(Self { layout, senders, handles })
+    }
+
+    /// Create a [`Fanout`] for one concurrent producer.
+    ///
+    /// Cloning `mpsc::Sender` is cheap (arc bump).  Each fanout gets its own
+    /// sub-batch buffer, so multiple fanouts never contend with each other.
+    pub fn fanout(&self) -> Fanout {
+        let n = self.layout.n_partitions as usize;
+        Fanout {
+            layout:      self.layout,
+            senders:     self.senders.clone(),
             sub_batches: (0..n).map(|_| Vec::new()).collect(),
             n_keys:      0,
             data_bytes:  0,
-        })
-    }
-
-    /// Fan out one source batch to per-partition sub-batches and send them.
-    pub async fn scatter_batch(&mut self, batch: &impl KvBatch) -> Result<(), LoaderError> {
-        for (key, value) in batch.iter() {
-            let fp  = fingerprint(key);
-            let idx = self.layout.partition_of(fp);
-            self.sub_batches[idx].push((fp, value.to_vec()));
-            self.n_keys    += 1;
-            self.data_bytes += value.len() as u64;
         }
-
-        for (idx, slot) in self.sub_batches.iter_mut().enumerate() {
-            if slot.is_empty() {
-                continue;
-            }
-            // mem::take moves the populated Vec into the channel and puts a
-            // fresh empty Vec back in the slot — no extra allocation per cycle
-            // once the Vec has grown to its steady-state capacity.
-            let sub_batch = std::mem::take(slot);
-            self.senders[idx].send(sub_batch).await.map_err(|_| {
-                LoaderError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "partition writer task exited unexpectedly",
-                ))
-            })?;
-        }
-
-        Ok(())
     }
 
-    /// Current `(n_keys, data_bytes)` counters (for progress reporting).
-    pub fn counters(&self) -> (u64, u64) {
-        (self.n_keys, self.data_bytes)
-    }
+    /// Aggregate stats from completed fanouts, close all channels, and join
+    /// the writer tasks.
+    ///
+    /// `fanouts` must include every fanout created by this phase; dropping
+    /// them here (together with the phase's own sender copies) closes the
+    /// channels so writers can flush and exit.
+    pub async fn finish(self, fanouts: Vec<Fanout>) -> Result<ScatterStats, LoaderError> {
+        let n_keys     = fanouts.iter().map(|f| f.n_keys).sum();
+        let data_bytes = fanouts.iter().map(|f| f.data_bytes).sum();
 
-    /// Drop senders (signals EOF to writers), then join all writer tasks.
-    pub async fn finish(self) -> Result<ScatterStats, LoaderError> {
-        let stats = ScatterStats { n_keys: self.n_keys, data_bytes: self.data_bytes };
-
-        // Dropping senders closes the channels, causing each writer's
-        // `blocking_recv()` loop to return `None` and flush+exit cleanly.
+        // Close all sender ends so each writer's blocking_recv() returns None.
+        drop(fanouts);
         drop(self.senders);
-        drop(self.sub_batches);
 
         for handle in self.handles {
             handle.await??;
         }
 
-        Ok(stats)
+        Ok(ScatterStats { n_keys, data_bytes })
     }
 }
 
@@ -191,13 +220,12 @@ mod tests {
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
 
     async fn scatter(pairs: &[(&[u8], &[u8])], n: u32) -> (TempDir, ScatterStats) {
-        let dir    = TempDir::new().unwrap();
-        let mut phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
-        let batch  = VecBatch(
-            pairs.iter().map(|&(k, v)| (k.to_vec(), v.to_vec())).collect()
-        );
-        phase.scatter_batch(&batch).await.unwrap();
-        let stats = phase.finish().await.unwrap();
+        let dir   = TempDir::new().unwrap();
+        let phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
+        let batch = VecBatch(pairs.iter().map(|&(k, v)| (k.to_vec(), v.to_vec())).collect());
+        let mut fanout = phase.fanout();
+        fanout.scatter_batch(&batch).await.unwrap();
+        let stats = phase.finish(vec![fanout]).await.unwrap();
         (dir, stats)
     }
 
@@ -252,16 +280,16 @@ mod tests {
     #[tokio::test]
     async fn multiple_batches_accumulate() {
         let dir   = TempDir::new().unwrap();
-        let mut phase = ScatterPhase::new(dir.path(), layout(1), 4, 1024 * 1024, 4096).unwrap();
+        let phase = ScatterPhase::new(dir.path(), layout(1), 4, 1024 * 1024, 4096).unwrap();
+        let mut fanout = phase.fanout();
 
         for i in 0u64..10 {
             let key = i.to_le_bytes().to_vec();
             let val = i.to_le_bytes().to_vec();
-            let batch = VecBatch(vec![(key, val)]);
-            phase.scatter_batch(&batch).await.unwrap();
+            fanout.scatter_batch(&VecBatch(vec![(key, val)])).await.unwrap();
         }
 
-        let stats = phase.finish().await.unwrap();
+        let stats = phase.finish(vec![fanout]).await.unwrap();
         assert_eq!(stats.n_keys, 10);
 
         let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
@@ -269,16 +297,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backpressure_does_not_deadlock() {
-        // channel_capacity=1 forces the sender to wait after each sub-batch.
-        let dir   = TempDir::new().unwrap();
-        let mut phase = ScatterPhase::new(dir.path(), layout(1), 1, 1024 * 1024, 4096).unwrap();
+    async fn parallel_fanouts_no_data_loss() {
+        // Two concurrent fanouts writing to the same partition writers.
+        let dir    = TempDir::new().unwrap();
+        let phase  = ScatterPhase::new(dir.path(), layout(1), 8, 1024 * 1024, 4096).unwrap();
+        let mut f0 = phase.fanout();
+        let mut f1 = phase.fanout();
 
+        let batch0 = VecBatch((0u64..500)
+            .map(|i| (i.to_le_bytes().to_vec(), b"v0".to_vec())).collect());
+        let batch1 = VecBatch((500u64..1000)
+            .map(|i| (i.to_le_bytes().to_vec(), b"v1".to_vec())).collect());
+
+        // Drive both fanouts concurrently.
+        tokio::try_join!(
+            f0.scatter_batch(&batch0),
+            f1.scatter_batch(&batch1),
+        ).unwrap();
+
+        let stats = phase.finish(vec![f0, f1]).await.unwrap();
+        assert_eq!(stats.n_keys, 1000);
+
+        let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
+        assert_eq!(spill.count(), 1000);
+    }
+
+    #[tokio::test]
+    async fn backpressure_does_not_deadlock() {
+        let dir   = TempDir::new().unwrap();
+        let phase = ScatterPhase::new(dir.path(), layout(1), 1, 1024 * 1024, 4096).unwrap();
+        let mut fanout = phase.fanout();
         let batch = VecBatch((0u64..1000)
             .map(|i| (i.to_le_bytes().to_vec(), i.to_le_bytes().to_vec()))
             .collect());
-        phase.scatter_batch(&batch).await.unwrap();
-        let stats = phase.finish().await.unwrap();
+        fanout.scatter_batch(&batch).await.unwrap();
+        let stats = phase.finish(vec![fanout]).await.unwrap();
         assert_eq!(stats.n_keys, 1000);
     }
 }

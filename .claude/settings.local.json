@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.cloud.google.com)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo test:*)",
+      "Bash(git rm:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:mechiru.github.io)",
+      "Bash(cargo build:*)",
+      "Bash(cargo doc:*)",
+      "Bash(grep -r \"pub fn from_bytes\\\\|impl From<bytes::Bytes>\" ~/.cargo/registry/src/index.crates.io-*/arrow-buffer-54*/src/)",
+      "Bash(grep -rn \"pub fn decode\\\\|pub fn schema\\\\|pub struct StreamDecoder\" ~/.cargo/registry/src/index.crates.io-*/arrow-ipc-54*/src/reader/)",
+      "Bash(/Users/fsaintjacques/src/gke-fast-disk/rust/crates/kv-bq/Cargo.toml:*)",
+      "Bash(grep -n 'pub fn get' ~/.cargo/registry/src/index.crates.io-*/gcloud-sdk-0.29*/src/api_client.rs)",
+      "Bash(grep -r \"pub.*schema\\\\|arrow\\\\|read_session\\\\|struct ReadSession\" ~/.cargo/registry/src/index.crates.io-*/googleapis-tonic-google-cloud-bigquery-storage-v1-*/src/)",
+      "Bash(find ~/.cargo/registry/src -name *.rs -path *bigquery*storage*)",
+      "Bash(find ~/.cargo/registry/src -name *.rs)",
+      "Bash(grep -A30 [features] ~/.cargo/registry/src/index.crates.io-*/arrow-54*/Cargo.toml)"
+    ]
+  }
+}

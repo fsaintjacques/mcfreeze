@@ -8,6 +8,6 @@ kv-loader  = { path = "../kv-loader" }
 thiserror  = "2"
 tokio      = { version = "1", features = ["rt-multi-thread"] }
 bytes      = "1"
-arrow      = { version = "54", features = ["ipc"] }
+arrow      = { version = "54", features = ["ipc", "ipc_compression"] }
 gcloud-sdk = { version = "0.29", features = ["google-cloud-bigquery-storage-v1"] }
 tonic      = "0.14"

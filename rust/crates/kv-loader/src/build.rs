@@ -111,9 +111,10 @@ mod tests {
     async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
         let dir   = TempDir::new().unwrap();
         let batch = VecBatch(pairs.iter().map(|&(k, v)| (k.to_vec(), v.to_vec())).collect());
-        let mut phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
-        phase.scatter_batch(&batch).await.unwrap();
-        phase.finish().await.unwrap();
+        let phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
+        let mut fanout = phase.fanout();
+        fanout.scatter_batch(&batch).await.unwrap();
+        phase.finish(vec![fanout]).await.unwrap();
         IndexBuildPhase::new(dir.path(), layout(n), 2).run().unwrap();
         dir
     }

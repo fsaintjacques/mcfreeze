@@ -52,17 +52,22 @@ pub trait KvBatch {
 /// so blocking the async executor per-batch is acceptable for a loader
 /// workload.  Callers that need stricter executor hygiene should wrap sync
 /// sources with `tokio::task::spawn_blocking`.
-#[allow(async_fn_in_trait)] // used only with `impl KvSource`, never `dyn`
 pub trait KvSource {
-    type Batch: KvBatch;
+    /// `Send + Sync` required so batches can be held across `.await` points
+    /// inside `tokio::spawn` tasks (parallel source path).
+    type Batch: KvBatch + Send + Sync;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    async fn next_batch(&mut self) -> Result<Option<Self::Batch>, Self::Error>;
+    /// The `+ Send` bound on the returned future is required for
+    /// `tokio::spawn` in the parallel-source path.
+    fn next_batch(&mut self)
+        -> impl Future<Output = Result<Option<Self::Batch>, Self::Error>> + Send;
 
-    /// Metadata available before streaming starts. Sources that know their
-    /// row count or byte size upfront should override this.
+    /// Metadata available before streaming starts.
     fn metadata(&self) -> SourceMetadata { SourceMetadata::default() }
 }
+
+use std::future::Future;
 
 // ---------------------------------------------------------------------------
 // VecBatch — simple owned batch used by CsvSource
@@ -146,8 +151,11 @@ impl<R: Read + Send> KvSource for CsvSource<R> {
     type Batch = VecBatch;
     type Error = LoaderError;
 
-    async fn next_batch(&mut self) -> Result<Option<VecBatch>, LoaderError> {
-        self.next_batch_sync()
+    fn next_batch(&mut self)
+        -> impl Future<Output = Result<Option<VecBatch>, LoaderError>> + Send
+    {
+        // CsvSource does only sync I/O; the future completes without yielding.
+        std::future::ready(self.next_batch_sync())
     }
 
     fn metadata(&self) -> SourceMetadata { self.metadata.clone() }

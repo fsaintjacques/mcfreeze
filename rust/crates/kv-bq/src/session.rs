@@ -4,9 +4,13 @@ use bytes::Bytes;
 use gcloud_sdk::{GoogleApi, GoogleAuthMiddleware};
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
     big_query_read_client::BigQueryReadClient,
-    read_session::Schema as SessionSchema,
-    CreateReadSessionRequest, DataFormat, ReadSession,
+    read_session::{Schema as SessionSchema, TableReadOptions},
+    arrow_serialization_options::CompressionCodec,
+    ArrowSerializationOptions, CreateReadSessionRequest, DataFormat, ReadSession,
 };
+
+/// gRPC max decoding message size — BQ responses can reach 128 MiB.
+const MAX_DECODING_BYTES: usize = 256 * 1024 * 1024;
 
 use kv_loader::SourceMetadata;
 
@@ -71,17 +75,28 @@ impl BqReadSession {
     /// 3. GKE / GCE Workload Identity metadata server
     pub async fn open(config: BqSourceConfig) -> Result<Self, BqError> {
         let client: BqApi = GoogleApi::from_function(
-            BigQueryReadClient::new,
+            |ch| BigQueryReadClient::new(ch).max_decoding_message_size(MAX_DECODING_BYTES),
             "https://bigquerystorage.googleapis.com",
             None::<String>,
         )
         .await?;
 
-        let read_options = config.row_restriction.map(|r| {
-            gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::TableReadOptions {
-                row_restriction: r,
-                ..Default::default()
-            }
+        // Request LZ4_FRAME buffer compression: Arrow column buffers are
+        // compressed per-buffer inside the IPC RecordBatch message.  This is
+        // separate from gRPC-level compression; arrow-ipc decompresses
+        // transparently via the `ipc_compression` feature.
+        let arrow_serial_opts = ArrowSerializationOptions {
+            buffer_compression: CompressionCodec::Lz4Frame as i32,
+            ..Default::default()
+        };
+
+        let read_options = Some(TableReadOptions {
+            row_restriction: config.row_restriction.unwrap_or_default(),
+            output_format_serialization_options: Some(
+                gcloud_sdk::google::cloud::bigquery::storage::v1::read_session::table_read_options
+                    ::OutputFormatSerializationOptions::ArrowSerializationOptions(arrow_serial_opts),
+            ),
+            ..Default::default()
         });
 
         let request = CreateReadSessionRequest {

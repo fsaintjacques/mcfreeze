@@ -19,7 +19,7 @@ use kv_format::meta::{
 };
 
 use build::IndexBuildPhase;
-use scatter::ScatterPhase;
+use scatter::{Fanout, ScatterPhase};
 
 // ---------------------------------------------------------------------------
 // LoaderConfig
@@ -113,34 +113,48 @@ impl SnapshotLoader {
         Ok(Self { root, config })
     }
 
+    /// Load from multiple concurrent sources (e.g. BigQuery parallel read streams).
+    ///
+    /// Each source is driven by its own `tokio::spawn` task, each with its own
+    /// [`Fanout`].  All fanouts write to the same set of partition writers via
+    /// cloned channel senders — no locking, no serialization.
+    pub async fn load_parallel<S>(&self, sources: Vec<S>) -> Result<LoadStats, LoaderError>
+    where
+        S: KvSource + Send + 'static,
+        LoaderError: From<S::Error>,
+    {
+        let layout = Layout::new(self.config.n_partitions)?;
+
+        let scatter_start = Instant::now();
+        let scatter_stats = self.scatter_sources(layout, sources.into_iter()).await?;
+        let scatter_duration = scatter_start.elapsed();
+
+        self.build_and_finalize(layout, scatter_stats, scatter_duration).await
+    }
+
     pub async fn load<S>(&self, source: &mut S) -> Result<LoadStats, LoaderError>
     where
         S: KvSource + Send,
         LoaderError: From<S::Error>,
     {
         let layout = Layout::new(self.config.n_partitions)?;
-
-        // --- Phase 1: scatter ---
-        // Source is awaited per batch (async); writers run in spawn_blocking.
-        // Fan-out buckets each batch by partition and sends sub-batches via
-        // bounded channels — backpressure propagates to the source naturally.
-        let scatter_start = Instant::now();
-        let mut phase = ScatterPhase::new(
-            &self.root,
-            layout,
+        let phase  = ScatterPhase::new(
+            &self.root, layout,
             self.config.channel_capacity,
             self.config.data_buf_bytes,
             self.config.spill_buf_bytes,
         )?;
 
-        let interval      = self.config.progress_interval;
-        let progress_fn   = self.config.progress_fn.clone();
+        let scatter_start    = Instant::now();
+        let mut fanout       = phase.fanout();
+        let progress_fn      = self.config.progress_fn.clone();
+        let interval         = self.config.progress_interval;
         let mut last_reported = 0u64;
 
         while let Some(batch) = source.next_batch().await.map_err(LoaderError::from)? {
-            phase.scatter_batch(&batch).await?;
+            fanout.scatter_batch(&batch).await?;
             if let Some(ref cb) = progress_fn {
-                let (n, b) = phase.counters();
+                let (n, b) = fanout.counters();
                 if n - last_reported >= interval {
                     cb(n, b);
                     last_reported = n;
@@ -148,13 +162,81 @@ impl SnapshotLoader {
             }
         }
 
-        let scatter_stats = phase.finish().await?;
+        let scatter_stats    = phase.finish(vec![fanout]).await?;
         let scatter_duration = scatter_start.elapsed();
+        self.build_and_finalize(layout, scatter_stats, scatter_duration).await
+    }
 
-        // --- Phase 2: index build (rayon, blocking) ---
-        let index_start  = Instant::now();
-        let root2        = self.root.clone();
-        let parallelism  = self.config.index_parallelism;
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Drive `sources` concurrently through the fan-out, then join writers.
+    ///
+    /// Each source gets its own [`Fanout`] and runs in a `tokio::spawn` task.
+    /// For the single-source `load` path this degenerates to one task with
+    /// zero extra overhead.
+    async fn scatter_sources<S, I>(
+        &self,
+        layout:  Layout,
+        sources: I,
+    ) -> Result<scatter::ScatterStats, LoaderError>
+    where
+        S: KvSource + Send + 'static,
+        I: IntoIterator<Item = S>,
+        LoaderError: From<S::Error>,
+    {
+        let phase = ScatterPhase::new(
+            &self.root,
+            layout,
+            self.config.channel_capacity,
+            self.config.data_buf_bytes,
+            self.config.spill_buf_bytes,
+        )?;
+
+        let interval    = self.config.progress_interval;
+        let progress_fn = self.config.progress_fn.clone();
+
+        let tasks: Vec<_> = sources
+            .into_iter()
+            .map(|mut src| {
+                let mut fanout  = phase.fanout();
+                let progress_fn = progress_fn.clone();
+                tokio::spawn(async move {
+                    let mut last_reported = 0u64;
+                    while let Some(batch) = src.next_batch().await.map_err(LoaderError::from)? {
+                        fanout.scatter_batch(&batch).await?;
+                        if let Some(ref cb) = progress_fn {
+                            let (n, b) = fanout.counters();
+                            if n - last_reported >= interval {
+                                cb(n, b);
+                                last_reported = n;
+                            }
+                        }
+                    }
+                    Ok::<Fanout, LoaderError>(fanout)
+                })
+            })
+            .collect();
+
+        let mut fanouts = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            fanouts.push(task.await??);
+        }
+
+        phase.finish(fanouts).await
+    }
+
+    /// Index build + meta.json write, shared by `load` and `load_parallel`.
+    async fn build_and_finalize(
+        &self,
+        layout:           Layout,
+        scatter_stats:    scatter::ScatterStats,
+        scatter_duration: Duration,
+    ) -> Result<LoadStats, LoaderError> {
+        let index_start = Instant::now();
+        let root2       = self.root.clone();
+        let parallelism = self.config.index_parallelism;
 
         tokio::task::spawn_blocking(move || {
             IndexBuildPhase::new(&root2, layout, parallelism).run()
@@ -163,7 +245,6 @@ impl SnapshotLoader {
 
         let index_duration = index_start.elapsed();
 
-        // --- Phase 3: meta.json (completion sentinel) ---
         let meta = Meta {
             format_version: FORMAT_VERSION,
             n_partitions:   self.config.n_partitions,
