@@ -19,20 +19,22 @@ Design goals:
 ```
 <snapshot>/
   meta.json
-  part-000/
-    index.idx
-    data.bin
-  part-001/
-    index.idx
-    data.bin
-  ...
-  part-<N-1>/
-    index.idx
-    data.bin
+  data/
+    part-00/
+      index.idx
+      data.bin
+    part-01/
+      index.idx
+      data.bin
+    ...
+    part-<N-1>/
+      index.idx
+      data.bin
 ```
 
-Partition directory names are zero-padded to the width of `N-1`
-(e.g. `part-000` … `part-063` for N=64).
+All partition directories live under the `data/` subdirectory of the snapshot
+root. Partition directory names are zero-padded to the width of `N-1`
+(e.g. `part-00` … `part-63` for N=64).
 
 ---
 
@@ -47,7 +49,9 @@ Partition directory names are zero-padded to the width of `N-1`
   "size_bits":       23,
   "psl_bits":        7,
   "n_keys":          1000000000,
-  "created_at":      "2026-03-27T00:00:00Z"
+  "created_at":      "2026-03-27T00:00:00Z",
+  "scatter":         { ... },
+  "index":           { ... }
 }
 ```
 
@@ -61,6 +65,8 @@ Partition directory names are zero-padded to the width of `N-1`
 | `psl_bits` | Bits allocated to the probe sequence length; currently `7` (max 127); Robin Hood at 95% fill peaks well below 50 in practice |
 | `n_keys` | Total key count across all partitions |
 | `created_at` | ISO 8601 UTC timestamp |
+| `scatter` | _(optional)_ Embedded contents of `scatter.done`; opaque to the format layer |
+| `index` | _(optional)_ Embedded contents of `index.done`; opaque to the format layer |
 
 `offset_bits + size_bits + psl_bits` must equal 64. There are no spare bits.
 
