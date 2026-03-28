@@ -34,6 +34,29 @@ fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
     (dir, pairs)
 }
 
+fn gen_csv_offset(n: usize, seed: u64, global_offset: usize) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
+    let mut rng  = StdRng::seed_from_u64(seed);
+    let dir      = TempDir::new().unwrap();
+    let csv_path = dir.path().join("data.csv");
+    let mut file = std::fs::File::create(&csv_path).unwrap();
+
+    let mut pairs = Vec::with_capacity(n);
+    for i in 0..n {
+        let key_len = 8 + (rng.next_u32() % 24) as usize;
+        let val_len = 10 + (rng.next_u32() % 190) as usize;
+
+        let mut key = vec![0u8; key_len];
+        let mut val = vec![0u8; val_len];
+        rng.fill_bytes(&mut key);
+        rng.fill_bytes(&mut val);
+        key[..8].copy_from_slice(&((global_offset + i) as u64).to_le_bytes());
+
+        writeln!(file, "{},{}", B64.encode(&key), B64.encode(&val)).unwrap();
+        pairs.push((key, val));
+    }
+    (dir, pairs)
+}
+
 fn loader(root: &std::path::Path, n_partitions: u32) -> SnapshotLoader {
     let config = LoaderConfig {
         n_partitions,
@@ -155,6 +178,49 @@ async fn spill_files_absent_after_load() {
             let spill = part.join("spill.bin");
             assert!(!spill.exists(), "spill.bin left behind: {spill:?}");
         }
+    }
+}
+
+#[tokio::test]
+async fn load_parallel_roundtrip() {
+    // Simulate multiple independent sources (e.g. BQ read streams).
+    // Each CSV file is a separate "stream"; load_parallel drives them concurrently.
+    let n_streams  = 4usize;
+    let n_per_stream = 2_000usize;
+    let snap_dir   = TempDir::new().unwrap();
+
+    let mut all_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut sources = Vec::new();
+
+    // Global offset ensures keys are unique across streams even when key_len==8
+    // (all 8 bytes would be the prefix; without offset, stream-0 key i==5 and
+    // stream-1 key i==5 would be identical).
+    for s in 0..n_streams {
+        let global_offset = s * n_per_stream;
+        let (csv_dir, pairs) = gen_csv_offset(n_per_stream, s as u64 * 13 + 7, global_offset);
+        all_pairs.extend(pairs);
+        sources.push(CsvSource::from_path(csv_dir.path().join("data.csv"), 200).unwrap());
+        std::mem::forget(csv_dir); // prevent TempDir from deleting files we still need
+    }
+
+    let config = LoaderConfig {
+        n_partitions:      16,
+        data_buf_bytes:    1024 * 1024,
+        spill_buf_bytes:   64 * 1024,
+        channel_capacity:  8,
+        index_parallelism: 2,
+        ..LoaderConfig::default()
+    };
+    let stats = SnapshotLoader::new(snap_dir.path(), config).unwrap()
+        .load_parallel(sources)
+        .await
+        .unwrap();
+
+    assert_eq!(stats.n_keys, (n_streams * n_per_stream) as u64);
+
+    let reader = SnapshotReader::open(snap_dir.path()).unwrap();
+    for (key, val) in &all_pairs {
+        assert_eq!(reader.get(key).unwrap().as_deref(), Some(val.as_slice()));
     }
 }
 
