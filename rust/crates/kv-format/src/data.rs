@@ -22,14 +22,18 @@ const PAD: [u8; VALUE_ALIGNMENT as usize] = [0u8; VALUE_ALIGNMENT as usize];
 /// Every value is written at a `VALUE_ALIGNMENT`-byte aligned offset.
 /// After each value the writer emits zero-padding to restore alignment
 /// before the next write.
-pub struct AlignedWriter {
-    file:        File,
+///
+/// The inner writer `W` is typically a `File` or a `BufWriter<File>`.
+/// Callers that need large write buffers (e.g. 8 MiB per partition) should
+/// wrap the file in `BufWriter::with_capacity(...)` before constructing.
+pub struct AlignedWriter<W: Write> {
+    inner:       W,
     byte_offset: u64,
 }
 
-impl AlignedWriter {
-    pub fn new(file: File) -> Self {
-        Self { file, byte_offset: 0 }
+impl<W: Write> AlignedWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self { inner, byte_offset: 0 }
     }
 
     /// Current byte position in the file (always a multiple of `VALUE_ALIGNMENT`).
@@ -53,19 +57,19 @@ impl AlignedWriter {
         let padded          = aligned_size(value.len() as u32);
         let pad_len         = (padded - value.len() as u64) as usize;
 
-        self.file.write_all(value)?;
+        self.inner.write_all(value)?;
         if pad_len > 0 {
-            self.file.write_all(&PAD[..pad_len])?;
+            self.inner.write_all(&PAD[..pad_len])?;
         }
 
         self.byte_offset += padded;
         Ok(aligned_offset)
     }
 
-    /// Flush and return the underlying `File`.
-    pub fn finish(mut self) -> Result<File> {
-        self.file.flush()?;
-        Ok(self.file)
+    /// Flush and return the inner writer.
+    pub fn finish(mut self) -> Result<W> {
+        self.inner.flush()?;
+        Ok(self.inner)
     }
 }
 
@@ -91,13 +95,18 @@ pub fn pread(file: &File, byte_offset: u64, size: u32) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufWriter;
     use tempfile::tempfile;
 
-    fn writer() -> AlignedWriter {
+    fn writer() -> AlignedWriter<File> {
         AlignedWriter::new(tempfile().unwrap())
     }
 
-    // --- AlignedWriter ---
+    fn buffered_writer() -> AlignedWriter<BufWriter<File>> {
+        AlignedWriter::new(BufWriter::new(tempfile().unwrap()))
+    }
+
+    // --- AlignedWriter<File> ---
 
     #[test]
     fn write_single_value_aligned() {
@@ -143,6 +152,18 @@ mod tests {
         assert_eq!(w.byte_offset(), 0);
     }
 
+    // --- AlignedWriter<BufWriter<File>> ---
+
+    #[test]
+    fn buffered_writer_offsets() {
+        let mut w = buffered_writer();
+        let off0 = w.write_value(b"hello").unwrap();
+        let off1 = w.write_value(b"world").unwrap();
+        assert_eq!(off0, 0);
+        assert_eq!(off1, 1);
+        assert_eq!(w.byte_offset(), 128);
+    }
+
     // --- pread roundtrip ---
 
     #[cfg(unix)]
@@ -173,6 +194,19 @@ mod tests {
             let got = pread(&file, off * VALUE_ALIGNMENT, v.len() as u32).unwrap();
             assert_eq!(got.as_slice(), v);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pread_roundtrip_buffered() {
+        let mut w = buffered_writer();
+        let payload = b"via bufwriter";
+        let aligned_offset = w.write_value(payload).unwrap();
+        let buf_writer = w.finish().unwrap();
+        let file = buf_writer.into_inner().unwrap();
+
+        let got = pread(&file, aligned_offset * VALUE_ALIGNMENT, payload.len() as u32).unwrap();
+        assert_eq!(got, payload);
     }
 
     #[cfg(unix)]

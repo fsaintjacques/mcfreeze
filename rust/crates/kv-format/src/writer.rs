@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -30,7 +31,7 @@ fn partition_dir(root: &Path, n_partitions: u32, i: usize) -> PathBuf {
 /// Phase 2 (`finish`): build Robin Hood index → `index.idx`.
 pub struct PartitionWriter {
     dir:     PathBuf,
-    data:    AlignedWriter,
+    data:    AlignedWriter<File>,
     entries: Vec<RawEntry>,
 }
 
