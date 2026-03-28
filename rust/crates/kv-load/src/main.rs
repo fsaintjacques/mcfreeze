@@ -221,11 +221,13 @@ async fn run_bq(
 
     let output = output.context("--output is required unless --download-benchmark is set")?;
 
-    let reporter = ProgressReporter::new(estimated_rows, progress_secs);
+    let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
+    let index_reporter   = ProgressReporter::new("index", Some(partitions as u64), progress_secs);
     let loader_config = LoaderConfig {
         n_partitions:       partitions,
         index_parallelism,
-        progress_fn:        Some(reporter.updater()),
+        progress_fn:        Some(scatter_reporter.updater()),
+        index_progress_fn:  Some(index_reporter.updater()),
         progress_interval:  0, // reporter's ticker handles rate-limiting
         ..LoaderConfig::default()
     };
@@ -240,7 +242,8 @@ async fn run_bq(
         .await
         .context("load failed")?;
 
-    reporter.stop();
+    scatter_reporter.stop();
+    index_reporter.stop();
 
     info!(
         n_keys           = stats.n_keys,
@@ -272,7 +275,7 @@ where
 {
     info!(n_sources = sources.len(), "download benchmark started");
     let start    = Instant::now();
-    let reporter = ProgressReporter::new(estimated_rows, progress_secs);
+    let reporter = ProgressReporter::new("download", estimated_rows, progress_secs);
     let updater  = reporter.updater();
 
     let tasks: Vec<_> = sources
@@ -376,7 +379,7 @@ struct ProgressReporter {
 }
 
 impl ProgressReporter {
-    fn new(estimated_rows: Option<u64>, interval_secs: u64) -> Self {
+    fn new(phase: &'static str, estimated: Option<u64>, interval_secs: u64) -> Self {
         let total_keys  = Arc::new(AtomicU64::new(0));
         let total_bytes = Arc::new(AtomicU64::new(0));
         let interval    = Duration::from_secs(interval_secs.max(1));
@@ -400,7 +403,7 @@ impl ProgressReporter {
                     let recs_sec  = ((cur_keys  - prev_keys)  as f64 / dt) as u64;
                     let bytes_sec = ((cur_bytes - prev_bytes) as f64 / dt) as u64;
 
-                    let progress = match estimated_rows {
+                    let progress = match estimated {
                         Some(n) if n > 0 => format!(
                             "{}/{} ({:.1}%)",
                             cur_keys, n,
@@ -410,7 +413,8 @@ impl ProgressReporter {
                     };
 
                     info!(
-                        keys          = %progress,
+                        phase,
+                        items         = %progress,
                         recs_sec,
                         throughput    = %human_bandwidth(bytes_sec),
                         elapsed_secs  = format!("{elapsed:.1}"),

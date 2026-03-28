@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use bytemuck::cast_slice;
 use tracing::info;
@@ -24,14 +25,21 @@ pub struct IndexBuildPhase {
     root:        std::path::PathBuf,
     layout:      Layout,
     parallelism: usize,
+    progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 impl IndexBuildPhase {
-    pub fn new(root: &Path, layout: Layout, parallelism: usize) -> Self {
+    pub fn new(
+        root:        &Path,
+        layout:      Layout,
+        parallelism: usize,
+        progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> Self {
         Self {
-            root:        root.to_path_buf(),
+            root: root.to_path_buf(),
             layout,
             parallelism: parallelism.max(1),
+            progress_fn,
         }
     }
 
@@ -40,6 +48,7 @@ impl IndexBuildPhase {
         let n     = self.layout.n_partitions as usize;
         let width = format!("{}", self.layout.n_partitions - 1).len();
         let root  = &self.root;
+        let cb    = &self.progress_fn;
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.parallelism)
@@ -49,8 +58,12 @@ impl IndexBuildPhase {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
-                    let dir = root.join(format!("part-{:0>width$}", i, width = width));
-                    build_partition(&dir)
+                    let dir    = root.join(format!("part-{:0>width$}", i, width = width));
+                    let n_keys = build_partition(&dir)?;
+                    if let Some(ref f) = cb {
+                        f(1, 0);
+                    }
+                    Ok(n_keys)
                 })
                 .collect()
         });
@@ -152,7 +165,7 @@ mod tests {
         let mut fanout = phase.fanout();
         fanout.scatter_batch(&batch).await.unwrap();
         phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
-        IndexBuildPhase::new(dir.path(), layout(n), 2).run().unwrap();
+        IndexBuildPhase::new(dir.path(), layout(n), 2, None).run().unwrap();
         dir
     }
 
@@ -209,7 +222,7 @@ mod tests {
         let snapshot = std::fs::read(&idx).unwrap();
 
         // Second run: spill.bin is gone, index.idx exists → skip.
-        let n_keys = IndexBuildPhase::new(dir.path(), layout(1), 1).run().unwrap();
+        let n_keys = IndexBuildPhase::new(dir.path(), layout(1), 1, None).run().unwrap();
         assert_eq!(n_keys, 2, "key count must be preserved on skip");
         assert_eq!(std::fs::read(&idx).unwrap(), snapshot, "index.idx must be unchanged");
         assert!(!tmp.exists(), "skip path must not leave a tmp file");

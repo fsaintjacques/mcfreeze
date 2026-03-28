@@ -144,6 +144,10 @@ pub struct LoaderConfig {
 
     /// Optional progress callback: `fn(keys_processed, unpadded_bytes_written)`.
     pub progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+
+    /// Optional progress callback for the index build phase.
+    /// Called with `(1, 0)` after each partition is indexed.
+    pub index_progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for LoaderConfig {
@@ -156,6 +160,7 @@ impl std::fmt::Debug for LoaderConfig {
             .field("index_parallelism", &self.index_parallelism)
             .field("progress_interval", &self.progress_interval)
             .field("progress_fn",       &self.progress_fn.as_ref().map(|_| "<fn>"))
+            .field("index_progress_fn", &self.index_progress_fn.as_ref().map(|_| "<fn>"))
             .finish()
     }
 }
@@ -170,6 +175,7 @@ impl Default for LoaderConfig {
             index_parallelism: 2,
             progress_interval: 100_000,
             progress_fn:       None,
+            index_progress_fn: None,
         }
     }
 }
@@ -347,12 +353,13 @@ impl SnapshotLoader {
         scatter_stats:    scatter::ScatterStats,
         scatter_duration: Duration,
     ) -> Result<LoadStats, LoaderError> {
-        let index_start = Instant::now();
-        let root2       = self.root.clone();
-        let parallelism = self.config.index_parallelism;
+        let index_start   = Instant::now();
+        let root2         = self.root.clone();
+        let parallelism   = self.config.index_parallelism;
+        let index_prog_fn = self.config.index_progress_fn.clone();
 
         tokio::task::spawn_blocking(move || {
-            IndexBuildPhase::new(&root2, layout, parallelism).run()
+            IndexBuildPhase::new(&root2, layout, parallelism, index_prog_fn).run()
         })
         .await??;
 
