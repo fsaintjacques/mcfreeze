@@ -1,0 +1,3 @@
+[workspace]
+members  = ["crates/kv-format"]
+resolver = "2"
