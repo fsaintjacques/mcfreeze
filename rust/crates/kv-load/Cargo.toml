@@ -16,7 +16,7 @@ kv-loader  = { path = "../kv-loader" }
 kv-bq      = { path = "../kv-bq" }
 kv-format  = { path = "../kv-format" }
 clap                 = { version = "4", features = ["derive"] }
-tokio                = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 anyhow               = "1"
 rustls               = { version = "0.23", features = ["ring"], default-features = false }
 tracing              = "0.1"

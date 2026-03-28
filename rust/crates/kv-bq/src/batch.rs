@@ -30,6 +30,18 @@ impl BinaryCol {
         self.0.len()
     }
 
+    /// Total byte size of all values in the column — O(1) via the Arrow values buffer.
+    pub fn total_bytes(&self) -> usize {
+        let arr = self.0.as_ref();
+        match arr.data_type() {
+            DataType::Binary     => arr.as_any().downcast_ref::<BinaryArray>()     .unwrap().values().len(),
+            DataType::LargeBinary => arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap().values().len(),
+            DataType::Utf8       => arr.as_any().downcast_ref::<StringArray>()     .unwrap().values().len(),
+            DataType::LargeUtf8  => arr.as_any().downcast_ref::<LargeStringArray>().unwrap().values().len(),
+            _ => unreachable!("BinaryCol::try_from already validated the type"),
+        }
+    }
+
     /// Returns the raw bytes of row `i`, zero-copy.
     pub fn value(&self, i: usize) -> &[u8] {
         let arr = self.0.as_ref();
@@ -102,5 +114,9 @@ impl KvBatch for ArrowBatch {
 
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         (0..self.keys.len()).map(|i| (self.keys.value(i), self.values.value(i)))
+    }
+
+    fn total_bytes(&self) -> u64 {
+        (self.keys.total_bytes() + self.values.total_bytes()) as u64
     }
 }

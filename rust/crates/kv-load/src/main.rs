@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use kv_bq::{BqReadSession, BqSourceConfig};
@@ -46,6 +47,10 @@ struct Cli {
     /// throughput.  No data is written to --output.
     #[arg(long)]
     download_benchmark: bool,
+
+    /// Progress report interval in seconds.
+    #[arg(long, default_value = "5")]
+    progress_secs: u64,
 
     #[command(subcommand)]
     source: Source,
@@ -133,6 +138,7 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.index_parallelism,
                 cli.dry_run,
                 cli.download_benchmark,
+                cli.progress_secs,
                 project,
                 table,
                 key_column,
@@ -157,6 +163,7 @@ async fn run_bq(
     index_parallelism:   usize,
     dry_run:             bool,
     download_benchmark:  bool,
+    progress_secs:       u64,
     project:             Option<String>,
     table:               String,
     key_column:          String,
@@ -191,7 +198,8 @@ async fn run_bq(
         .await
         .context("failed to open BigQuery read session")?;
 
-    let meta = session.metadata();
+    let meta           = session.metadata();
+    let estimated_rows = meta.estimated_rows;
     info!(
         n_streams       = session.n_streams(),
         estimated_rows  = meta.estimated_rows,
@@ -208,15 +216,17 @@ async fn run_bq(
         .context("failed to split session into sources")?;
 
     if download_benchmark {
-        return benchmark_download(sources).await;
+        return benchmark_download(sources, estimated_rows, progress_secs).await;
     }
 
     let output = output.context("--output is required unless --download-benchmark is set")?;
 
+    let reporter = ProgressReporter::new(estimated_rows, progress_secs);
     let loader_config = LoaderConfig {
-        n_partitions:      partitions,
+        n_partitions:       partitions,
         index_parallelism,
-        progress_fn:       Some(make_progress_fn()),
+        progress_fn:        Some(reporter.updater()),
+        progress_interval:  0, // reporter's ticker handles rate-limiting
         ..LoaderConfig::default()
     };
 
@@ -229,6 +239,8 @@ async fn run_bq(
         .load_parallel(sources)
         .await
         .context("load failed")?;
+
+    reporter.stop();
 
     info!(
         n_keys           = stats.n_keys,
@@ -249,30 +261,38 @@ async fn run_bq(
 ///
 /// Reports total rows, total payload bytes (keys + values), elapsed time,
 /// and download throughput.
-async fn benchmark_download<S>(sources: Vec<S>) -> Result<()>
+async fn benchmark_download<S>(
+    sources:        Vec<S>,
+    estimated_rows: Option<u64>,
+    progress_secs:  u64,
+) -> Result<()>
 where
     S: KvSource + Send + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     info!(n_sources = sources.len(), "download benchmark started");
-    let start = Instant::now();
+    let start    = Instant::now();
+    let reporter = ProgressReporter::new(estimated_rows, progress_secs);
+    let updater  = reporter.updater();
 
     let tasks: Vec<_> = sources
         .into_iter()
         .enumerate()
         .map(|(idx, mut src)| {
+            let updater = updater.clone();
             tokio::spawn(async move {
-                let mut n_keys:      u64 = 0;
+                let mut n_keys:        u64 = 0;
                 let mut payload_bytes: u64 = 0;
                 while let Some(batch) = src
                     .next_batch()
                     .await
                     .map_err(|e| anyhow::anyhow!("stream {idx}: {e}"))?
                 {
-                    for (k, v) in batch.iter() {
-                        n_keys        += 1;
-                        payload_bytes += (k.len() + v.len()) as u64;
-                    }
+                    let batch_keys  = batch.len() as u64;
+                    let batch_bytes = batch.total_bytes();
+                    updater(batch_keys, batch_bytes);
+                    n_keys        += batch_keys;
+                    payload_bytes += batch_bytes;
                 }
                 Ok::<(u64, u64), anyhow::Error>((n_keys, payload_bytes))
             })
@@ -286,6 +306,8 @@ where
         total_keys  += keys;
         total_bytes += bytes;
     }
+
+    reporter.stop();
 
     let elapsed   = start.elapsed().as_secs_f64();
     let bytes_sec = if elapsed > 0.0 { (total_bytes as f64 / elapsed) as u64 } else { 0 };
@@ -343,8 +365,79 @@ fn human_bandwidth(bytes_per_sec: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-fn make_progress_fn() -> Arc<dyn Fn(u64, u64) + Send + Sync> {
-    Arc::new(|n_keys, data_bytes| {
-        debug!(n_keys, data_bytes, "scatter progress");
-    })
+// ---------------------------------------------------------------------------
+// Progress reporter
+// ---------------------------------------------------------------------------
+
+struct ProgressReporter {
+    total_keys:  Arc<AtomicU64>,
+    total_bytes: Arc<AtomicU64>,
+    task:        tokio::task::JoinHandle<()>,
+}
+
+impl ProgressReporter {
+    fn new(estimated_rows: Option<u64>, interval_secs: u64) -> Self {
+        let total_keys  = Arc::new(AtomicU64::new(0));
+        let total_bytes = Arc::new(AtomicU64::new(0));
+        let interval    = Duration::from_secs(interval_secs.max(1));
+
+        let task = tokio::spawn({
+            let keys  = total_keys.clone();
+            let bytes = total_bytes.clone();
+            async move {
+                let mut ticker     = tokio::time::interval(interval);
+                ticker.tick().await; // skip the immediate first tick
+                let start          = Instant::now();
+                let mut prev_keys  = 0u64;
+                let mut prev_bytes = 0u64;
+                let dt             = interval.as_secs_f64();
+
+                loop {
+                    ticker.tick().await;
+                    let cur_keys  = keys.load(Ordering::Relaxed);
+                    let cur_bytes = bytes.load(Ordering::Relaxed);
+                    let elapsed   = start.elapsed().as_secs_f64();
+                    let recs_sec  = ((cur_keys  - prev_keys)  as f64 / dt) as u64;
+                    let bytes_sec = ((cur_bytes - prev_bytes) as f64 / dt) as u64;
+
+                    let progress = match estimated_rows {
+                        Some(n) if n > 0 => format!(
+                            "{}/{} ({:.1}%)",
+                            cur_keys, n,
+                            cur_keys as f64 / n as f64 * 100.0,
+                        ),
+                        _ => format!("{cur_keys}"),
+                    };
+
+                    info!(
+                        keys          = %progress,
+                        recs_sec,
+                        throughput    = %human_bandwidth(bytes_sec),
+                        elapsed_secs  = format!("{elapsed:.1}"),
+                        "progress",
+                    );
+
+                    prev_keys  = cur_keys;
+                    prev_bytes = cur_bytes;
+                }
+            }
+        });
+
+        Self { total_keys, total_bytes, task }
+    }
+
+    /// Returns a closure suitable for `LoaderConfig::progress_fn`.
+    /// Expects **delta** `(keys, bytes)` since the previous call.
+    fn updater(&self) -> Arc<dyn Fn(u64, u64) + Send + Sync> {
+        let keys  = self.total_keys.clone();
+        let bytes = self.total_bytes.clone();
+        Arc::new(move |delta_keys, delta_bytes| {
+            keys.fetch_add(delta_keys, Ordering::Relaxed);
+            bytes.fetch_add(delta_bytes, Ordering::Relaxed);
+        })
+    }
+
+    fn stop(self) {
+        self.task.abort();
+    }
 }

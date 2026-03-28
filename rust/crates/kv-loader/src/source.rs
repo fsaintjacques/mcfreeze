@@ -33,6 +33,14 @@ pub trait KvBatch {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool { self.len() == 0 }
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])>;
+
+    /// Total byte size of all keys + values in this batch.
+    ///
+    /// Implementations backed by columnar formats (e.g. Arrow) can return this
+    /// in O(1) from the column buffers. The default falls back to iterating.
+    fn total_bytes(&self) -> u64 {
+        self.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum()
+    }
 }
 
 // ---------------------------------------------------------------------------

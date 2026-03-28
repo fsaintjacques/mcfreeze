@@ -252,18 +252,20 @@ impl SnapshotLoader {
                     self.config.data_buf_bytes,
                     self.config.spill_buf_bytes,
                 )?;
-                let mut fanout        = phase.fanout();
-                let progress_fn       = self.config.progress_fn.clone();
-                let interval          = self.config.progress_interval;
-                let mut last_reported = 0u64;
+                let mut fanout              = phase.fanout();
+                let progress_fn             = self.config.progress_fn.clone();
+                let interval                = self.config.progress_interval;
+                let mut last_reported_keys  = 0u64;
+                let mut last_reported_bytes = 0u64;
 
                 while let Some(batch) = source.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
                     fanout.scatter_batch(&batch).await?;
                     if let Some(ref cb) = progress_fn {
                         let (n, b) = fanout.counters();
-                        if n - last_reported >= interval {
-                            cb(n, b);
-                            last_reported = n;
+                        if n - last_reported_keys >= interval {
+                            cb(n - last_reported_keys, b - last_reported_bytes);
+                            last_reported_keys  = n;
+                            last_reported_bytes = b;
                         }
                     }
                 }
@@ -312,14 +314,16 @@ impl SnapshotLoader {
                 let mut fanout  = phase.fanout();
                 let progress_fn = progress_fn.clone();
                 tokio::spawn(async move {
-                    let mut last_reported = 0u64;
+                    let mut last_reported_keys  = 0u64;
+                    let mut last_reported_bytes = 0u64;
                     while let Some(batch) = src.next_batch().await.map_err(|e| LoaderError::Source(Box::new(e)))? {
                         fanout.scatter_batch(&batch).await?;
                         if let Some(ref cb) = progress_fn {
                             let (n, b) = fanout.counters();
-                            if n - last_reported >= interval {
-                                cb(n, b);
-                                last_reported = n;
+                            if n - last_reported_keys >= interval {
+                                cb(n - last_reported_keys, b - last_reported_bytes);
+                                last_reported_keys  = n;
+                                last_reported_bytes = b;
                             }
                         }
                     }
