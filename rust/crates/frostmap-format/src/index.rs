@@ -256,30 +256,219 @@ fn n_occupied(table: &[Bucket]) -> usize {
 ///
 /// Returns `(byte_offset, size)` on a hit, or `None` on a miss.
 ///
-/// Terminates at the first empty bucket (fingerprint == 0).
+/// Dispatches to the best available SIMD implementation at runtime:
+/// AVX-512F → AVX2 → NEON → scalar.
+///
+/// `is_x86_feature_detected!` caches the result in a static atomic after the
+/// first call; subsequent calls are a single atomic load.
 pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
     let n = table.len();
     if n == 0 {
         return None;
     }
-    let mut pos   = fingerprint as usize % n;
-    let mut steps = 0usize;
 
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx512f") {
+        return unsafe { probe_avx512(table, fingerprint) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { probe_avx2(table, fingerprint) };
+    }
+    // NEON is mandatory on AArch64 (ARMv8+); no runtime check required.
+    #[cfg(target_arch = "aarch64")]
+    return unsafe { probe_neon(table, fingerprint) };
+
+    #[allow(unreachable_code)]
+    probe_scalar(table, fingerprint)
+}
+
+/// Scalar probe starting from the home slot.
+fn probe_scalar(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
+    let n   = table.len();
+    let pos = fingerprint as usize % n;
+    probe_scalar_from(table, fingerprint, pos, 0, n)
+}
+
+/// Scalar probe resuming from an arbitrary position, used as the tail of SIMD
+/// paths when the remaining group would wrap around the table boundary.
+#[inline]
+fn probe_scalar_from(
+    table:       &[Bucket],
+    fingerprint: u64,
+    mut pos:     usize,
+    mut steps:   usize,
+    n:           usize,
+) -> Option<(u64, u32)> {
     loop {
         debug_assert!(steps < n, "probe scanned all {n} buckets without finding an empty slot");
         let bucket = table[pos];
-
         if bucket.is_empty() {
             return None;
         }
-
         if bucket.fingerprint == fingerprint {
             return Some((bucket.byte_offset(), bucket.size()));
         }
-
         pos    = (pos + 1) % n;
         steps += 1;
     }
+}
+
+/// AVX2 probe: compare 4 fingerprints per iteration (one 64-byte cache line).
+///
+/// Memory layout for 4 consecutive buckets:
+///   [fp0, loc0, fp1, loc1, fp2, loc2, fp3, loc3]
+///
+/// Two 256-bit loads + two permutes deinterleave fingerprints into one register
+/// for a single `vpcmpeqq` comparison.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn probe_avx2(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
+    use std::arch::x86_64::*;
+
+    const LANES: usize = 4;
+    let n         = table.len();
+    let mut pos   = fingerprint as usize % n;
+    let mut steps = 0usize;
+
+    let target = _mm256_set1_epi64x(fingerprint as i64);
+    let zero   = _mm256_setzero_si256();
+
+    while steps + LANES <= n {
+        if pos + LANES > n {
+            // Group would wrap the table boundary: fall through to scalar.
+            break;
+        }
+
+        // Two 256-bit loads cover 64 bytes = 4 buckets.
+        let ptr = table.as_ptr().add(pos) as *const __m256i;
+        let lo  = _mm256_loadu_si256(ptr);        // [fp0, loc0, fp1, loc1]
+        let hi  = _mm256_loadu_si256(ptr.add(1)); // [fp2, loc2, fp3, loc3]
+
+        // Deinterleave fingerprints into one register.
+        // permute4x64 imm=0x88 (0b10001000): picks qwords [0,2,0,2].
+        let plo = _mm256_permute4x64_epi64(lo, 0x88); // [fp0, fp1, fp0, fp1]
+        let phi = _mm256_permute4x64_epi64(hi, 0x88); // [fp2, fp3, fp2, fp3]
+        // permute2x128 imm=0x20: low-128 of plo | low-128 of phi.
+        let fps = _mm256_permute2x128_si256(plo, phi, 0x20); // [fp0, fp1, fp2, fp3]
+
+        // movemask_epi8 gives 8 bits per 64-bit lane (all-1 or all-0).
+        // Lane k occupies bits [8k .. 8k+7]; trailing_zeros / 8 → lane index.
+        let match_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi64(fps, target)) as u32;
+        let empty_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi64(fps, zero))   as u32;
+
+        if (match_mask | empty_mask) != 0 {
+            let match_lane = match_mask.trailing_zeros() / 8; // 0–3, or 4 if absent
+            let empty_lane = empty_mask.trailing_zeros() / 8; // 0–3, or 4 if absent
+
+            if match_mask != 0 && (empty_mask == 0 || match_lane < empty_lane) {
+                let b = table[pos + match_lane as usize];
+                return Some((b.byte_offset(), b.size()));
+            }
+            return None;
+        }
+
+        pos    += LANES;
+        if pos >= n { pos -= n; }
+        steps  += LANES;
+    }
+
+    probe_scalar_from(table, fingerprint, pos, steps, n)
+}
+
+/// AVX-512F probe: compare 4 fingerprints per iteration using `vpcompressq`
+/// and a k-register compare — one load, one compress, one compare.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn probe_avx512(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
+    use std::arch::x86_64::*;
+
+    const LANES: usize = 4;
+    let n         = table.len();
+    let mut pos   = fingerprint as usize % n;
+    let mut steps = 0usize;
+
+    let target = _mm512_set1_epi64(fingerprint as i64);
+    let zero   = _mm512_setzero_si512();
+
+    while steps + LANES <= n {
+        if pos + LANES > n {
+            break;
+        }
+
+        // One 512-bit load covers 64 bytes = 4 buckets.
+        // Layout: [fp0, loc0, fp1, loc1, fp2, loc2, fp3, loc3]
+        let data = _mm512_loadu_si512(table.as_ptr().add(pos) as *const __m512i);
+
+        // mask_compress with 0x55 (bits 0,2,4,6) gathers even qwords:
+        //   [fp0, fp1, fp2, fp3, 0, 0, 0, 0]
+        let fps = _mm512_mask_compress_epi64(zero, 0x55, data);
+
+        // k-mask compare: result is a 1-bit-per-lane u8; mask 0x0F limits to lanes 0–3.
+        let match_mask: u8 = _mm512_mask_cmpeq_epi64_mask(0x0F, fps, target);
+        let empty_mask: u8 = _mm512_mask_cmpeq_epi64_mask(0x0F, fps, zero);
+
+        if (match_mask | empty_mask) != 0 {
+            let match_lane = match_mask.trailing_zeros(); // 0–3, or 8 if absent
+            let empty_lane = empty_mask.trailing_zeros(); // 0–3, or 8 if absent
+
+            if match_mask != 0 && (empty_mask == 0 || match_lane < empty_lane) {
+                let b = table[pos + match_lane as usize];
+                return Some((b.byte_offset(), b.size()));
+            }
+            return None;
+        }
+
+        pos    += LANES;
+        if pos >= n { pos -= n; }
+        steps  += LANES;
+    }
+
+    probe_scalar_from(table, fingerprint, pos, steps, n)
+}
+
+/// NEON probe: compare 2 fingerprints per iteration.
+///
+/// `vld2q_u64` deinterleaves on load: the two fingerprints land in `pair.0`
+/// and the two `loc` values land in `pair.1` — no shuffle needed.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn probe_neon(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
+    use std::arch::aarch64::*;
+
+    const LANES: usize = 2;
+    let n         = table.len();
+    let mut pos   = fingerprint as usize % n;
+    let mut steps = 0usize;
+
+    let target = vdupq_n_u64(fingerprint);
+    let zero   = vdupq_n_u64(0);
+
+    while steps + LANES <= n {
+        if pos + LANES > n {
+            break;
+        }
+
+        // vld2q_u64 loads 4 u64s and deinterleaves:
+        //   pair.0 = [fp0,  fp1 ]   pair.1 = [loc0, loc1]
+        let pair = vld2q_u64(table.as_ptr().add(pos) as *const u64);
+        let fps  = pair.0;
+
+        let match_v = vceqq_u64(fps, target); // u64::MAX per lane on match, 0 otherwise
+        let empty_v = vceqq_u64(fps, zero);
+
+        // Process in probe order (lane 0 has the shorter probe distance).
+        if vgetq_lane_u64::<0>(empty_v) != 0 { return None; }
+        if vgetq_lane_u64::<0>(match_v) != 0 { let b = table[pos];     return Some((b.byte_offset(), b.size())); }
+        if vgetq_lane_u64::<1>(empty_v) != 0 { return None; }
+        if vgetq_lane_u64::<1>(match_v) != 0 { let b = table[pos + 1]; return Some((b.byte_offset(), b.size())); }
+
+        pos    += LANES;
+        if pos >= n { pos -= n; }
+        steps  += LANES;
+    }
+
+    probe_scalar_from(table, fingerprint, pos, steps, n)
 }
 
 // ---------------------------------------------------------------------------
@@ -423,5 +612,54 @@ mod tests {
         let mut bytes = IndexHeader { n_buckets: 1, n_keys: 1 }.to_bytes();
         bytes[0] = 0xFF;
         assert!(IndexHeader::from_bytes(&bytes).is_err());
+    }
+
+    // --- SIMD probe correctness: each ISA path must agree with scalar ---
+
+    fn simd_test_table() -> (Vec<Bucket>, Vec<RawEntry>) {
+        let n = 1_000usize;
+        let entries: Vec<RawEntry> = (0..n)
+            .map(|i| make_entry(&(i as u64).to_le_bytes(), (i as u64) * 64, 8))
+            .collect();
+        let (table, _) = build(&entries).unwrap();
+        (table, entries)
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn probe_avx2_matches_scalar() {
+        if !is_x86_feature_detected!("avx2") { return; }
+        let (table, entries) = simd_test_table();
+        for e in &entries {
+            let expected = probe_scalar(&table, e.fingerprint);
+            let got      = unsafe { probe_avx2(&table, e.fingerprint) };
+            assert_eq!(got, expected, "avx2 mismatch for fp={}", e.fingerprint);
+        }
+        assert_eq!(unsafe { probe_avx2(&table, fingerprint(b"absent")) }, None);
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn probe_avx512_matches_scalar() {
+        if !is_x86_feature_detected!("avx512f") { return; }
+        let (table, entries) = simd_test_table();
+        for e in &entries {
+            let expected = probe_scalar(&table, e.fingerprint);
+            let got      = unsafe { probe_avx512(&table, e.fingerprint) };
+            assert_eq!(got, expected, "avx512 mismatch for fp={}", e.fingerprint);
+        }
+        assert_eq!(unsafe { probe_avx512(&table, fingerprint(b"absent")) }, None);
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn probe_neon_matches_scalar() {
+        let (table, entries) = simd_test_table();
+        for e in &entries {
+            let expected = probe_scalar(&table, e.fingerprint);
+            let got      = unsafe { probe_neon(&table, e.fingerprint) };
+            assert_eq!(got, expected, "neon mismatch for fp={}", e.fingerprint);
+        }
+        assert_eq!(unsafe { probe_neon(&table, fingerprint(b"absent")) }, None);
     }
 }
