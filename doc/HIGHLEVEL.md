@@ -1,73 +1,211 @@
-# Architecture Design: Dynamic Hyperdisk ML KV Store
+# High-Level Architecture
 
-## 1. The Problem Statement
-Standard Kubernetes storage is designed for persistent, long-lived volumes attached to Pods at boot time. However, modern ML and data-intensive applications require:
-* **Zero-Downtime Updates:** The ability to swap massive datasets (Multi-TB) daily without restarting Pods or dropping connections.
-* **Massive Fan-out:** A single data volume must be readable by thousands of nodes simultaneously.
-* **High Performance:** Sub-millisecond Key-Value lookups with minimal IO overhead.
-* **Stateless Compute:** Pods should not "own" specific disks; they should simply consume the "current" version of the data available on the node.
+## Problem Statement
 
-Traditional `PersistentVolumeClaims` (PVC) in a Deployment spec do not support "hot-swapping" without a rolling restart, creating a bottleneck for daily data refreshes.
+Standard Kubernetes storage is designed for persistent, long-lived volumes attached to
+Pods at boot time. This system addresses workloads that require:
 
----
-
-## 2. The Solution: "The Sidecar-less Orchestrator"
-We decouple the **Data Lifecycle** from the **Pod Lifecycle** using a custom Go-based Control Plane and a Node-level DaemonSet.
-
-### High-Level Workflow
-1.  **Ingestion:** BigQuery exports sharded data to Google Cloud Storage (GCS).
-2.  **Hydration:** A GKE Job transforms raw GCS data into a specialized **4KB-aligned Flat File** format and hydrates a new **Hyperdisk ML** volume.
-3.  **Orchestration:** The **Go Control Plane** marks the new volume as the "Active Version."
-4.  **Mounting:** A **Go DaemonSet** on each node detects the new version, attaches/mounts the disk to the Host, and updates a local **JSON Manifest**.
-5.  **Consumption:** The ML App polls the JSON manifest and `mmap`s the new data files instantly with zero downtime.
+- **Massive fan-out:** a single dataset readable by hundreds of nodes simultaneously
+- **Zero-downtime updates:** swap multi-TB datasets without restarting Pods
+- **High-throughput reads:** sub-millisecond key-value lookups served directly from
+  locally-attached disk, bypassing network round-trips to a remote cache cluster
+- **Stateless compute:** Pods consume the current version of a dataset without owning
+  specific disks
 
 ---
 
-## 3. Data Format Optimization
-To achieve **Single-IO Seek** performance, we bypass traditional databases in favor of a static binary format.
+## Solution Overview
 
-* **`index.idx`**: A Static Perfect Hash Table (or Cuckoo Hash) containing fixed-width structs: `[Hash(Key) | Offset | Size]`. This is kept in RAM via `mmap`.
-* **`data.bin`**: The raw values, where every entry is **4KB Aligned**. This ensures that any `pread` call results in exactly one physical hardware block read.
-* **Probabilistic Filter**: A Bloom or Xor Filter is embedded in the index header to prevent unnecessary disk seeks for non-existent keys.
+Data lifecycle is decoupled from Pod lifecycle. Datasets are written once as static
+snapshots onto Hyperdisk ML volumes, attached read-only to GKE nodes, and served
+locally by a per-node process over a Unix domain socket and TCP port.
 
----
-
-## 4. System Components
-
-### A. The Go Control Plane
-Acts as the "Brain" of the storage layer.
-* **Job Management**: Triggers BQ-to-GCS exports and monitors the GKE Volume Populator.
-* **Version Registry**: Maintains a mapping of `VersionID` to `GCP_Disk_Link`.
-* **Health Tracking**: Ensures a new version is hydrated and "Ready" before signaling a swap.
-
-### B. The Go DaemonSet (The Mount Manager)
-Runs with `privileged: true` and `mountPropagation: Bidirectional`.
-* **Disk Attachment**: Calls the Compute Engine API to attach Hyperdisk ML volumes to the local Node.
-* **Linux Plumbing**: Executes `mount -o ro` commands and manages symbolic links.
-* **The "Stamp"**: Writes an atomic `catalog.json` file to a shared `hostPath` volume accessible by all ML Pods on that node.
-
-### C. The ML Application (The Client)
-* **Stateless Consumer**: Mounts the `hostPath` containing `catalog.json` and the data directories.
-* **Hot-Reload Logic**: A background thread polls the JSON file. Upon a version change, it calls `munmap` on the old index and `mmap` on the new one.
-
----
-
-## 5. Key Advantages
-
-| Feature | Benefit |
-| :--- | :--- |
-| **Statelessness** | Pods can be killed/rescheduled without worrying about disk attachments. |
-| **Scalability** | Hyperdisk ML supports up to 2,500 readers, allowing the cluster to scale to thousands of nodes. |
-| **Efficiency** | `mmap` + 4KB alignment + Perfect Hashing provides the theoretical limit of read performance. |
-| **Zero Downtime** | Data versions are swapped in-memory; the application process never stops. |
-
----
-
-## 6. Infrastructure Requirements
-* **Machine Types**: N2, C3, or A3 (Required for Hyperdisk ML).
-* **GKE Features**: GKE Volume Populator (using `GCPDataSource` CRD).
-* **IAM**: Workload Identity with `compute.instances.attachDisk` and `storage.objectViewer` permissions.
+```
+                    ┌───────────────────────────┐
+                    │       Control Plane       │  Go · Deployment
+                    │  - dataset registry       │
+                    │  - version lifecycle      │
+                    │  - rollout / rollback     │
+                    └─────────────┬─────────────┘
+                                  │ watched API
+              ┌───────────────────┴───────────────────┐
+              │                                       │
+              ▼                                       ▼
+   ┌─────────────────────┐        ┌────────────────────────────────────┐
+   │   Snapshot Builder  │        │     DaemonSet Pod  (per node)      │
+   │      Rust · Job     │        │                                    │
+   │                     │        │  ┌──────────────────────────────┐  │
+   │  - parallel BQ read │        │  │   Lifecycle Manager          │  │
+   │  - write kv format  │        │  │   Go · privileged            │  │
+   │                     │        │  │  - attach / detach disks     │  │
+   └──────────┬──────────┘        │  │  - mount / umount            │  │
+              │ provisions disk   │  │  - write catalog.json        │  │
+              ▼                   │  └──────────────┬───────────────┘  │
+   ┌─────────────────────┐        │                 │ shared EmptyDir  │
+   │    Hyperdisk ML     │        │  ┌──────────────▼───────────────┐  │
+   │    per version      │        │  │   KV Server                  │  │
+   │                     │        │  │   Rust · unprivileged        │  │
+   │  part-NNN/          │        │  │  - mmap index.idx            │  │
+   │    index.idx        │        │  │  - pread data.bin            │  │
+   │    data.bin         │        │  │  - MGET over UDS + TCP       │  │
+   │  meta.json          │        │  │  - atomic version swap       │  │
+   └─────────────────────┘        │  └──────────────────────────────┘  │
+                                  └────────────────────────────────────┘
+```
 
 ---
 
-Would you like me to draft the **Go struct** for the `catalog.json` or the **Kubernetes Manifest** for the privileged DaemonSet to get you started?
+## Components
+
+### Control Plane
+
+**Language:** Go
+**Deployment:** Kubernetes Deployment
+**State:** Kubernetes CRDs
+
+The control plane is the authoritative source of truth for dataset and version state.
+It never touches nodes or disks directly.
+
+Responsibilities:
+- Maintain a registry of datasets and their configurations (`DatasetSpec`)
+- Trigger snapshot builder Jobs when a new version is needed
+- Monitor Job completion and promote finished snapshots to active
+- Track per-node acknowledgement of the active version (`NodeStatus`)
+- Drive rollout (advance active version) and rollback (revert to previous)
+- Expose a watched API that lifecycle-managers poll for version changes
+
+### Lifecycle Manager
+
+**Language:** Go
+**Deployment:** DaemonSet, privileged container
+**Communicates with:** Control plane API (outbound), KV server (shared EmptyDir)
+
+One instance per node. Performs all privileged OS and GCP operations.
+
+Responsibilities:
+- Watch the control plane API for the active version of each dataset
+- Call the Compute Engine API to attach Hyperdisk ML volumes to the local node
+- Wait for block devices to appear, then mount them read-only at
+  `/mnt/kv/<dataset>/v<N>/`
+- Write `catalog.json` atomically (via `rename(2)`) to a shared EmptyDir when a
+  new version is mounted and ready
+- Detach and unmount the previous version's disk after the KV server acknowledges
+  the swap
+- Report per-node version state back to the control plane
+
+### KV Server
+
+**Language:** Rust
+**Deployment:** DaemonSet, unprivileged container
+**Communicates with:** Clients (UDS + TCP), lifecycle manager (shared EmptyDir)
+
+One instance per node. The latency-critical serving path. Never performs privileged
+operations.
+
+Responsibilities:
+- Watch `catalog.json` via inotify for version changes
+- On version change: `mmap` the new `index.idx` partitions with
+  `madvise(MADV_RANDOM)`, open `data.bin` file descriptors
+- Serve MGET requests over:
+  - Unix domain socket: `/run/kv/kv.sock` (same-node clients, lowest latency)
+  - TCP port `7777` (off-node access and tooling)
+- Route each key by prefix `<dataset>:<key>`, then `xxhash64(key) & (N-1)` to
+  the correct partition
+- Perform Robin Hood index probe; on hit, `pread` the value from `data.bin`
+- Swap versions atomically using RCU: in-flight requests complete against the old
+  mmap before it is released
+- Acknowledge version swap to the lifecycle manager via the shared EmptyDir
+
+### Snapshot Builder
+
+**Language:** Rust
+**Deployment:** Kubernetes Job (runs to completion)
+**Shared library:** `kv-format`
+
+Stateless. Triggered by the control plane, reports completion and exits.
+
+Responsibilities:
+- Accept a `DatasetSpec` describing the source and target disk
+- Open a BigQuery Storage Read API session; fan out across N parallel gRPC streams
+  using Tokio tasks
+- Route each `(key, value)` pair to one of N partition writers by
+  `xxhash64(key) & (N-1)`; partition writers run concurrently with no shared state
+- Each partition writer:
+  - Appends values to `data.bin` at 64-byte aligned offsets
+  - Accumulates `(fingerprint, aligned_offset, size)` tuples in memory
+- After all data is written, build `index.idx` per partition using Robin Hood
+  insertion (parallelised across partitions via rayon)
+- Write `meta.json` last as the atomic completion signal
+- Report the finished snapshot to the control plane
+
+---
+
+## Shared Modules
+
+### `go/api`
+
+Go module imported by both the control plane and the lifecycle manager. Contains
+the canonical type definitions for the system's wire contracts:
+
+| Type | Description |
+|---|---|
+| `DatasetSpec` | Dataset name, source config, shard count, retention |
+| `VersionRecord` | Version ID, disk URL, state (building / ready / active / retired) |
+| `CatalogEntry` | Per-dataset entry written to `catalog.json` |
+| `NodeStatus` | Per-node version acknowledgement reported to the control plane |
+
+### `rust/crates/kv-format`
+
+Rust library crate that is the single implementation of the on-disk format described
+in `FORMAT.md`. Compiled into both the snapshot builder (write path) and the KV
+server (read path).
+
+| Module | Description |
+|---|---|
+| `index` | Robin Hood table: bucket layout, insertion, probe |
+| `data` | 64-byte aligned value writes and `pread` reads |
+| `meta` | `meta.json` serialisation and deserialisation |
+
+---
+
+## Data Flow
+
+```
+1. Control plane triggers a snapshot builder Job for dataset D, version V
+
+2. Snapshot builder:
+   a. Opens N parallel BQ Storage streams
+   b. Writes N × (index.idx, data.bin) to the provisioned Hyperdisk ML volume
+   c. Writes meta.json
+   d. Reports completion to control plane
+
+3. Control plane marks version V as active
+
+4. Lifecycle manager (on each node):
+   a. Detects new active version via control plane watch
+   b. Attaches the Hyperdisk ML volume to the node
+   c. Mounts it read-only at /mnt/kv/D/vV/
+   d. Writes catalog.json atomically
+
+5. KV server (on each node):
+   a. Detects catalog.json change via inotify
+   b. mmaps new index partitions, opens new data.bin fds
+   c. Atomically swaps the active dataset handle (RCU)
+   d. Acknowledges swap; lifecycle manager detaches the old disk
+
+6. Clients query via MGET on /run/kv/kv.sock or :7777
+   Dataset is selected by key prefix: "<dataset>:<key>"
+```
+
+---
+
+## Infrastructure Requirements
+
+| Requirement | Detail |
+|---|---|
+| Node machine types | N2, C3, or A3 (required for Hyperdisk ML) |
+| Disk type | Hyperdisk ML, max 64 TiB per disk |
+| Max concurrent readers | 2,500 (≤256 GiB), 300 (≤2 TiB), 30 (>16 TiB) |
+| GKE features | Workload Identity, privileged DaemonSet |
+| IAM | `compute.instances.attachDisk`, `storage.objectViewer`, BQ read |
+| DaemonSet privileges | `privileged: true`, `mountPropagation: Bidirectional` |
