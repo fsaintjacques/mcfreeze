@@ -1,3 +1,3 @@
 [workspace]
-members  = ["crates/kv-format", "crates/kv-loader"]
+members  = ["crates/kv-format", "crates/kv-loader", "crates/kv-bq"]
 resolver = "2"
