@@ -127,6 +127,8 @@ impl SnapshotWriter {
             psl_bits:       PSL_BITS,
             n_keys:         n_keys_total,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            scatter:        None,
+            index:          None,
         };
 
         let json = serde_json::to_string_pretty(&meta)?;

@@ -265,6 +265,18 @@ impl SnapshotLoader {
 
         let index_duration = index_start.elapsed();
 
+        // Read and embed the .done sentinels, then delete them so the snapshot
+        // root only contains data/ and meta.json.
+        let scatter_path = self.root.join("scatter.done");
+        let index_path   = self.root.join("index.done");
+
+        let scatter_val: Option<serde_json::Value> =
+            tokio::fs::read_to_string(&scatter_path).await.ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+        let index_val: Option<serde_json::Value> =
+            tokio::fs::read_to_string(&index_path).await.ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
+
         let meta = Meta {
             format_version: FORMAT_VERSION,
             n_partitions:   self.config.n_partitions,
@@ -274,9 +286,15 @@ impl SnapshotLoader {
             psl_bits:       PSL_BITS,
             n_keys:         index_done.n_keys,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            scatter:        scatter_val,
+            index:          index_val,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(kv_format::Error::from)?;
         tokio::fs::write(self.root.join("meta.json"), json).await?;
+
+        // Remove sentinels — their data is now in meta.json.
+        let _ = tokio::fs::remove_file(&scatter_path).await;
+        let _ = tokio::fs::remove_file(&index_path).await;
 
         Ok(LoadStats {
             n_keys:           index_done.n_keys,

@@ -105,6 +105,12 @@ pub struct Meta {
     pub psl_bits:        u8,
     pub n_keys:          u64,
     pub created_at:      String,
+    /// Embedded contents of `scatter.done` (opaque to kv-format).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scatter:         Option<serde_json::Value>,
+    /// Embedded contents of `index.done` (opaque to kv-format).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index:           Option<serde_json::Value>,
 }
 
 impl Meta {
@@ -186,6 +192,8 @@ mod tests {
             psl_bits:       PSL_BITS,
             n_keys:         0,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
+            scatter:        None,
+            index:          None,
         };
         let layout = meta.layout().unwrap();
         assert_eq!(layout.n_partitions, 64);
@@ -202,6 +210,8 @@ mod tests {
             psl_bits:       PSL_BITS,
             n_keys:         0,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
+            scatter:        None,
+            index:          None,
         };
         assert!(meta.layout().is_err());
     }

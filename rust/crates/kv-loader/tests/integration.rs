@@ -160,6 +160,12 @@ async fn meta_json_written_last_and_valid() {
     assert_eq!(raw["n_partitions"],   4);
     assert_eq!(raw["n_keys"],         10);
     assert_eq!(raw["hash_algorithm"], "xxhash64");
+
+    // scatter and index stats are embedded; .done files must be deleted.
+    assert!(raw["scatter"].is_object(), "scatter must be embedded in meta.json");
+    assert!(raw["index"].is_object(),   "index must be embedded in meta.json");
+    assert!(!snap_dir.path().join("scatter.done").exists(), "scatter.done must be deleted");
+    assert!(!snap_dir.path().join("index.done").exists(),   "index.done must be deleted");
 }
 
 #[tokio::test]
