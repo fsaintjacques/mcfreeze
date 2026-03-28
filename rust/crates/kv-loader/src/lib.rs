@@ -6,7 +6,7 @@ mod scatter;
 mod spill;
 
 pub use error::LoaderError;
-pub use source::{KvBatch, KvSource, VecBatch};
+pub use source::{KvBatch, KvSource, SourceMetadata, VecBatch};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -25,7 +25,6 @@ use scatter::ScatterPhase;
 // LoaderConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`SnapshotLoader`].
 #[derive(Clone)]
 pub struct LoaderConfig {
     /// Number of partitions. Must be a power of two. Default: 64.
@@ -91,10 +90,10 @@ pub struct LoadStats {
 
 /// Builds a snapshot directory from any [`KvSource`].
 ///
-/// ```text
-/// let loader = SnapshotLoader::new("/snapshots/v42", LoaderConfig::default())?;
-/// loader.load(&mut CsvSource::from_path("data.csv", 1000)?)?;
-/// ```
+/// `load` is async: the source is awaited for each batch (enabling async
+/// sources such as BigQuery gRPC streams), while the CPU/I/O heavy phases
+/// (scatter flush, index build) are dispatched to `spawn_blocking` to avoid
+/// blocking the async executor for extended periods.
 pub struct SnapshotLoader {
     root:   std::path::PathBuf,
     config: LoaderConfig,
@@ -107,14 +106,14 @@ impl SnapshotLoader {
         Ok(Self { root, config })
     }
 
-    pub fn load<S>(&self, source: &mut S) -> Result<LoadStats, LoaderError>
+    pub async fn load<S>(&self, source: &mut S) -> Result<LoadStats, LoaderError>
     where
-        S: KvSource,
+        S: KvSource + Send,
         LoaderError: From<S::Error>,
     {
         let layout = Layout::new(self.config.n_partitions)?;
 
-        // --- Phase 1: scatter ---
+        // --- Phase 1: scatter (async source, sync buffered writes) ---
         let scatter_start = Instant::now();
         let mut phase = ScatterPhase::new(
             &self.root,
@@ -123,14 +122,15 @@ impl SnapshotLoader {
             self.config.spill_buf_bytes,
         )?;
 
-        let interval = self.config.progress_interval;
+        let interval     = self.config.progress_interval;
+        let progress_fn  = self.config.progress_fn.clone();
         let mut last_reported = 0u64;
 
-        while let Some(batch) = source.next_batch().map_err(LoaderError::from)? {
+        while let Some(batch) = source.next_batch().await.map_err(LoaderError::from)? {
             for (key, value) in batch.iter() {
                 phase.scatter(key, value)?;
             }
-            if let Some(ref cb) = self.config.progress_fn {
+            if let Some(ref cb) = progress_fn {
                 let (n, b) = phase.counters();
                 if n - last_reported >= interval {
                     cb(n, b);
@@ -139,12 +139,21 @@ impl SnapshotLoader {
             }
         }
 
-        let (_, scatter_stats) = phase.finish()?;
+        // Flush data.bin + finalize spill.bin — blocking I/O, off the executor.
+        let (_, scatter_stats) = tokio::task::spawn_blocking(move || phase.finish())
+            .await??;
         let scatter_duration = scatter_start.elapsed();
 
-        // --- Phase 2: index build ---
-        let index_start = Instant::now();
-        IndexBuildPhase::new(&self.root, layout, self.config.index_parallelism).run()?;
+        // --- Phase 2: index build (rayon, blocking) ---
+        let index_start  = Instant::now();
+        let root2        = self.root.clone();
+        let parallelism  = self.config.index_parallelism;
+
+        tokio::task::spawn_blocking(move || {
+            IndexBuildPhase::new(&root2, layout, parallelism).run()
+        })
+        .await??;
+
         let index_duration = index_start.elapsed();
 
         // --- Phase 3: meta.json (completion sentinel) ---
@@ -158,9 +167,8 @@ impl SnapshotLoader {
             n_keys:         scatter_stats.n_keys,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         };
-        let json = serde_json::to_string_pretty(&meta)
-            .map_err(kv_format::Error::from)?;
-        std::fs::write(self.root.join("meta.json"), json)?;
+        let json = serde_json::to_string_pretty(&meta).map_err(kv_format::Error::from)?;
+        tokio::fs::write(self.root.join("meta.json"), json).await?;
 
         Ok(LoadStats {
             n_keys:           scatter_stats.n_keys,

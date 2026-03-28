@@ -5,17 +5,33 @@ use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use crate::error::LoaderError;
 
 // ---------------------------------------------------------------------------
+// SourceMetadata
+// ---------------------------------------------------------------------------
+
+/// Optional metadata reported by a source before streaming begins.
+///
+/// Both fields come from the source's own knowledge (e.g. BigQuery reports
+/// these from `CreateReadSession`); sources that cannot know upfront leave
+/// them as `None`.
+#[derive(Debug, Default, Clone)]
+pub struct SourceMetadata {
+    /// Estimated total number of key-value pairs.
+    pub estimated_rows:  Option<u64>,
+    /// Estimated total uncompressed byte size of all values.
+    pub estimated_bytes: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
 // KvBatch
 // ---------------------------------------------------------------------------
 
 /// A batch of key-value pairs yielded by a [`KvSource`].
 ///
 /// Implementations may back this with a `Vec` allocation (CSV) or an Arrow
-/// `RecordBatch` (ADBC, zero-copy into Arrow buffers).
+/// `RecordBatch` (ADBC / BigQuery Storage, zero-copy into Arrow buffers).
 pub trait KvBatch {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool { self.len() == 0 }
-    /// Iterate over `(key, value)` byte slices in this batch.
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])>;
 }
 
@@ -23,18 +39,29 @@ pub trait KvBatch {
 // KvSource
 // ---------------------------------------------------------------------------
 
-/// Fallible batch iterator of key-value pairs.
+/// Async fallible batch iterator of key-value pairs.
 ///
 /// `next_batch` returns `Ok(Some(_))` while data is available,
 /// `Ok(None)` when exhausted, or `Err(_)` on failure.
+///
+/// Implementations that do only sync I/O (e.g. [`CsvSource`]) return
+/// immediately from `next_batch` without any actual awaiting.  Sources
+/// backed by async I/O (e.g. BigQuery gRPC streams) can `await` freely.
+///
+/// Individual batch writes in the scatter loop are fast (BufWriter memcpy),
+/// so blocking the async executor per-batch is acceptable for a loader
+/// workload.  Callers that need stricter executor hygiene should wrap sync
+/// sources with `tokio::task::spawn_blocking`.
+#[allow(async_fn_in_trait)] // used only with `impl KvSource`, never `dyn`
 pub trait KvSource {
     type Batch: KvBatch;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn next_batch(&mut self) -> Result<Option<Self::Batch>, Self::Error>;
+    async fn next_batch(&mut self) -> Result<Option<Self::Batch>, Self::Error>;
 
-    /// Optional total key count hint for progress reporting.
-    fn size_hint(&self) -> Option<u64> { None }
+    /// Metadata available before streaming starts. Sources that know their
+    /// row count or byte size upfront should override this.
+    fn metadata(&self) -> SourceMetadata { SourceMetadata::default() }
 }
 
 // ---------------------------------------------------------------------------
@@ -64,11 +91,12 @@ pub struct CsvSource<R: Read> {
     reader:     csv::Reader<R>,
     batch_size: usize,
     record_idx: u64,
+    metadata:   SourceMetadata,
 }
 
 impl CsvSource<std::fs::File> {
     pub fn from_path(
-        path: impl AsRef<std::path::Path>,
+        path:       impl AsRef<std::path::Path>,
         batch_size: usize,
     ) -> Result<Self, LoaderError> {
         let file = std::fs::File::open(path)?;
@@ -82,16 +110,12 @@ impl<R: Read> CsvSource<R> {
             reader:     csv::ReaderBuilder::new().has_headers(false).from_reader(reader),
             batch_size: batch_size.max(1),
             record_idx: 0,
+            metadata:   SourceMetadata::default(),
         }
     }
-}
 
-impl<R: Read> KvSource for CsvSource<R> {
-    type Batch = VecBatch;
-    type Error = LoaderError;
-
-    fn next_batch(&mut self) -> Result<Option<VecBatch>, LoaderError> {
-        let mut batch = Vec::with_capacity(self.batch_size);
+    fn next_batch_sync(&mut self) -> Result<Option<VecBatch>, LoaderError> {
+        let mut batch  = Vec::with_capacity(self.batch_size);
         let mut record = csv::StringRecord::new();
 
         while batch.len() < self.batch_size {
@@ -114,12 +138,19 @@ impl<R: Read> KvSource for CsvSource<R> {
             self.record_idx += 1;
         }
 
-        if batch.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(VecBatch(batch)))
-        }
+        if batch.is_empty() { Ok(None) } else { Ok(Some(VecBatch(batch))) }
     }
+}
+
+impl<R: Read + Send> KvSource for CsvSource<R> {
+    type Batch = VecBatch;
+    type Error = LoaderError;
+
+    async fn next_batch(&mut self) -> Result<Option<VecBatch>, LoaderError> {
+        self.next_batch_sync()
+    }
+
+    fn metadata(&self) -> SourceMetadata { self.metadata.clone() }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,11 +173,11 @@ mod tests {
         out
     }
 
-    fn collect_all(src: &mut impl KvSource<Batch = VecBatch, Error = LoaderError>)
-        -> Vec<(Vec<u8>, Vec<u8>)>
-    {
+    async fn collect_all<S: KvSource<Batch = VecBatch, Error = LoaderError>>(
+        src: &mut S,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut all = Vec::new();
-        while let Some(batch) = src.next_batch().unwrap() {
+        while let Some(batch) = src.next_batch().await.unwrap() {
             for (k, v) in batch.iter() {
                 all.push((k.to_vec(), v.to_vec()));
             }
@@ -154,8 +185,8 @@ mod tests {
         all
     }
 
-    #[test]
-    fn csv_roundtrip() {
+    #[tokio::test]
+    async fn csv_roundtrip() {
         let pairs: &[(&[u8], &[u8])] = &[
             (b"hello", b"world"),
             (b"foo",   b"bar baz"),
@@ -163,7 +194,7 @@ mod tests {
         ];
         let csv  = make_csv(pairs);
         let mut src = CsvSource::new(csv.as_slice(), 10);
-        let got  = collect_all(&mut src);
+        let got  = collect_all(&mut src).await;
         assert_eq!(got.len(), pairs.len());
         for (i, (k, v)) in got.iter().enumerate() {
             assert_eq!(k.as_slice(), pairs[i].0);
@@ -171,8 +202,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn csv_batch_boundaries() {
+    #[tokio::test]
+    async fn csv_batch_boundaries() {
         // 5 rows, batch_size=2 → batches of [2, 2, 1]
         let pairs: Vec<(&[u8], &[u8])> = (0u8..5).map(|i| {
             let k: &'static [u8] = Box::leak(vec![i].into_boxed_slice());
@@ -182,19 +213,19 @@ mod tests {
         let csv = make_csv(&pairs);
         let mut src = CsvSource::new(csv.as_slice(), 2);
 
-        let b1 = src.next_batch().unwrap().unwrap();
+        let b1 = src.next_batch().await.unwrap().unwrap();
         assert_eq!(b1.len(), 2);
-        let b2 = src.next_batch().unwrap().unwrap();
+        let b2 = src.next_batch().await.unwrap().unwrap();
         assert_eq!(b2.len(), 2);
-        let b3 = src.next_batch().unwrap().unwrap();
+        let b3 = src.next_batch().await.unwrap().unwrap();
         assert_eq!(b3.len(), 1);
-        assert!(src.next_batch().unwrap().is_none());
+        assert!(src.next_batch().await.unwrap().is_none());
     }
 
-    #[test]
-    fn csv_empty() {
+    #[tokio::test]
+    async fn csv_empty() {
         let mut src = CsvSource::new(b"".as_slice(), 10);
-        assert!(src.next_batch().unwrap().is_none());
+        assert!(src.next_batch().await.unwrap().is_none());
     }
 
     #[test]
@@ -203,5 +234,13 @@ mod tests {
         assert!(b.is_empty());
         let b = VecBatch(vec![(b"k".to_vec(), b"v".to_vec())]);
         assert!(!b.is_empty());
+    }
+
+    #[test]
+    fn source_metadata_default() {
+        let src = CsvSource::new(b"".as_slice(), 10);
+        let m   = src.metadata();
+        assert!(m.estimated_rows.is_none());
+        assert!(m.estimated_bytes.is_none());
     }
 }

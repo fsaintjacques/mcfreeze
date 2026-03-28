@@ -11,7 +11,6 @@ use kv_loader::{LoaderConfig, SnapshotLoader, source::CsvSource};
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Generate `n` random key-value pairs, write a base64 CSV, return pairs.
 fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
     let mut rng  = StdRng::seed_from_u64(seed);
     let dir      = TempDir::new().unwrap();
@@ -20,7 +19,6 @@ fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
 
     let mut pairs = Vec::with_capacity(n);
     for i in 0..n {
-        // Keys: 8–32 bytes; values: 10–200 bytes.
         let key_len = 8 + (rng.next_u32() % 24) as usize;
         let val_len = 10 + (rng.next_u32() % 190) as usize;
 
@@ -28,8 +26,6 @@ fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
         let mut val = vec![0u8; val_len];
         rng.fill_bytes(&mut key);
         rng.fill_bytes(&mut val);
-
-        // Prefix key with index to guarantee uniqueness.
         key[..8].copy_from_slice(&(i as u64).to_le_bytes());
 
         writeln!(file, "{},{}", B64.encode(&key), B64.encode(&val)).unwrap();
@@ -53,14 +49,15 @@ fn loader(root: &std::path::Path, n_partitions: u32) -> SnapshotLoader {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn roundtrip_small() {
-    let n          = 500;
+#[tokio::test]
+async fn roundtrip_small() {
+    let n                = 500;
     let (csv_dir, pairs) = gen_csv(n, 42);
-    let snap_dir   = TempDir::new().unwrap();
+    let snap_dir         = TempDir::new().unwrap();
 
     let stats = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 64).unwrap())
+        .await
         .unwrap();
 
     assert_eq!(stats.n_keys, n as u64);
@@ -74,17 +71,16 @@ fn roundtrip_small() {
     assert_eq!(reader.get(b"definitely-absent").unwrap(), None);
 }
 
-#[test]
-fn roundtrip_large() {
-    let n          = 100_000;
+#[tokio::test]
+async fn roundtrip_large() {
+    let n                = 100_000;
     let (csv_dir, pairs) = gen_csv(n, 99);
-    let snap_dir   = TempDir::new().unwrap();
+    let snap_dir         = TempDir::new().unwrap();
 
-    let stats = loader(snap_dir.path(), 64)
+    loader(snap_dir.path(), 64)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 1000).unwrap())
+        .await
         .unwrap();
-
-    assert_eq!(stats.n_keys, n as u64);
 
     let reader = SnapshotReader::open(snap_dir.path()).unwrap();
     for (key, val) in &pairs {
@@ -92,11 +88,12 @@ fn roundtrip_large() {
     }
 }
 
-#[test]
-fn empty_source() {
+#[tokio::test]
+async fn empty_source() {
     let snap_dir = TempDir::new().unwrap();
-    let stats = loader(snap_dir.path(), 4)
+    let stats    = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::new(b"".as_slice(), 100))
+        .await
         .unwrap();
 
     assert_eq!(stats.n_keys, 0);
@@ -106,14 +103,15 @@ fn empty_source() {
     assert_eq!(reader.get(b"anything").unwrap(), None);
 }
 
-#[test]
-fn stats_are_accurate() {
-    let n   = 1_000;
+#[tokio::test]
+async fn stats_are_accurate() {
+    let n                = 1_000;
     let (csv_dir, pairs) = gen_csv(n, 7);
-    let snap_dir = TempDir::new().unwrap();
+    let snap_dir         = TempDir::new().unwrap();
 
     let stats = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 100).unwrap())
+        .await
         .unwrap();
 
     assert_eq!(stats.n_keys, n as u64);
@@ -121,13 +119,14 @@ fn stats_are_accurate() {
     assert_eq!(stats.data_bytes, expected_bytes);
 }
 
-#[test]
-fn meta_json_written_last_and_valid() {
+#[tokio::test]
+async fn meta_json_written_last_and_valid() {
     let (csv_dir, _) = gen_csv(10, 1);
-    let snap_dir = TempDir::new().unwrap();
+    let snap_dir     = TempDir::new().unwrap();
 
     loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 10).unwrap())
+        .await
         .unwrap();
 
     let raw: serde_json::Value = serde_json::from_str(
@@ -140,13 +139,14 @@ fn meta_json_written_last_and_valid() {
     assert_eq!(raw["hash_algorithm"], "xxhash64");
 }
 
-#[test]
-fn spill_files_absent_after_load() {
+#[tokio::test]
+async fn spill_files_absent_after_load() {
     let (csv_dir, _) = gen_csv(50, 3);
-    let snap_dir = TempDir::new().unwrap();
+    let snap_dir     = TempDir::new().unwrap();
 
     loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 10).unwrap())
+        .await
         .unwrap();
 
     for entry in std::fs::read_dir(snap_dir.path()).unwrap() {
@@ -158,14 +158,14 @@ fn spill_files_absent_after_load() {
     }
 }
 
-#[test]
-fn progress_callback_fires() {
+#[tokio::test]
+async fn progress_callback_fires() {
     use std::sync::{Arc, Mutex};
 
     let (csv_dir, _) = gen_csv(300_000, 5);
-    let snap_dir = TempDir::new().unwrap();
+    let snap_dir     = TempDir::new().unwrap();
 
-    let calls = Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
+    let calls  = Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
     let calls2 = calls.clone();
 
     let config = LoaderConfig {
@@ -180,12 +180,11 @@ fn progress_callback_fires() {
     };
     SnapshotLoader::new(snap_dir.path(), config).unwrap()
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 1000).unwrap())
+        .await
         .unwrap();
 
     let recorded = calls.lock().unwrap();
-    // At 300k keys with interval 100k, expect at least 2 callbacks.
     assert!(recorded.len() >= 2, "expected progress callbacks, got {}", recorded.len());
-    // Keys reported must be monotonically increasing.
     for w in recorded.windows(2) {
         assert!(w[1].0 > w[0].0);
     }

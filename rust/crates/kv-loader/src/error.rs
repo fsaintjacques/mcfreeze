@@ -21,4 +21,7 @@ pub enum LoaderError {
 
     #[error("thread pool error: {0}")]
     ThreadPool(#[from] rayon::ThreadPoolBuildError),
+
+    #[error("task join error: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
