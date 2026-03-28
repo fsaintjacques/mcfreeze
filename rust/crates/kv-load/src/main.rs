@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -7,7 +8,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 use kv_bq::{BqReadSession, BqSourceConfig};
-use kv_loader::{LoaderConfig, SnapshotLoader};
+use kv_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -20,9 +21,10 @@ use kv_loader::{LoaderConfig, SnapshotLoader};
     version,
 )]
 struct Cli {
-    /// Output snapshot directory (created if absent)
+    /// Output snapshot directory (created if absent).
+    /// Required unless --download-benchmark is set.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Number of hash partitions — must be a power of two
     #[arg(long, default_value = "64")]
@@ -39,6 +41,11 @@ struct Cli {
     /// Validate and print the load plan without writing any data
     #[arg(long)]
     dry_run: bool,
+
+    /// Download all batches from the source and discard them, reporting
+    /// throughput.  No data is written to --output.
+    #[arg(long)]
+    download_benchmark: bool,
 
     #[command(subcommand)]
     source: Source,
@@ -125,6 +132,7 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.partitions,
                 cli.index_parallelism,
                 cli.dry_run,
+                cli.download_benchmark,
                 project,
                 table,
                 key_column,
@@ -144,17 +152,18 @@ async fn run(cli: Cli) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_bq(
-    output:            PathBuf,
-    partitions:        u32,
-    index_parallelism: usize,
-    dry_run:           bool,
-    project:           Option<String>,
-    table:             String,
-    key_column:        String,
-    value_column:      String,
-    streams:           i32,
-    row_restriction:   Option<String>,
-    no_compression:    bool,
+    output:              Option<PathBuf>,
+    partitions:          u32,
+    index_parallelism:   usize,
+    dry_run:             bool,
+    download_benchmark:  bool,
+    project:             Option<String>,
+    table:               String,
+    key_column:          String,
+    value_column:        String,
+    streams:             i32,
+    row_restriction:     Option<String>,
+    no_compression:      bool,
 ) -> Result<()> {
     let (billing_project, table_resource) = parse_table(&table, project.as_deref())?;
 
@@ -195,6 +204,15 @@ async fn run_bq(
         return Ok(());
     }
 
+    let sources = session.into_sources()
+        .context("failed to split session into sources")?;
+
+    if download_benchmark {
+        return benchmark_download(sources).await;
+    }
+
+    let output = output.context("--output is required unless --download-benchmark is set")?;
+
     let loader_config = LoaderConfig {
         n_partitions:      partitions,
         index_parallelism,
@@ -206,9 +224,6 @@ async fn run_bq(
 
     let loader = SnapshotLoader::new(&output, loader_config)
         .context("failed to create SnapshotLoader")?;
-
-    let sources = session.into_sources()
-        .context("failed to split session into sources")?;
 
     let stats = loader
         .load_parallel(sources)
@@ -223,6 +238,66 @@ async fn run_bq(
         "load complete",
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Download benchmark
+// ---------------------------------------------------------------------------
+
+/// Drain all `sources` concurrently, discarding every batch.
+///
+/// Reports total rows, total payload bytes (keys + values), elapsed time,
+/// and download throughput.
+async fn benchmark_download<S>(sources: Vec<S>) -> Result<()>
+where
+    S: KvSource + Send + 'static,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    info!(n_sources = sources.len(), "download benchmark started");
+    let start = Instant::now();
+
+    let tasks: Vec<_> = sources
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mut src)| {
+            tokio::spawn(async move {
+                let mut n_keys:      u64 = 0;
+                let mut payload_bytes: u64 = 0;
+                while let Some(batch) = src
+                    .next_batch()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("stream {idx}: {e}"))?
+                {
+                    for (k, v) in batch.iter() {
+                        n_keys        += 1;
+                        payload_bytes += (k.len() + v.len()) as u64;
+                    }
+                }
+                Ok::<(u64, u64), anyhow::Error>((n_keys, payload_bytes))
+            })
+        })
+        .collect();
+
+    let mut total_keys  = 0u64;
+    let mut total_bytes = 0u64;
+    for task in tasks {
+        let (keys, bytes) = task.await??;
+        total_keys  += keys;
+        total_bytes += bytes;
+    }
+
+    let elapsed   = start.elapsed().as_secs_f64();
+    let bytes_sec = if elapsed > 0.0 { (total_bytes as f64 / elapsed) as u64 } else { 0 };
+
+    info!(
+        n_keys        = total_keys,
+        payload_bytes = total_bytes,
+        elapsed_secs  = elapsed,
+        bytes_per_sec = bytes_sec,
+        throughput    = %human_bandwidth(bytes_sec),
+        "download benchmark complete",
+    );
     Ok(())
 }
 
@@ -255,6 +330,17 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
 
     let billing = project_override.unwrap_or(&project).to_string();
     Ok((billing, resource))
+}
+
+fn human_bandwidth(bytes_per_sec: u64) -> String {
+    const UNITS: &[&str] = &["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+    let mut value = bytes_per_sec as f64;
+    let mut unit  = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit  += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 fn make_progress_fn() -> Arc<dyn Fn(u64, u64) + Send + Sync> {
