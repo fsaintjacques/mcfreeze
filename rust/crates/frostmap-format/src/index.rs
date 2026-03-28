@@ -398,15 +398,19 @@ unsafe fn probe_avx512(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)>
 
         // One 512-bit load covers 64 bytes = 4 buckets.
         // Layout: [fp0, loc0, fp1, loc1, fp2, loc2, fp3, loc3]
-        let data = _mm512_loadu_si512(table.as_ptr().add(pos) as *const __m512i);
+        // _mm512_loadu_si512 takes *const i32 on stable Rust (void* binding).
+        let data = _mm512_loadu_si512(table.as_ptr().add(pos) as *const i32);
 
-        // mask_compress with 0x55 (bits 0,2,4,6) gathers even qwords:
-        //   [fp0, fp1, fp2, fp3, 0, 0, 0, 0]
+        // mask_compress with 0x55 (bits 0,2,4,6) gathers even qwords into lanes 0–3;
+        // lanes 4–7 are filled with `zero` (the fill-source, not the empty sentinel).
+        //   result: [fp0, fp1, fp2, fp3, 0, 0, 0, 0]
         let fps = _mm512_mask_compress_epi64(zero, 0x55, data);
 
         // k-mask compare: result is a 1-bit-per-lane u8; mask 0x0F limits to lanes 0–3.
+        // `empty_sentinel` is semantically distinct from the compress fill-source above.
+        let empty_sentinel = _mm512_setzero_si512();
         let match_mask: u8 = _mm512_mask_cmpeq_epi64_mask(0x0F, fps, target);
-        let empty_mask: u8 = _mm512_mask_cmpeq_epi64_mask(0x0F, fps, zero);
+        let empty_mask: u8 = _mm512_mask_cmpeq_epi64_mask(0x0F, fps, empty_sentinel);
 
         if (match_mask | empty_mask) != 0 {
             let match_lane = match_mask.trailing_zeros(); // 0–3, or 8 if absent
@@ -661,5 +665,91 @@ mod tests {
             assert_eq!(got, expected, "neon mismatch for fp={}", e.fingerprint);
         }
         assert_eq!(unsafe { probe_neon(&table, fingerprint(b"absent")) }, None);
+    }
+
+    // --- last-group boundary (pos + LANES == n, no wrap) ---
+
+    /// Verify that the SIMD loop correctly processes the last group when it ends
+    /// exactly at the table boundary (`pos + LANES == n`), i.e. no break is taken
+    /// and the scalar tail is never entered.
+    ///
+    /// Layout for LANES=4 (n=8, target at pos=4 = n-LANES):
+    ///   pos: 0  1  2  3  4(hit)  5  6  7
+    ///   fp:  ∅  ∅  ∅  ∅  4       5  6  7
+    ///
+    /// home(4) = 4 % 8 = 4. The SIMD group [4,5,6,7] is processed with 4+4==8
+    /// (not > 8), so the loop does not break. Match found at lane 0 of that group.
+    ///
+    /// For NEON (LANES=2) the same table exercises the [4,5] and [6,7] groups,
+    /// with the hit in the first lane of [4,5].
+    #[test]
+    fn probe_last_group_boundary() {
+        let n         = 8usize;   // n % 4 == 0 and n % 2 == 0
+        let target_fp = 4u64;     // 4 % 8 == 4  →  home at pos 4 = n - LANES(4)
+
+        let mut table = vec![Bucket::default(); n];
+        // Fill positions 4–7 with non-empty entries; 0–3 stay empty.
+        for i in 4..8usize {
+            table[i] = Bucket {
+                fingerprint: i as u64,
+                loc:         Bucket::encode_loc(i as u64, i as u32),
+            };
+        }
+        let expected = Some(((4u64) << 6, 4u32));
+
+        assert_eq!(probe_scalar(&table, target_fp), expected, "scalar");
+        assert_eq!(probe(&table, target_fp),        expected, "dispatch");
+
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            assert_eq!(unsafe { probe_avx2(&table, target_fp) }, expected, "avx2");
+        }
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx512f") {
+            assert_eq!(unsafe { probe_avx512(&table, target_fp) }, expected, "avx512");
+        }
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(unsafe { probe_neon(&table, target_fp) }, expected, "neon");
+    }
+
+    // --- wrap-around ---
+
+    /// Build a table where the probe for `target_fp` must wrap past the last
+    /// bucket to find the key, exercising the scalar tail of every SIMD path.
+    ///
+    /// Layout (n=9):
+    ///   pos: 0    1      2  3  4  5  6   7   8
+    ///   fp:  99   6(hit) ∅  ∅  ∅  ∅  33  44  55
+    ///
+    /// home(6) = 6 % 9 = 6.
+    ///   AVX2/AVX-512 (LANES=4): pos=6, 6+4=10 > 9 → break; scalar: 6→7→8→0→1 ✓
+    ///   NEON (LANES=2):         pos=6, loads [6,7] (no hit); pos=8, 8+2=10>9 → break; scalar: 8→0→1 ✓
+    #[test]
+    fn probe_wrap_around() {
+        let n          = 9usize;
+        let target_fp  = 6u64; // 6 % 9 == 6
+        let target_loc = Bucket::encode_loc(42, 7);
+        let expected   = Some((42u64 << 6, 7u32)); // byte_offset = 42*64, size = 7
+
+        let mut table = vec![Bucket::default(); n];
+        table[6] = Bucket { fingerprint: 33, loc: Bucket::encode_loc(10, 1) };
+        table[7] = Bucket { fingerprint: 44, loc: Bucket::encode_loc(11, 1) };
+        table[8] = Bucket { fingerprint: 55, loc: Bucket::encode_loc(12, 1) };
+        table[0] = Bucket { fingerprint: 99, loc: Bucket::encode_loc(13, 1) };
+        table[1] = Bucket { fingerprint: target_fp, loc: target_loc };
+
+        assert_eq!(probe_scalar(&table, target_fp), expected, "scalar");
+        assert_eq!(probe(&table, target_fp),        expected, "dispatch");
+
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            assert_eq!(unsafe { probe_avx2(&table, target_fp) }, expected, "avx2");
+        }
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx512f") {
+            assert_eq!(unsafe { probe_avx512(&table, target_fp) }, expected, "avx512");
+        }
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(unsafe { probe_neon(&table, target_fp) }, expected, "neon");
     }
 }
