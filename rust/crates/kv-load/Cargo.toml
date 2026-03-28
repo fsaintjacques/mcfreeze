@@ -13,3 +13,4 @@ kv-bq     = { path = "../kv-bq" }
 clap      = { version = "4", features = ["derive"] }
 tokio     = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow    = "1"
+rustls    = { version = "0.23", features = ["ring"], default-features = false }

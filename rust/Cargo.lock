@@ -1338,6 +1338,7 @@ dependencies = [
  "clap",
  "kv-bq",
  "kv-loader",
+ "rustls",
  "tokio",
 ]
 
@@ -1993,6 +1994,7 @@ checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

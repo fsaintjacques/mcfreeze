@@ -85,6 +85,10 @@ enum Source {
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     if let Err(e) = run(Cli::parse()).await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
