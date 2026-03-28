@@ -53,8 +53,11 @@ pub enum Command {
     Quit,
     /// `ms`/`md`/`ma` — write command; this server is read-only.
     ///
-    /// `data_len` is the number of data-body bytes to drain for `ms` before
-    /// the next command; zero for `md` and `ma`.
+    /// `data_len` is the size of the `ms` data body in bytes.  After
+    /// receiving this variant the caller **must drain `data_len + 2` bytes**
+    /// from the read buffer — the data block itself (`data_len`) plus its
+    /// mandatory `\r\n` terminator (`+2`) — before the next command begins.
+    /// Zero for `md` and `ma`, which carry no data body.
     WriteRejected { data_len: usize },
 }
 
@@ -207,7 +210,14 @@ pub fn write_en(dst: &mut BytesMut) {
 }
 
 /// Write a `SERVER_ERROR` response.
+///
+/// `msg` must not contain CR or LF — embedding them would split the response
+/// line and corrupt the frame stream.
 pub fn write_server_error(dst: &mut BytesMut, msg: &[u8]) {
+    debug_assert!(
+        !msg.contains(&b'\r') && !msg.contains(&b'\n'),
+        "write_server_error: msg must not contain CR or LF"
+    );
     dst.put_slice(b"SERVER_ERROR ");
     dst.put_slice(msg);
     dst.put_slice(b"\r\n");
@@ -292,6 +302,25 @@ mod tests {
     fn ms_rejected_with_data_len() {
         let cmd = parse(b"ms mykey 42 S12\r\n").unwrap().unwrap();
         assert_eq!(cmd, Command::WriteRejected { data_len: 42 });
+    }
+
+    #[test]
+    fn ms_drain_contract_with_pipelined_command() {
+        // Full ms frame: command line + 5-byte data body + \r\n terminator,
+        // followed by a pipelined version command.
+        let mut buf = BytesMut::from(&b"ms mykey 5 S12\r\nhello\r\nversion\r\n"[..]);
+
+        // Parser returns WriteRejected after consuming only the command line;
+        // the data body is NOT consumed.
+        let cmd = parse_command(&mut buf).unwrap().unwrap();
+        assert_eq!(cmd, Command::WriteRejected { data_len: 5 });
+
+        // Caller drains data_len + 2 (body + mandatory \r\n terminator).
+        buf.advance(5 + 2);
+
+        // Next parse_command sees the pipelined command cleanly.
+        assert_eq!(parse_command(&mut buf).unwrap(), Some(Command::Version));
+        assert!(buf.is_empty());
     }
 
     #[test]
