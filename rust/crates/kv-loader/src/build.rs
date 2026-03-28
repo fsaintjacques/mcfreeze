@@ -97,50 +97,49 @@ fn build_partition(dir: &Path) -> Result<u64, LoaderError> {
 mod tests {
     use super::*;
     use crate::scatter::ScatterPhase;
+    use crate::source::VecBatch;
     use kv_format::index::IndexHeader;
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
-
-    fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
-        let dir = TempDir::new().unwrap();
-        let mut scatter = ScatterPhase::new(dir.path(), layout(n), 1024 * 1024, 4096).unwrap();
-        for &(k, v) in pairs {
-            scatter.scatter(k, v).unwrap();
-        }
-        scatter.finish().unwrap();
-
-        IndexBuildPhase::new(dir.path(), layout(n), 2).run().unwrap();
-        dir
-    }
 
     fn part_dir(root: &std::path::Path, n: u32, i: usize) -> std::path::PathBuf {
         let width = format!("{}", n - 1).len();
         root.join(format!("part-{:0>width$}", i, width = width))
     }
 
-    #[test]
-    fn build_produces_index_files() {
-        let dir = scatter_and_build(&[(b"k", b"v")], 4);
+    async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
+        let dir   = TempDir::new().unwrap();
+        let batch = VecBatch(pairs.iter().map(|&(k, v)| (k.to_vec(), v.to_vec())).collect());
+        let mut phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
+        phase.scatter_batch(&batch).await.unwrap();
+        phase.finish().await.unwrap();
+        IndexBuildPhase::new(dir.path(), layout(n), 2).run().unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn build_produces_index_files() {
+        let dir = scatter_and_build(&[(b"k", b"v")], 4).await;
         for i in 0..4 {
             let idx = part_dir(dir.path(), 4, i).join("index.idx");
             assert!(idx.exists(), "{idx:?}");
         }
     }
 
-    #[test]
-    fn spill_files_removed_after_build() {
-        let dir = scatter_and_build(&[(b"k", b"v")], 4);
+    #[tokio::test]
+    async fn spill_files_removed_after_build() {
+        let dir = scatter_and_build(&[(b"k", b"v")], 4).await;
         for i in 0..4 {
             let spill = part_dir(dir.path(), 4, i).join("spill.bin");
             assert!(!spill.exists(), "spill.bin should be removed: {spill:?}");
         }
     }
 
-    #[test]
-    fn index_key_count() {
+    #[tokio::test]
+    async fn index_key_count() {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")];
-        let dir = scatter_and_build(pairs, 1);
+        let dir = scatter_and_build(pairs, 1).await;
 
         let hdr_bytes = {
             use std::io::Read;
@@ -153,10 +152,9 @@ mod tests {
         assert_eq!(hdr.n_keys, 3);
     }
 
-    #[test]
-    fn empty_partition_builds_ok() {
-        // 0 pairs with n=4 — all partitions are empty.
-        let dir = scatter_and_build(&[], 4);
+    #[tokio::test]
+    async fn empty_partition_builds_ok() {
+        let dir = scatter_and_build(&[], 4).await;
         for i in 0..4 {
             let idx = part_dir(dir.path(), 4, i).join("index.idx");
             assert!(idx.exists());

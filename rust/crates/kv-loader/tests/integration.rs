@@ -172,6 +172,7 @@ async fn progress_callback_fires() {
         n_partitions:      4,
         data_buf_bytes:    1024 * 1024,
         spill_buf_bytes:   64 * 1024,
+        channel_capacity:  8,
         index_parallelism: 2,
         progress_interval: 100_000,
         progress_fn: Some(Arc::new(move |n, b| {

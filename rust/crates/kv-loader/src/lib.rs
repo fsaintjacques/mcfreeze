@@ -36,6 +36,11 @@ pub struct LoaderConfig {
     /// `BufWriter` capacity for each partition's `spill.bin`. Default: 256 KiB.
     pub spill_buf_bytes: usize,
 
+    /// Bounded channel capacity between the fan-out and each partition writer.
+    /// Controls peak in-flight memory: `n_partitions × channel_capacity × avg_batch_bytes`.
+    /// Default: 8.
+    pub channel_capacity: usize,
+
     /// Number of partitions to build indexes for in parallel. Default: 2.
     pub index_parallelism: usize,
 
@@ -52,6 +57,7 @@ impl std::fmt::Debug for LoaderConfig {
             .field("n_partitions",      &self.n_partitions)
             .field("data_buf_bytes",    &self.data_buf_bytes)
             .field("spill_buf_bytes",   &self.spill_buf_bytes)
+            .field("channel_capacity",  &self.channel_capacity)
             .field("index_parallelism", &self.index_parallelism)
             .field("progress_interval", &self.progress_interval)
             .field("progress_fn",       &self.progress_fn.as_ref().map(|_| "<fn>"))
@@ -65,6 +71,7 @@ impl Default for LoaderConfig {
             n_partitions:      64,
             data_buf_bytes:    8 * 1024 * 1024,
             spill_buf_bytes:   256 * 1024,
+            channel_capacity:  8,
             index_parallelism: 2,
             progress_interval: 100_000,
             progress_fn:       None,
@@ -113,23 +120,25 @@ impl SnapshotLoader {
     {
         let layout = Layout::new(self.config.n_partitions)?;
 
-        // --- Phase 1: scatter (async source, sync buffered writes) ---
+        // --- Phase 1: scatter ---
+        // Source is awaited per batch (async); writers run in spawn_blocking.
+        // Fan-out buckets each batch by partition and sends sub-batches via
+        // bounded channels — backpressure propagates to the source naturally.
         let scatter_start = Instant::now();
         let mut phase = ScatterPhase::new(
             &self.root,
             layout,
+            self.config.channel_capacity,
             self.config.data_buf_bytes,
             self.config.spill_buf_bytes,
         )?;
 
-        let interval     = self.config.progress_interval;
-        let progress_fn  = self.config.progress_fn.clone();
+        let interval      = self.config.progress_interval;
+        let progress_fn   = self.config.progress_fn.clone();
         let mut last_reported = 0u64;
 
         while let Some(batch) = source.next_batch().await.map_err(LoaderError::from)? {
-            for (key, value) in batch.iter() {
-                phase.scatter(key, value)?;
-            }
+            phase.scatter_batch(&batch).await?;
             if let Some(ref cb) = progress_fn {
                 let (n, b) = phase.counters();
                 if n - last_reported >= interval {
@@ -139,9 +148,7 @@ impl SnapshotLoader {
             }
         }
 
-        // Flush data.bin + finalize spill.bin — blocking I/O, off the executor.
-        let (_, scatter_stats) = tokio::task::spawn_blocking(move || phase.finish())
-            .await??;
+        let scatter_stats = phase.finish().await?;
         let scatter_duration = scatter_start.elapsed();
 
         // --- Phase 2: index build (rayon, blocking) ---
