@@ -153,6 +153,7 @@ the canonical type definitions for the system's wire contracts:
 | `VersionRecord` | Version ID, disk URL, state (building / ready / active / retired) |
 | `CatalogEntry` | Per-dataset entry written to `catalog.json` |
 | `NodeStatus` | Per-node version acknowledgement reported to the control plane |
+| `NodeAssignment` | Active version assignment returned by the control plane watched API |
 
 ### `rust/crates/frostmap-format`
 

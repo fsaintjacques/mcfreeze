@@ -85,6 +85,10 @@ Responsibilities:
 **Deployment:** Kubernetes `DaemonSet`, privileged container
 **Communicates with:** control-plane API (outbound), KV server (shared EmptyDir)
 
+> **Terminology note:** `node-agent` is the binary name for the component referred to as
+> "Lifecycle Manager" in `HIGHLEVEL.md`. The names are interchangeable; this document uses
+> the binary name to stay consistent with `fmtctl` subcommand conventions.
+
 One instance per node. Performs all privileged OS and GCP operations required
 to materialise a dataset version onto the local node.
 
@@ -97,7 +101,8 @@ Responsibilities:
 - Write `catalog.json` atomically (via `rename(2)`) to the shared EmptyDir to
   signal the KV server that a new version is available
 - Wait for the KV server to acknowledge the version swap (via the shared
-  EmptyDir)
+  EmptyDir) — see `HIGHLEVEL.md § KV Server` for the full acknowledgement
+  protocol; the KV server is a separate Rust component outside `fmtctl`
 - Detach and unmount the previous version's disk after acknowledgement
 - Report per-node `NodeStatus` back to the control-plane (active version,
   swap timestamp, error state)
@@ -113,7 +118,12 @@ Each `VersionRecord` transitions through the following states:
   [building] ──(job succeeds)──▶ [ready] ──(control-plane promotes)──▶ [active]
       │                                                                     │
       └──(job fails)──▶ [failed]              (all nodes ack + retention)──▶ [retired]
+                            │
+                            └──(control-plane retries)──▶ [building]  (new VersionRecord)
 ```
+
+> **Retry semantics:** a retry creates a fresh `VersionRecord` in `building` state rather
+> than transitioning the failed record. The failed record is retained for audit purposes.
 
 | State | Owner | Meaning |
 |---|---|---|
