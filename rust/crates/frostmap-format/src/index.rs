@@ -200,6 +200,7 @@ pub fn bucket_count(n_keys: usize) -> usize {
 /// Returns `Err(Error::PslOverflow)` if the probe sequence exceeds `MAX_PSL`,
 /// which indicates the table is full or the fill rate is too high.
 pub fn insert(table: &mut [Bucket], psls: &mut [u8], mut entry: RawEntry) -> Result<()> {
+    debug_assert_eq!(table.len(), psls.len(), "psls must be parallel to table");
     let n   = table.len();
     let mut pos = entry.fingerprint as usize % n;
     let mut psl = 0u8;
@@ -261,9 +262,11 @@ pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
     if n == 0 {
         return None;
     }
-    let mut pos = fingerprint as usize % n;
+    let mut pos   = fingerprint as usize % n;
+    let mut steps = 0usize;
 
     loop {
+        debug_assert!(steps < n, "probe scanned all {n} buckets without finding an empty slot");
         let bucket = table[pos];
 
         if bucket.is_empty() {
@@ -274,7 +277,8 @@ pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
             return Some((bucket.byte_offset(), bucket.size()));
         }
 
-        pos = (pos + 1) % n;
+        pos    = (pos + 1) % n;
+        steps += 1;
     }
 }
 
