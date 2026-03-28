@@ -57,7 +57,16 @@ pub async fn dispatch(
         Command::Quit => Disposition::Close,
         Command::WriteRejected { data_len } => {
             write_server_error(dst, b"read-only");
-            Disposition::Drain(data_len + 2)
+            if data_len == 0 {
+                // md / ma: the parser consumed the entire command line including
+                // its CRLF. No data body follows; nothing to drain.
+                Disposition::Continue
+            } else {
+                // ms: parser consumed only the command line. The data body
+                // (data_len bytes) plus its mandatory \r\n terminator remain
+                // in the stream and must be drained before the next command.
+                Disposition::Drain(data_len + 2)
+            }
         }
     }
 }
@@ -197,15 +206,15 @@ mod tests {
     // --- write commands ---
 
     #[tokio::test]
-    async fn write_rejected_md_returns_drain_2() {
-        // md/ma carry no data body: data_len=0, so drain = 0+2 = 2.
+    async fn write_rejected_md_returns_continue() {
+        // md/ma: data_len=0, parser already consumed the CRLF — nothing to drain.
         let lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 0 },
             &lookup, &mut dst, "0.1.0", 0,
         ).await;
-        assert_eq!(d, Disposition::Drain(2));
+        assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
     }
 
