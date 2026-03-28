@@ -53,6 +53,7 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
     let mut partitions   = Vec::with_capacity(n);
     let mut merged       = new_size_histogram();
     let mut total_sum    = 0u64;
+    let mut data_bytes   = 0u64;
 
     for i in 0..n {
         let dir        = root.join(format!("part-{:0>width$}", i, width = width));
@@ -63,6 +64,7 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
         if !data_path.exists() {
             return Ok(None);
         }
+        data_bytes += std::fs::metadata(&data_path)?.len();
 
         if spill_path.exists() {
             let reader       = SpillReader::open(&spill_path)?;
@@ -98,7 +100,15 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
         Some(ValueSizeHistogram::from_histogram(&merged, total_sum, sample_keys))
     };
 
-    let done = ScatterDone { n_keys, n_partitions: layout.n_partitions, value_sizes, partitions };
+    let done = ScatterDone {
+        n_keys,
+        n_partitions:  layout.n_partitions,
+        data_bytes,
+        wall_secs:     None,
+        bytes_per_sec: None,
+        value_sizes,
+        partitions,
+    };
     let json = serde_json::to_string_pretty(&done)
         .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
     tokio::fs::write(&sentinel, json).await?;
@@ -216,7 +226,7 @@ impl SnapshotLoader {
                 log::info!("scatter already complete ({} keys), skipping", stats.n_keys);
                 (stats, Duration::ZERO)
             } else {
-                let stats = self.scatter_sources(layout, sources.into_iter()).await?;
+                let stats = self.scatter_sources(layout, sources.into_iter(), scatter_start).await?;
                 (stats, scatter_start.elapsed())
             };
 
@@ -258,7 +268,7 @@ impl SnapshotLoader {
                     }
                 }
 
-                let stats = phase.finish(vec![fanout]).await?;
+                let stats = phase.finish(vec![fanout], scatter_start).await?;
                 (stats, scatter_start.elapsed())
             };
 
@@ -278,6 +288,7 @@ impl SnapshotLoader {
         &self,
         layout:  Layout,
         sources: I,
+        start:   Instant,
     ) -> Result<scatter::ScatterStats, LoaderError>
     where
         S: KvSource + Send + 'static,
@@ -322,7 +333,7 @@ impl SnapshotLoader {
             fanouts.push(task.await??);
         }
 
-        phase.finish(fanouts).await
+        phase.finish(fanouts, start).await
     }
 
     /// Index build + meta.json write, shared by `load` and `load_parallel`.

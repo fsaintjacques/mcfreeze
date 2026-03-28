@@ -148,7 +148,7 @@ mod tests {
         let phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
         let mut fanout = phase.fanout();
         fanout.scatter_batch(&batch).await.unwrap();
-        phase.finish(vec![fanout]).await.unwrap();
+        phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
         IndexBuildPhase::new(dir.path(), layout(n), 2).run().unwrap();
         dir
     }

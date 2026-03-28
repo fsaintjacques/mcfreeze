@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
@@ -104,12 +105,17 @@ pub struct PartitionDone {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScatterDone {
-    pub n_keys:       u64,
-    pub n_partitions: u32,
+    pub n_keys:        u64,
+    pub n_partitions:  u32,
+    pub data_bytes:    u64,
+    /// Wall-clock seconds for the scatter phase. `None` on the fallback path.
+    pub wall_secs:     Option<f64>,
+    /// Unpadded payload bytes per second. `None` on the fallback path.
+    pub bytes_per_sec: Option<u64>,
     /// Aggregate value-size histogram across all partitions.
-    pub value_sizes:  Option<ValueSizeHistogram>,
+    pub value_sizes:   Option<ValueSizeHistogram>,
     /// Per-partition stats, indexed by partition number.
-    pub partitions:   Vec<PartitionDone>,
+    pub partitions:    Vec<PartitionDone>,
 }
 
 /// Create a fresh value-size histogram covering 1 B … 8 MiB with 3 sig-figs.
@@ -257,8 +263,8 @@ impl ScatterPhase {
     /// On success writes `<root>/scatter.done` (JSON) containing per-partition
     /// key counts and value-size quantiles, so a subsequent run can skip the
     /// scatter phase entirely.
-    pub async fn finish(self, fanouts: Vec<Fanout>) -> Result<ScatterStats, LoaderError> {
-        let data_bytes = fanouts.iter().map(|f| f.data_bytes).sum();
+    pub async fn finish(self, fanouts: Vec<Fanout>, start: Instant) -> Result<ScatterStats, LoaderError> {
+        let data_bytes = fanouts.iter().map(|f| f.data_bytes).sum::<u64>();
 
         // Close all sender ends so each writer's blocking_recv() returns None.
         drop(fanouts);
@@ -268,6 +274,10 @@ impl ScatterPhase {
         for handle in self.handles {
             partition_stats.push(handle.await??);
         }
+
+        // Measure after all writers have flushed — this is the true wall time.
+        let wall_secs     = start.elapsed().as_secs_f64();
+        let bytes_per_sec = (data_bytes as f64 / wall_secs.max(f64::MIN_POSITIVE)) as u64;
 
         let mut merged    = new_size_histogram();
         let mut total_sum = 0u64;
@@ -286,9 +296,12 @@ impl ScatterPhase {
 
         let done = ScatterDone {
             n_keys,
-            n_partitions: self.layout.n_partitions,
-            partitions,
+            n_partitions:  self.layout.n_partitions,
+            data_bytes,
+            wall_secs:     Some(wall_secs),
+            bytes_per_sec: Some(bytes_per_sec),
             value_sizes,
+            partitions,
         };
         let json = serde_json::to_string_pretty(&done)
             .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
@@ -359,7 +372,7 @@ mod tests {
         let batch = VecBatch(pairs.iter().map(|&(k, v)| (k.to_vec(), v.to_vec())).collect());
         let mut fanout = phase.fanout();
         fanout.scatter_batch(&batch).await.unwrap();
-        let stats = phase.finish(vec![fanout]).await.unwrap();
+        let stats = phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
         (dir, stats)
     }
 
@@ -423,7 +436,7 @@ mod tests {
             fanout.scatter_batch(&VecBatch(vec![(key, val)])).await.unwrap();
         }
 
-        let stats = phase.finish(vec![fanout]).await.unwrap();
+        let stats = phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
         assert_eq!(stats.n_keys, 10);
 
         let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
@@ -449,7 +462,7 @@ mod tests {
             f1.scatter_batch(&batch1),
         ).unwrap();
 
-        let stats = phase.finish(vec![f0, f1]).await.unwrap();
+        let stats = phase.finish(vec![f0, f1], std::time::Instant::now()).await.unwrap();
         assert_eq!(stats.n_keys, 1000);
 
         let spill = SpillReader::open(&dir.path().join("part-0").join("spill.bin")).unwrap();
@@ -465,7 +478,7 @@ mod tests {
             .map(|i| (i.to_le_bytes().to_vec(), i.to_le_bytes().to_vec()))
             .collect());
         fanout.scatter_batch(&batch).await.unwrap();
-        let stats = phase.finish(vec![fanout]).await.unwrap();
+        let stats = phase.finish(vec![fanout], std::time::Instant::now()).await.unwrap();
         assert_eq!(stats.n_keys, 1000);
     }
 }
