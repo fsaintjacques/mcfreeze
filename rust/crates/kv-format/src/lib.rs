@@ -1,6 +1,7 @@
 pub mod data;
 pub mod index;
 pub mod meta;
+pub mod writer;
 
 mod error;
 pub use error::Error;
