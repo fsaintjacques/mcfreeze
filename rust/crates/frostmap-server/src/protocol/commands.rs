@@ -25,6 +25,12 @@ pub enum Disposition {
     Continue,
     /// Close the connection (client sent `quit`).
     Close,
+    /// Drain `n` bytes from the read buffer before parsing the next command.
+    ///
+    /// Returned for `ms` write commands: the parser consumes only the command
+    /// line; the caller must advance the buffer by `data_len + 2` (data body
+    /// plus its mandatory `\r\n` terminator) to re-synchronise the stream.
+    Drain(usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -49,9 +55,9 @@ pub async fn dispatch(
             Disposition::Continue
         }
         Command::Quit => Disposition::Close,
-        Command::WriteRejected { .. } => {
+        Command::WriteRejected { data_len } => {
             write_server_error(dst, b"read-only");
-            Disposition::Continue
+            Disposition::Drain(data_len + 2)
         }
     }
 }
@@ -61,7 +67,7 @@ async fn dispatch_mg(key: &[u8], flags: &MgFlags, lookup: &dyn Lookup, dst: &mut
         Ok(Some(value)) => write_va(dst, &value, flags, key),
         Ok(None)        => write_en(dst),
         Err(e) => {
-            tracing::error!("lookup error for key={:?}: {e}", key);
+            tracing::error!(key = %String::from_utf8_lossy(key), "lookup error: {e}");
             write_server_error(dst, b"internal error");
         }
     }
@@ -191,14 +197,28 @@ mod tests {
     // --- write commands ---
 
     #[tokio::test]
-    async fn write_rejected_writes_read_only_error() {
+    async fn write_rejected_md_returns_drain_2() {
+        // md/ma carry no data body: data_len=0, so drain = 0+2 = 2.
         let lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 0 },
             &lookup, &mut dst, "0.1.0", 0,
         ).await;
-        assert_eq!(d, Disposition::Continue);
+        assert_eq!(d, Disposition::Drain(2));
+        assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
+    }
+
+    #[tokio::test]
+    async fn write_rejected_ms_returns_drain_data_len_plus_2() {
+        // ms with a 5-byte body: drain = 5+2 = 7.
+        let lookup = MockLookup::new(&[]);
+        let mut dst = buf();
+        let d = dispatch(
+            Command::WriteRejected { data_len: 5 },
+            &lookup, &mut dst, "0.1.0", 0,
+        ).await;
+        assert_eq!(d, Disposition::Drain(7));
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
     }
 
