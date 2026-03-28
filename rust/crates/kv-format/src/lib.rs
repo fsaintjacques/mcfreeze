@@ -1,6 +1,7 @@
 pub mod data;
 pub mod index;
 pub mod meta;
+pub mod reader;
 pub mod writer;
 
 mod error;

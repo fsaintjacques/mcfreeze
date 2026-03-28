@@ -225,7 +225,10 @@ pub fn insert(table: &mut [Bucket], mut entry: RawEntry) {
 /// current position is less than the expected PSL, the key cannot exist further
 /// along the probe sequence.
 pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<(u64, u32)> {
-    let n            = table.len();
+    let n = table.len();
+    if n == 0 {
+        return None;
+    }
     let mut pos      = fingerprint as usize % n;
     let mut expected = 0u8;
 
