@@ -778,6 +778,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "frostmap-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "frostmap-bq",
+ "frostmap-format",
+ "frostmap-loader",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "frostmap-format"
 version = "0.1.0"
 dependencies = [
@@ -791,22 +807,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "xxhash-rust",
-]
-
-[[package]]
-name = "frostmap-load"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "frostmap-bq",
- "frostmap-format",
- "frostmap-loader",
- "rustls",
- "tokio",
- "tracing",
- "tracing-log",
- "tracing-subscriber",
 ]
 
 [[package]]

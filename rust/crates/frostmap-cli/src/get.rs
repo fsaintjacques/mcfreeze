@@ -1,18 +1,13 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::Args;
 
 use frostmap_format::reader::SnapshotReader;
 
-#[derive(Parser)]
-#[command(
-    name  = "kv-get",
-    about = "Look up a key in a snapshot directory",
-    version,
-)]
-struct Cli {
-    /// Snapshot directory produced by kv-load
+#[derive(Args)]
+pub struct GetArgs {
+    /// Snapshot directory produced by `fm load`
     #[arg(short, long)]
     snapshot: PathBuf,
 
@@ -24,25 +19,17 @@ struct Cli {
     hex: bool,
 }
 
-fn main() {
-    let cli = Cli::parse();
-    if let Err(e) = run(cli) {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-fn run(cli: Cli) -> Result<()> {
-    let reader = SnapshotReader::open(&cli.snapshot)
+pub fn run(args: GetArgs) -> Result<()> {
+    let reader = SnapshotReader::open(&args.snapshot)
         .context("failed to open snapshot")?;
 
-    match reader.get(cli.key.as_bytes()).context("lookup failed")? {
+    match reader.get(args.key.as_bytes()).context("lookup failed")? {
         None => {
             eprintln!("not found");
             std::process::exit(1);
         }
         Some(bytes) => {
-            if cli.hex {
+            if args.hex {
                 println!("{}", hex(&bytes));
             } else {
                 match std::str::from_utf8(&bytes) {

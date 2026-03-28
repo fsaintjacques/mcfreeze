@@ -4,9 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Subcommand};
 use tracing::info;
-use tracing_subscriber::EnvFilter;
 
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
@@ -15,49 +14,40 @@ use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
 // CLI definition
 // ---------------------------------------------------------------------------
 
-#[derive(Parser)]
-#[command(
-    name    = "kv-load",
-    about   = "Load key-value pairs into a read-only snapshot directory",
-    version,
-)]
-struct Cli {
+#[derive(Args)]
+pub struct LoadArgs {
     /// Output snapshot directory (created if absent).
     /// Required unless --download-benchmark is set.
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 
     /// Number of hash partitions — must be a power of two
     #[arg(long, default_value = "64")]
-    partitions: u32,
+    pub partitions: u32,
 
     /// Rayon threads used for the parallel index build phase
     #[arg(long, default_value = "2")]
-    index_parallelism: usize,
-
-    /// Set log level to DEBUG (default: INFO). Overridden by RUST_LOG.
-    #[arg(short, long)]
-    verbose: bool,
+    pub index_parallelism: usize,
 
     /// Validate and print the load plan without writing any data
     #[arg(long)]
-    dry_run: bool,
+    pub dry_run: bool,
 
     /// Download all batches from the source and discard them, reporting
     /// throughput.  No data is written to --output.
     #[arg(long)]
-    download_benchmark: bool,
+    pub download_benchmark: bool,
 
     /// Progress report interval in seconds.
     #[arg(long, default_value = "5")]
-    progress_secs: u64,
+    pub progress_secs: u64,
 
     #[command(subcommand)]
-    source: Source,
+    pub source: Source,
 }
 
 #[derive(Subcommand)]
-enum Source {
+pub enum Source {
     /// Load from the BigQuery Storage Read API
     Bq {
         /// GCP project used for billing.
@@ -96,33 +86,8 @@ enum Source {
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-
-    let default_level = if cli.verbose { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
-
-    // Bridge `log` crate calls (kv-format) into tracing.
-    tracing_log::LogTracer::init().ok();
-
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
-
-    if let Err(e) = run(cli).await {
-        tracing::error!(error = format!("{e:#}"), "fatal");
-        std::process::exit(1);
-    }
-}
-
-async fn run(cli: Cli) -> Result<()> {
-    match cli.source {
+pub async fn run(args: LoadArgs) -> Result<()> {
+    match args.source {
         Source::Bq {
             project,
             table,
@@ -133,12 +98,12 @@ async fn run(cli: Cli) -> Result<()> {
             no_compression,
         } => {
             run_bq(
-                cli.output,
-                cli.partitions,
-                cli.index_parallelism,
-                cli.dry_run,
-                cli.download_benchmark,
-                cli.progress_secs,
+                args.output,
+                args.partitions,
+                args.index_parallelism,
+                args.dry_run,
+                args.download_benchmark,
+                args.progress_secs,
                 project,
                 table,
                 key_column,
@@ -226,7 +191,7 @@ async fn run_bq(
         n_partitions:      partitions,
         index_parallelism,
         progress_fn:       Some(scatter_reporter.updater()),
-        progress_interval: 0, // reporter's ticker handles rate-limiting
+        progress_interval: 0,
         ..LoaderConfig::default()
     };
 
@@ -265,10 +230,6 @@ async fn run_bq(
 // Download benchmark
 // ---------------------------------------------------------------------------
 
-/// Drain all `sources` concurrently, discarding every batch.
-///
-/// Reports total rows, total payload bytes (keys + values), elapsed time,
-/// and download throughput.
 async fn benchmark_download<S>(
     sources:        Vec<S>,
     estimated_rows: Option<u64>,
@@ -335,9 +296,6 @@ where
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Accept `project.dataset.table` (dotted) or
-/// `projects/P/datasets/D/tables/T` (resource name) and return
-/// `(billing_project, full_resource_name)`.
 fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, String)> {
     let (project, resource) = if table.starts_with("projects/") {
         let project = table
@@ -362,7 +320,7 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
     Ok((billing, resource))
 }
 
-fn human_bandwidth(bytes_per_sec: u64) -> String {
+pub fn human_bandwidth(bytes_per_sec: u64) -> String {
     const UNITS: &[&str] = &["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
     let mut value = bytes_per_sec as f64;
     let mut unit  = 0;
@@ -377,14 +335,14 @@ fn human_bandwidth(bytes_per_sec: u64) -> String {
 // Progress reporter
 // ---------------------------------------------------------------------------
 
-struct ProgressReporter {
+pub struct ProgressReporter {
     total_keys:  Arc<AtomicU64>,
     total_bytes: Arc<AtomicU64>,
     task:        tokio::task::JoinHandle<()>,
 }
 
 impl ProgressReporter {
-    fn new(phase: &'static str, estimated: Option<u64>, interval_secs: u64) -> Self {
+    pub fn new(phase: &'static str, estimated: Option<u64>, interval_secs: u64) -> Self {
         let total_keys  = Arc::new(AtomicU64::new(0));
         let total_bytes = Arc::new(AtomicU64::new(0));
         let interval    = Duration::from_secs(interval_secs.max(1));
@@ -394,7 +352,7 @@ impl ProgressReporter {
             let bytes = total_bytes.clone();
             async move {
                 let mut ticker     = tokio::time::interval(interval);
-                ticker.tick().await; // skip the immediate first tick
+                ticker.tick().await;
                 let start          = Instant::now();
                 let mut prev_keys  = 0u64;
                 let mut prev_bytes = 0u64;
@@ -435,9 +393,7 @@ impl ProgressReporter {
         Self { total_keys, total_bytes, task }
     }
 
-    /// Returns a closure suitable for `LoaderConfig::progress_fn`.
-    /// Expects **delta** `(keys, bytes)` since the previous call.
-    fn updater(&self) -> Arc<dyn Fn(u64, u64) + Send + Sync> {
+    pub fn updater(&self) -> Arc<dyn Fn(u64, u64) + Send + Sync> {
         let keys  = self.total_keys.clone();
         let bytes = self.total_bytes.clone();
         Arc::new(move |delta_keys, delta_bytes| {
@@ -446,7 +402,7 @@ impl ProgressReporter {
         })
     }
 
-    fn stop(self) {
+    pub fn stop(self) {
         self.task.abort();
     }
 }

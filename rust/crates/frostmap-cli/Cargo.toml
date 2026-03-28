@@ -1,15 +1,11 @@
 [package]
-name    = "frostmap-load"
+name    = "frostmap-cli"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "frostmap-load"
+name = "fm"
 path = "src/main.rs"
-
-[[bin]]
-name = "frostmap-get"
-path = "src/get.rs"
 
 [dependencies]
 frostmap-loader = { path = "../frostmap-loader" }
