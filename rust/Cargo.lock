@@ -786,6 +786,7 @@ dependencies = [
  "frostmap-bq",
  "frostmap-format",
  "frostmap-loader",
+ "frostmap-server",
  "rustls",
  "tokio",
  "tracing",

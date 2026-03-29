@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 mod get;
 mod load;
+mod serve;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -30,6 +31,8 @@ enum Command {
     Load(load::LoadArgs),
     /// Look up a key in a snapshot directory
     Get(get::GetArgs),
+    /// Start the key-value server
+    Serve(serve::ServeArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -56,8 +59,9 @@ async fn main() {
         .expect("failed to install rustls crypto provider");
 
     let result: Result<()> = match cli.command {
-        Command::Load(args) => load::run(args).await,
-        Command::Get(args)  => get::run(args).map_err(Into::into),
+        Command::Load(args)  => load::run(args).await,
+        Command::Get(args)   => get::run(args).map_err(Into::into),
+        Command::Serve(args) => serve::run(args).await,
     };
 
     if let Err(e) = result {

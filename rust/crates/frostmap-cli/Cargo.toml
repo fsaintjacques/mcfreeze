@@ -11,6 +11,7 @@ path = "src/main.rs"
 frostmap-loader = { path = "../frostmap-loader" }
 frostmap-bq     = { path = "../frostmap-bq" }
 frostmap-format = { path = "../frostmap-format" }
+frostmap-server = { path = "../frostmap-server" }
 clap                 = { version = "4", features = ["derive"] }
 tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 anyhow               = "1"
