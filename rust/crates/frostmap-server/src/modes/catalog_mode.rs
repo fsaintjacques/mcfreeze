@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use prometheus_client::registry::Registry;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::catalog::CatalogFile;
 use crate::listener::run_listeners;
@@ -86,15 +86,28 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         });
     }
 
-    // Catalog watcher task.
+    // Catalog watcher task.  A oneshot carries the startup result back so that
+    // a watcher init failure (e.g. inotify unavailable) is fatal rather than
+    // silently leaving the catalog permanently stale.
+    let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
     {
         let catalog_path = cfg.catalog_path.clone();
         let registry     = Arc::clone(&registry);
         let metrics      = Arc::clone(&metrics);
         let gen_watcher  = Arc::clone(&generation);
         tokio::spawn(async move {
-            watch_catalog(catalog_path, ack_path, registry, metrics, gen_watcher).await;
+            watch_catalog(catalog_path, ack_path, registry, metrics, gen_watcher, startup_tx).await;
         });
+    }
+    // Wait for the watcher to confirm it started before accepting connections.
+    match startup_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(ServeError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, msg)
+        )),
+        Err(_) => return Err(ServeError::Io(
+            std::io::Error::new(std::io::ErrorKind::Other, "catalog watcher task died during init")
+        )),
     }
 
     run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, generation, metrics).await?;
@@ -115,11 +128,12 @@ async fn watch_catalog(
     registry:     Arc<DataRegistry>,
     metrics:      Arc<Metrics>,
     generation:   Arc<AtomicU64>,
+    startup_tx:   oneshot::Sender<Result<(), String>>,
 ) {
     let parent = match catalog_path.parent() {
         Some(p) => p.to_owned(),
         None    => {
-            tracing::error!("catalog path has no parent directory");
+            let _ = startup_tx.send(Err("catalog path has no parent directory".into()));
             return;
         }
     };
@@ -128,7 +142,9 @@ async fn watch_catalog(
 
     // Blocking task: watches filesystem events and sends () when the
     // catalog file is replaced.  Runs in tokio's blocking thread pool.
+    // Sends startup result via `startup_tx_bg` so run() can fail fast.
     let catalog_path_bg = catalog_path.clone();
+    let (startup_tx_bg, startup_rx_bg) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     tokio::task::spawn_blocking(move || {
         use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
         use std::sync::mpsc as std_mpsc;
@@ -137,11 +153,16 @@ async fn watch_catalog(
 
         let mut watcher = match RecommendedWatcher::new(std_tx, Config::default()) {
             Ok(w)  => w,
-            Err(e) => { tracing::error!("failed to create filesystem watcher: {e}"); return; }
+            Err(e) => {
+                let _ = startup_tx_bg.send(Err(format!("failed to create filesystem watcher: {e}")));
+                return;
+            }
         };
         if let Err(e) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
-            tracing::error!("failed to watch {}: {e}", parent.display()); return;
+            let _ = startup_tx_bg.send(Err(format!("failed to watch {}: {e}", parent.display())));
+            return;
         }
+        let _ = startup_tx_bg.send(Ok(()));
         tracing::info!(path = %catalog_path_bg.display(), "catalog watcher started");
 
         while let Ok(result) = std_rx.recv() {
@@ -161,7 +182,15 @@ async fn watch_catalog(
                 Err(e) => tracing::error!("catalog watch error: {e}"),
             }
         }
+        tracing::error!("catalog watcher exited unexpectedly; catalog will not update");
     });
+
+    // Forward the blocking startup result to the async caller.
+    let startup_result = match startup_rx_bg.recv() {
+        Ok(r)  => r,
+        Err(_) => Err("watcher blocking task died before signalling startup".into()),
+    };
+    let _ = startup_tx.send(startup_result);
 
     // Async reload loop.
     while rx.recv().await.is_some() {
@@ -184,7 +213,7 @@ async fn watch_catalog(
                 // Ack file: write generation number so the Lifecycle Manager
                 // knows the swap completed and can proceed with unmount.
                 let ack_content = format!("{next_gen}\n");
-                if let Err(e) = std::fs::write(&ack_path, ack_content.as_bytes()) {
+                if let Err(e) = tokio::fs::write(&ack_path, ack_content.as_bytes()).await {
                     tracing::error!("failed to write ack file {}: {e}", ack_path.display());
                 }
             }
@@ -213,6 +242,11 @@ fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, Ser
     let file = CatalogFile::load(path)?;
     let mut datasets = HashMap::new();
     for entry in file.entries {
+        if datasets.contains_key(&entry.dataset) {
+            return Err(ServeError::CatalogParse(
+                format!("duplicate dataset name {:?} in catalog", entry.dataset)
+            ));
+        }
         let handle = DatasetHandle::open(
             entry.dataset.clone(),
             entry.version,
