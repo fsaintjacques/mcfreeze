@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
@@ -73,7 +73,7 @@ pub async fn run_listeners(
     uds_path:   Option<PathBuf>,
     tcp_addr:   Option<SocketAddr>,
     semver:     String,
-    generation: u64,
+    generation: Arc<AtomicU64>,
     metrics:    Arc<Metrics>,
 ) -> std::io::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
@@ -83,9 +83,10 @@ pub async fn run_listeners(
         std::fs::remove_file(&path).ok();
         let listener = UnixListener::bind(&path)?;
         tracing::info!(path = %path.display(), "UDS listener bound");
-        let factory = Arc::clone(&factory);
-        let semver  = semver.clone();
-        let metrics = Arc::clone(&metrics);
+        let factory    = Arc::clone(&factory);
+        let semver     = semver.clone();
+        let generation = Arc::clone(&generation);
+        let metrics    = Arc::clone(&metrics);
         tasks.spawn(async move {
             accept_uds(listener, factory, semver, generation, metrics).await;
         });
@@ -94,9 +95,10 @@ pub async fn run_listeners(
     if let Some(addr) = tcp_addr {
         let listener = TcpListener::bind(addr).await?;
         tracing::info!(%addr, "TCP listener bound");
-        let factory = Arc::clone(&factory);
-        let semver  = semver.clone();
-        let metrics = Arc::clone(&metrics);
+        let factory    = Arc::clone(&factory);
+        let semver     = semver.clone();
+        let generation = Arc::clone(&generation);
+        let metrics    = Arc::clone(&metrics);
         tasks.spawn(async move {
             accept_tcp(listener, factory, semver, generation, metrics).await;
         });
@@ -190,7 +192,7 @@ async fn accept_uds(
     listener:   UnixListener,
     factory:    Arc<dyn LookupFactory>,
     semver:     String,
-    generation: u64,
+    generation: Arc<AtomicU64>,
     metrics:    Arc<Metrics>,
 ) {
     loop {
@@ -199,9 +201,11 @@ async fn accept_uds(
                 tracing::debug!("UDS connection accepted");
                 let lookup  = factory.for_connection();
                 let semver  = semver.clone();
+                // Snapshot the generation at accept time for this connection.
+                let gen     = generation.load(Ordering::Relaxed);
                 let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, generation, metrics, "uds").await;
+                    handle_connection(stream, lookup, semver, gen, metrics, "uds").await;
                 });
             }
             Err(e) => {
@@ -216,7 +220,7 @@ async fn accept_tcp(
     listener:   TcpListener,
     factory:    Arc<dyn LookupFactory>,
     semver:     String,
-    generation: u64,
+    generation: Arc<AtomicU64>,
     metrics:    Arc<Metrics>,
 ) {
     loop {
@@ -225,9 +229,11 @@ async fn accept_tcp(
                 tracing::debug!(%addr, "TCP connection accepted");
                 let lookup  = factory.for_connection();
                 let semver  = semver.clone();
+                // Snapshot the generation at accept time for this connection.
+                let gen     = generation.load(Ordering::Relaxed);
                 let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, generation, metrics, "tcp").await;
+                    handle_connection(stream, lookup, semver, gen, metrics, "tcp").await;
                 });
             }
             Err(e) => {

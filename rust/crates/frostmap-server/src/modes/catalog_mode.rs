@@ -1,0 +1,224 @@
+//! Catalog mode: watch `catalog.json` and hot-swap on each atomic rename.
+//!
+//! ## Lifecycle
+//!
+//! 1. Load the initial `catalog.json` at startup; build an [`ActiveCatalog`].
+//! 2. Spawn an inotify watcher task on the catalog file's parent directory.
+//! 3. On each `IN_MOVED_TO` event matching the catalog filename:
+//!    a. Open new [`SnapshotReader`]s and build a fresh [`ActiveCatalog`].
+//!    b. Atomically swap it into the [`Registry`].
+//!    c. Drop the old [`Arc<ActiveCatalog>`] (releases mmaps and fds).
+//!    d. Write the ack file so the Lifecycle Manager can proceed with unmount.
+//! 4. Listeners run forever; their [`PerConnectionCatalogLookup`]s pick up the
+//!    new generation on the next request without any coordination.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use prometheus_client::registry::Registry;
+use tokio::sync::mpsc;
+
+use crate::catalog::CatalogFile;
+use crate::listener::run_listeners;
+use crate::lookup::{CatalogLookup, LookupFactory};
+use crate::metrics::Metrics;
+use crate::registry::{ActiveCatalog, DatasetHandle, Registry as DataRegistry};
+use crate::ServeError;
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+pub struct CatalogConfig {
+    /// Path to `catalog.json` watched for changes.
+    pub catalog_path: PathBuf,
+    /// Ack file written after each successful swap.
+    /// Defaults to `<catalog_path>.ack` if `None`.
+    pub ack_path:     Option<PathBuf>,
+    /// Unix-domain socket path to bind, if any.
+    pub uds_path:     Option<PathBuf>,
+    /// TCP address to bind, if any.
+    pub tcp_addr:     Option<SocketAddr>,
+    /// Semver string returned by the `version` command.
+    pub semver:       String,
+    /// Address to expose Prometheus `/metrics` on, if any.
+    pub metrics_addr: Option<SocketAddr>,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Run catalog mode until all listeners exit.
+pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
+    let mut prom    = Registry::default();
+    let metrics     = Metrics::new(&mut prom);
+    let prom        = Arc::new(prom);
+
+    // Load initial catalog synchronously (blocking is fine before serving starts).
+    let initial  = build_catalog_blocking(cfg.catalog_path.clone(), 0).await?;
+    let n_ds     = initial.dataset_count() as i64;
+    let registry = DataRegistry::new(initial);
+
+    metrics.active_datasets.set(n_ds);
+    metrics.catalog_generation.set(0);
+
+    let generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    let factory: Arc<dyn LookupFactory> = Arc::new(CatalogLookup::new(Arc::clone(&registry)));
+
+    // Ack path: explicit or derived from catalog path.
+    let ack_path = cfg.ack_path.unwrap_or_else(|| {
+        let mut p = cfg.catalog_path.clone().into_os_string();
+        p.push(".ack");
+        PathBuf::from(p)
+    });
+
+    // Metrics server: fire-and-forget.
+    if let Some(addr) = cfg.metrics_addr {
+        let prom = Arc::clone(&prom);
+        tokio::spawn(async move {
+            if let Err(e) = Metrics::run_server(prom, addr).await {
+                tracing::error!("metrics server error: {e}");
+            }
+        });
+    }
+
+    // Catalog watcher task.
+    {
+        let catalog_path = cfg.catalog_path.clone();
+        let registry     = Arc::clone(&registry);
+        let metrics      = Arc::clone(&metrics);
+        let gen_watcher  = Arc::clone(&generation);
+        tokio::spawn(async move {
+            watch_catalog(catalog_path, ack_path, registry, metrics, gen_watcher).await;
+        });
+    }
+
+    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, generation, metrics).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Catalog watcher
+// ---------------------------------------------------------------------------
+
+/// Watches the catalog file for atomic renames and reloads on each change.
+///
+/// Runs a blocking inotify/FSEvents loop in [`tokio::task::spawn_blocking`]
+/// and processes reload requests on the async side.
+async fn watch_catalog(
+    catalog_path: PathBuf,
+    ack_path:     PathBuf,
+    registry:     Arc<DataRegistry>,
+    metrics:      Arc<Metrics>,
+    generation:   Arc<AtomicU64>,
+) {
+    let parent = match catalog_path.parent() {
+        Some(p) => p.to_owned(),
+        None    => {
+            tracing::error!("catalog path has no parent directory");
+            return;
+        }
+    };
+
+    let (tx, mut rx) = mpsc::channel::<()>(4);
+
+    // Blocking task: watches filesystem events and sends () when the
+    // catalog file is replaced.  Runs in tokio's blocking thread pool.
+    let catalog_path_bg = catalog_path.clone();
+    tokio::task::spawn_blocking(move || {
+        use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc as std_mpsc;
+
+        let (std_tx, std_rx) = std_mpsc::channel::<notify::Result<notify::Event>>();
+
+        let mut watcher = match RecommendedWatcher::new(std_tx, Config::default()) {
+            Ok(w)  => w,
+            Err(e) => { tracing::error!("failed to create filesystem watcher: {e}"); return; }
+        };
+        if let Err(e) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+            tracing::error!("failed to watch {}: {e}", parent.display()); return;
+        }
+        tracing::info!(path = %catalog_path_bg.display(), "catalog watcher started");
+
+        while let Ok(result) = std_rx.recv() {
+            match result {
+                Ok(event) => {
+                    // React to create/modify/rename events on the catalog path only.
+                    let is_relevant = matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_)
+                    );
+                    if is_relevant && event.paths.iter().any(|p| p == &catalog_path_bg) {
+                        if tx.blocking_send(()).is_err() {
+                            return; // receiver dropped — shut down
+                        }
+                    }
+                }
+                Err(e) => tracing::error!("catalog watch error: {e}"),
+            }
+        }
+    });
+
+    // Async reload loop.
+    while rx.recv().await.is_some() {
+        let next_gen = generation.load(Ordering::Relaxed) + 1;
+
+        match build_catalog_blocking(catalog_path.clone(), next_gen).await {
+            Err(e) => {
+                tracing::error!("catalog reload failed (keeping current catalog): {e}");
+            }
+            Ok(new_catalog) => {
+                let n_ds = new_catalog.dataset_count() as i64;
+                let old  = registry.swap(Arc::new(new_catalog));
+                drop(old); // release mmaps and file descriptors
+
+                generation.store(next_gen, Ordering::Relaxed);
+                metrics.catalog_generation.set(next_gen as i64);
+                metrics.active_datasets.set(n_ds);
+                tracing::info!(generation = next_gen, datasets = n_ds, "catalog swapped");
+
+                // Ack file: write generation number so the Lifecycle Manager
+                // knows the swap completed and can proceed with unmount.
+                let ack_content = format!("{next_gen}\n");
+                if let Err(e) = std::fs::write(&ack_path, ack_content.as_bytes()) {
+                    tracing::error!("failed to write ack file {}: {e}", ack_path.display());
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Open all datasets listed in `catalog_path` and build an [`ActiveCatalog`].
+/// Runs in the blocking thread pool since `SnapshotReader::open` does file I/O.
+async fn build_catalog_blocking(
+    catalog_path: PathBuf,
+    generation:   u64,
+) -> Result<ActiveCatalog, ServeError> {
+    tokio::task::spawn_blocking(move || {
+        build_catalog_sync(&catalog_path, generation)
+    })
+    .await
+    .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
+}
+
+fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, ServeError> {
+    let file = CatalogFile::load(path)?;
+    let mut datasets = HashMap::new();
+    for entry in file.entries {
+        let handle = DatasetHandle::open(
+            entry.dataset.clone(),
+            entry.version,
+            &entry.snapshot_dir,
+        )?;
+        datasets.insert(entry.dataset, handle);
+    }
+    Ok(ActiveCatalog::new(datasets, generation))
+}

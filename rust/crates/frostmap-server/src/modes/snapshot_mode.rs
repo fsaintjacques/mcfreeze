@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use frostmap_format::reader::SnapshotReader;
 use prometheus_client::registry::Registry;
@@ -63,6 +64,7 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     }
 
     // Propagate bind / accept errors so process supervisors see a non-zero exit.
-    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, 0, metrics).await?;
+    let generation = Arc::new(AtomicU64::new(0));
+    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, generation, metrics).await?;
     Ok(())
 }

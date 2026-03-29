@@ -14,4 +14,7 @@ pub enum ServeError {
 
     #[error("dataset name is not valid UTF-8")]
     InvalidDatasetName,
+
+    #[error("catalog parse error: {0}")]
+    CatalogParse(String),
 }
