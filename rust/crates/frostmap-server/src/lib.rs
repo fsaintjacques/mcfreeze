@@ -4,6 +4,7 @@ pub mod lookup;
 pub mod metrics;
 pub mod modes;
 pub mod protocol;
+pub mod registry;
 
 pub use error::ServeError;
 pub use lookup::{Lookup, SnapshotLookup};

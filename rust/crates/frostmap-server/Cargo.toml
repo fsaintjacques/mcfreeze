@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 frostmap-format    = { path = "../frostmap-format" }
+arc-swap           = "1"
 async-trait        = "0.1"
 axum               = "0.7"
 bytes              = "1"
