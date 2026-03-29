@@ -9,9 +9,12 @@
 //! response and keep the connection alive.  The caller never needs to handle
 //! an `Err` from `dispatch`.
 
+use std::time::Instant;
+
 use bytes::BytesMut;
 
 use crate::lookup::Lookup;
+use crate::metrics::{Metrics, ResultLabels};
 use super::meta::{Command, MgFlags, write_en, write_server_error, write_va, write_version};
 
 // ---------------------------------------------------------------------------
@@ -44,10 +47,11 @@ pub async fn dispatch(
     dst: &mut BytesMut,
     semver: &str,
     generation: u64,
+    metrics: &Metrics,
 ) -> Disposition {
     match cmd {
         Command::Mg { ref key, ref flags } => {
-            dispatch_mg(key, flags, lookup, dst).await;
+            dispatch_mg(key, flags, lookup, dst, metrics).await;
             Disposition::Continue
         }
         Command::Version => {
@@ -71,15 +75,40 @@ pub async fn dispatch(
     }
 }
 
-async fn dispatch_mg(key: &[u8], flags: &MgFlags, lookup: &dyn Lookup, dst: &mut BytesMut) {
-    match lookup.get(key).await {
-        Ok(Some(value)) => write_va(dst, &value, flags, key),
-        Ok(None)        => write_en(dst),
+async fn dispatch_mg(
+    key: &[u8],
+    flags: &MgFlags,
+    lookup: &dyn Lookup,
+    dst: &mut BytesMut,
+    metrics: &Metrics,
+) {
+    let start = Instant::now();
+    metrics.keys_requested_total.inc();
+
+    let result = match lookup.get(key).await {
+        Ok(Some(value)) => {
+            let bytes = value.len() as u64;
+            write_va(dst, &value, flags, key);
+            metrics.keys_hit_total.inc();
+            metrics.response_bytes_total.inc_by(bytes);
+            "hit"
+        }
+        Ok(None) => {
+            write_en(dst);
+            metrics.keys_miss_total.inc();
+            "miss"
+        }
         Err(e) => {
             tracing::error!(key = %String::from_utf8_lossy(key), "lookup error: {e}");
             write_server_error(dst, b"internal error");
+            "error"
         }
-    }
+    };
+
+    metrics
+        .request_duration_seconds
+        .get_or_create(&ResultLabels { result })
+        .observe(start.elapsed().as_secs_f64());
 }
 
 // ---------------------------------------------------------------------------
@@ -89,10 +118,16 @@ async fn dispatch_mg(key: &[u8], flags: &MgFlags, lookup: &dyn Lookup, dst: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ServeError, lookup::Lookup};
+    use crate::{Metrics, ServeError, lookup::Lookup};
     use async_trait::async_trait;
     use bytes::Bytes;
+    use prometheus_client::registry::Registry;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn noop_metrics() -> Arc<Metrics> {
+        Metrics::new(&mut Registry::default())
+    }
 
     // Trivial in-memory Lookup stub — no snapshot, no file I/O.
     struct MockLookup(HashMap<&'static [u8], &'static [u8]>);
@@ -129,7 +164,7 @@ mod tests {
         let lookup = MockLookup::new(&[(b"hello", b"world")]);
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"hello"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0).await;
+        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VA 5\r\nworld\r\n");
     }
@@ -142,7 +177,7 @@ mod tests {
             key:   Bytes::from_static(b"k"),
             flags: MgFlags { k: true, ..Default::default() },
         };
-        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0).await;
+        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 kk\r\nv\r\n");
     }
 
@@ -154,7 +189,7 @@ mod tests {
             key:   Bytes::from_static(b"k"),
             flags: MgFlags { t: true, ..Default::default() },
         };
-        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0).await;
+        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 t-1\r\nv\r\n");
     }
 
@@ -165,7 +200,7 @@ mod tests {
         let lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0).await;
+        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"EN\r\n");
     }
@@ -176,7 +211,7 @@ mod tests {
     async fn mg_error_writes_server_error() {
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"k"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &ErrLookup, &mut dst, "0.1.0", 0).await;
+        let d = dispatch(cmd, &ErrLookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR internal error\r\n");
     }
@@ -187,7 +222,7 @@ mod tests {
     async fn version_writes_version_line() {
         let lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 3).await;
+        let d = dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 3, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VERSION 0.1.0 gen/3\r\n");
     }
@@ -198,7 +233,7 @@ mod tests {
     async fn quit_returns_close() {
         let lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Quit, &lookup, &mut dst, "0.1.0", 0).await;
+        let d = dispatch(Command::Quit, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Close);
         assert!(dst.is_empty());  // no response bytes
     }
@@ -212,7 +247,7 @@ mod tests {
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 0 },
-            &lookup, &mut dst, "0.1.0", 0,
+            &lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
         ).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
@@ -225,7 +260,7 @@ mod tests {
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 5 },
-            &lookup, &mut dst, "0.1.0", 0,
+            &lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
         ).await;
         assert_eq!(d, Disposition::Drain(7));
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
@@ -238,9 +273,10 @@ mod tests {
         let lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
 
-        dispatch(Command::Mg { key: Bytes::from_static(b"k"),      flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1).await;
-        dispatch(Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1).await;
-        dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 1).await;
+        let m = noop_metrics();
+        dispatch(Command::Mg { key: Bytes::from_static(b"k"),      flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 1, &m).await;
 
         assert_eq!(&dst[..], b"VA 1\r\nv\r\nEN\r\nVERSION 0.1.0 gen/1\r\n");
     }

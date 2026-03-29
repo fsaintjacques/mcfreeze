@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 
 use crate::lookup::Lookup;
+use crate::metrics::{Metrics, TransportLabels};
 use crate::protocol::commands::{Disposition, dispatch};
 use crate::protocol::meta::parse_command;
 
@@ -38,11 +39,12 @@ const WRITE_BUF_INIT: usize = 64 * 1024;
 /// At least one of `uds_path` / `tcp_addr` should be `Some`; if both are
 /// `None` the function returns immediately with `Ok(())`.
 pub async fn run_listeners(
-    lookup:   Arc<dyn Lookup>,
-    uds_path: Option<PathBuf>,
-    tcp_addr: Option<SocketAddr>,
-    semver:   String,
+    lookup:     Arc<dyn Lookup>,
+    uds_path:   Option<PathBuf>,
+    tcp_addr:   Option<SocketAddr>,
+    semver:     String,
     generation: u64,
+    metrics:    Arc<Metrics>,
 ) -> std::io::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -53,18 +55,20 @@ pub async fn run_listeners(
         tracing::info!(path = %path.display(), "UDS listener bound");
         let lookup  = Arc::clone(&lookup);
         let semver  = semver.clone();
+        let metrics = Arc::clone(&metrics);
         tasks.spawn(async move {
-            accept_uds(listener, lookup, semver, generation).await;
+            accept_uds(listener, lookup, semver, generation, metrics).await;
         });
     }
 
     if let Some(addr) = tcp_addr {
         let listener = TcpListener::bind(addr).await?;
         tracing::info!(%addr, "TCP listener bound");
-        let lookup = Arc::clone(&lookup);
-        let semver = semver.clone();
+        let lookup  = Arc::clone(&lookup);
+        let semver  = semver.clone();
+        let metrics = Arc::clone(&metrics);
         tasks.spawn(async move {
-            accept_tcp(listener, lookup, semver, generation).await;
+            accept_tcp(listener, lookup, semver, generation, metrics).await;
         });
     }
 
@@ -82,12 +86,20 @@ pub async fn run_listeners(
 /// Reads commands from `io`, dispatches them through `lookup`, and writes
 /// responses back.  Returns when the client sends `quit`, closes the
 /// connection, or an unrecoverable error occurs.
+///
+/// `transport` is `"uds"` or `"tcp"` and is used solely for metric labels.
 pub async fn handle_connection<IO>(
-    mut io:    IO,
-    lookup:    Arc<dyn Lookup>,
-    semver:    String,
+    mut io:     IO,
+    lookup:     Arc<dyn Lookup>,
+    semver:     String,
     generation: u64,
+    metrics:    Arc<Metrics>,
+    transport:  &'static str,
 ) where IO: AsyncRead + AsyncWrite + Unpin {
+    let labels = TransportLabels { transport };
+    metrics.connections_total.get_or_create(&labels).inc();
+    metrics.connections_active.get_or_create(&labels).inc();
+
     let mut read_buf  = BytesMut::with_capacity(READ_BUF_INIT);
     let mut write_buf = BytesMut::with_capacity(WRITE_BUF_INIT);
 
@@ -113,7 +125,7 @@ pub async fn handle_connection<IO>(
                 }
                 Ok(None) => break, // incomplete — flush then read more
                 Ok(Some(cmd)) => {
-                    match dispatch(cmd, &*lookup, &mut write_buf, &semver, generation).await {
+                    match dispatch(cmd, &*lookup, &mut write_buf, &semver, generation, &metrics).await {
                         Disposition::Continue => {}
                         Disposition::Close => {
                             let _ = io.write_all(&write_buf).await;
@@ -137,6 +149,8 @@ pub async fn handle_connection<IO>(
             write_buf.clear();
         }
     }
+
+    metrics.connections_active.get_or_create(&labels).dec();
 }
 
 // ---------------------------------------------------------------------------
@@ -148,15 +162,17 @@ async fn accept_uds(
     lookup:     Arc<dyn Lookup>,
     semver:     String,
     generation: u64,
+    metrics:    Arc<Metrics>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 tracing::debug!("UDS connection accepted");
-                let lookup = Arc::clone(&lookup);
-                let semver = semver.clone();
+                let lookup  = Arc::clone(&lookup);
+                let semver  = semver.clone();
+                let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, generation).await;
+                    handle_connection(stream, lookup, semver, generation, metrics, "uds").await;
                 });
             }
             Err(e) => {
@@ -172,15 +188,17 @@ async fn accept_tcp(
     lookup:     Arc<dyn Lookup>,
     semver:     String,
     generation: u64,
+    metrics:    Arc<Metrics>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 tracing::debug!(%addr, "TCP connection accepted");
-                let lookup = Arc::clone(&lookup);
-                let semver = semver.clone();
+                let lookup  = Arc::clone(&lookup);
+                let semver  = semver.clone();
+                let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, generation).await;
+                    handle_connection(stream, lookup, semver, generation, metrics, "tcp").await;
                 });
             }
             Err(e) => {
@@ -218,11 +236,16 @@ async fn drain<IO: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ServeError, lookup::Lookup};
+    use crate::{Metrics, ServeError, lookup::Lookup};
     use async_trait::async_trait;
     use bytes::Bytes;
+    use prometheus_client::registry::Registry;
     use std::collections::HashMap;
     use tokio::io::AsyncWriteExt;
+
+    fn noop_metrics() -> Arc<Metrics> {
+        Metrics::new(&mut Registry::default())
+    }
 
     struct MockLookup(HashMap<&'static [u8], &'static [u8]>);
 
@@ -251,7 +274,9 @@ mod tests {
         input:  &[u8],
     ) -> Vec<u8> {
         let (client, server) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(handle_connection(server, lookup, "0.1.0".into(), 0));
+        tokio::spawn(handle_connection(
+            server, lookup, "0.1.0".into(), 0, noop_metrics(), "tcp",
+        ));
 
         let (mut rd, mut wr) = tokio::io::split(client);
         wr.write_all(input).await.unwrap();
@@ -297,7 +322,7 @@ mod tests {
         let lookup = MockLookup::new(&[(b"k", b"v")]);
         // quit closes the connection; we don't drop the write side.
         let (client, server) = tokio::io::duplex(64 * 1024);
-        tokio::spawn(handle_connection(server, lookup, "0.1.0".into(), 0));
+        tokio::spawn(handle_connection(server, lookup, "0.1.0".into(), 0, noop_metrics(), "tcp"));
 
         let (mut rd, mut wr) = tokio::io::split(client);
         wr.write_all(b"mg k\r\nquit\r\n").await.unwrap();

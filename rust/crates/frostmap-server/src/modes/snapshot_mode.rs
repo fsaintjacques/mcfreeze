@@ -8,9 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use frostmap_format::reader::SnapshotReader;
+use prometheus_client::registry::Registry;
 
 use crate::listener::run_listeners;
 use crate::lookup::SnapshotLookup;
+use crate::metrics::Metrics;
 use crate::ServeError;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +28,8 @@ pub struct SnapshotConfig {
     pub tcp_addr: Option<SocketAddr>,
     /// Semver string returned by the `version` command.
     pub semver: String,
+    /// Address to expose Prometheus `/metrics` on, if any.
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 // ---------------------------------------------------------------------------
@@ -34,12 +38,49 @@ pub struct SnapshotConfig {
 
 /// Run snapshot mode until all listeners exit.
 pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
+    let mut registry = Registry::default();
+    let metrics = Metrics::new(&mut registry);
+    let registry = Arc::new(registry);
+
+    // Snapshot mode: always 1 active dataset, generation always 0.
+    metrics.active_datasets.set(1);
+    metrics.catalog_generation.set(0);
+
     let reader = SnapshotReader::open(&cfg.dir)?;
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
-    let lookup = Arc::new(SnapshotLookup::new(Arc::new(reader)));
+    let lookup: Arc<dyn crate::lookup::Lookup> =
+        Arc::new(SnapshotLookup::new(Arc::new(reader)));
 
-    // generation is always 0 in snapshot mode
-    run_listeners(lookup, cfg.uds_path, cfg.tcp_addr, cfg.semver, 0).await?;
+    let mut tasks = tokio::task::JoinSet::new();
+
+    if let Some(addr) = cfg.metrics_addr {
+        let registry = Arc::clone(&registry);
+        tasks.spawn(async move {
+            if let Err(e) = Metrics::run_server(registry, addr).await {
+                tracing::error!("metrics server error: {e}");
+            }
+        });
+    }
+
+    tasks.spawn(async move {
+        if let Err(e) = run_listeners(
+            lookup,
+            cfg.uds_path,
+            cfg.tcp_addr,
+            cfg.semver,
+            0,
+            metrics,
+        ).await {
+            tracing::error!("listener error: {e}");
+        }
+    });
+
+    while let Some(result) = tasks.join_next().await {
+        if let Err(e) = result {
+            tracing::error!("task panicked: {e}");
+        }
+    }
+
     Ok(())
 }

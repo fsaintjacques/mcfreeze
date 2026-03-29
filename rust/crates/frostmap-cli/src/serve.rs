@@ -34,6 +34,10 @@ pub struct SnapshotArgs {
     /// TCP address to bind (e.g. 0.0.0.0:7777)
     #[arg(long)]
     pub tcp: Option<SocketAddr>,
+
+    /// Address to expose Prometheus /metrics on (e.g. 0.0.0.0:9090)
+    #[arg(long)]
+    pub metrics: Option<SocketAddr>,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,10 +51,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 anyhow::bail!("at least one of --uds or --tcp must be specified");
             }
             let cfg = SnapshotConfig {
-                dir:      a.dir,
-                uds_path: a.uds,
-                tcp_addr: a.tcp,
-                semver:   env!("CARGO_PKG_VERSION").to_owned(),
+                dir:          a.dir,
+                uds_path:     a.uds,
+                tcp_addr:     a.tcp,
+                semver:       env!("CARGO_PKG_VERSION").to_owned(),
+                metrics_addr: a.metrics,
             };
             run_snapshot(cfg).await?;
             Ok(())
