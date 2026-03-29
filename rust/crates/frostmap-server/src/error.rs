@@ -11,4 +11,7 @@ pub enum ServeError {
 
     #[error("key has no dataset prefix (expected <dataset>:<key>)")]
     MissingDatasetPrefix,
+
+    #[error("dataset name is not valid UTF-8")]
+    InvalidDatasetName,
 }

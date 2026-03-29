@@ -128,16 +128,17 @@ struct PerConnectionCatalogLookup {
 #[async_trait]
 impl Lookup for PerConnectionCatalogLookup {
     async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
-        // Both Guards below are temporaries dropped before any .await point,
-        // so the future remains Send.
-        let reg_gen = self.registry.load().generation;
-        if reg_gen != self.catalog.generation {
-            self.catalog = Arc::clone(&*self.registry.load());
+        // Guard is a temporary dropped before .await — future remains Send.
+        {
+            let guard = self.registry.load();
+            if guard.generation != self.catalog.generation {
+                self.catalog = Arc::clone(&*guard);
+            }
         }
 
         let (dataset_bytes, actual_key) = split_prefix(key)?;
         let dataset = std::str::from_utf8(dataset_bytes)
-            .map_err(|_| ServeError::MissingDatasetPrefix)?;
+            .map_err(|_| ServeError::InvalidDatasetName)?;
         // Clone the Arc so we don't borrow self across the .await.
         Arc::clone(&self.catalog).get(dataset, actual_key).await
     }
@@ -206,7 +207,14 @@ mod tests {
 
     #[tokio::test]
     async fn io_error_surfaces_as_format_error() {
-        let dir    = build_snapshot(&[(b"key", b"value")]);
+        // Use 1 partition so b"key" is guaranteed to land in part-0.
+        let dir = {
+            let d = TempDir::new().unwrap();
+            let mut w = SnapshotWriter::new(d.path(), 1).unwrap();
+            w.write(b"key", b"value").unwrap();
+            w.finish(d.path()).unwrap();
+            d
+        };
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
         std::fs::OpenOptions::new()
