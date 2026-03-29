@@ -52,35 +52,17 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     let lookup: Arc<dyn crate::lookup::Lookup> =
         Arc::new(SnapshotLookup::new(Arc::new(reader)));
 
-    let mut tasks = tokio::task::JoinSet::new();
-
+    // Metrics server is secondary: fire-and-forget, never blocks startup.
     if let Some(addr) = cfg.metrics_addr {
         let registry = Arc::clone(&registry);
-        tasks.spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = Metrics::run_server(registry, addr).await {
                 tracing::error!("metrics server error: {e}");
             }
         });
     }
 
-    tasks.spawn(async move {
-        if let Err(e) = run_listeners(
-            lookup,
-            cfg.uds_path,
-            cfg.tcp_addr,
-            cfg.semver,
-            0,
-            metrics,
-        ).await {
-            tracing::error!("listener error: {e}");
-        }
-    });
-
-    while let Some(result) = tasks.join_next().await {
-        if let Err(e) = result {
-            tracing::error!("task panicked: {e}");
-        }
-    }
-
+    // Propagate bind / accept errors so process supervisors see a non-zero exit.
+    run_listeners(lookup, cfg.uds_path, cfg.tcp_addr, cfg.semver, 0, metrics).await?;
     Ok(())
 }

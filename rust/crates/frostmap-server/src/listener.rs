@@ -14,9 +14,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI64;
 use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 
@@ -24,6 +27,33 @@ use crate::lookup::Lookup;
 use crate::metrics::{Metrics, TransportLabels};
 use crate::protocol::commands::{Disposition, dispatch};
 use crate::protocol::meta::parse_command;
+
+// ---------------------------------------------------------------------------
+// RAII guard for connections_active gauge
+// ---------------------------------------------------------------------------
+
+/// Increments the active-connection gauge on construction and decrements it
+/// on drop — including on panic — so the gauge never leaks.
+struct ActiveConnectionGuard {
+    family: Family<TransportLabels, Gauge<i64, AtomicI64>>,
+    labels: TransportLabels,
+}
+
+impl ActiveConnectionGuard {
+    fn new(
+        family: &Family<TransportLabels, Gauge<i64, AtomicI64>>,
+        labels: TransportLabels,
+    ) -> Self {
+        family.get_or_create(&labels).inc();
+        Self { family: family.clone(), labels }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.family.get_or_create(&self.labels).dec();
+    }
+}
 
 // Read buffer initial capacity: one typical MTU worth of pipelined commands.
 const READ_BUF_INIT: usize = 8 * 1024;
@@ -98,7 +128,7 @@ pub async fn handle_connection<IO>(
 ) where IO: AsyncRead + AsyncWrite + Unpin {
     let labels = TransportLabels { transport };
     metrics.connections_total.get_or_create(&labels).inc();
-    metrics.connections_active.get_or_create(&labels).inc();
+    let _active_guard = ActiveConnectionGuard::new(&metrics.connections_active, labels.clone());
 
     let mut read_buf  = BytesMut::with_capacity(READ_BUF_INIT);
     let mut write_buf = BytesMut::with_capacity(WRITE_BUF_INIT);
@@ -150,7 +180,6 @@ pub async fn handle_connection<IO>(
         }
     }
 
-    metrics.connections_active.get_or_create(&labels).dec();
 }
 
 // ---------------------------------------------------------------------------

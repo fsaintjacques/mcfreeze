@@ -44,9 +44,16 @@ pub struct TransportLabels {
 // Histogram buckets
 // ---------------------------------------------------------------------------
 
+/// Per-key lookup latency: 50µs – 100ms.
 const REQUEST_DURATION_BUCKETS: [f64; 10] = [
     0.000_050, 0.000_100, 0.000_200, 0.000_500,
     0.001, 0.002, 0.005, 0.010, 0.050, 0.100,
+];
+
+/// Catalog hot-swap duration: inotify → read → parse → swap().
+/// Expected range: tens of milliseconds to several seconds.
+const CATALOG_SWAP_DURATION_BUCKETS: [f64; 10] = [
+    0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0,
 ];
 
 // ---------------------------------------------------------------------------
@@ -145,7 +152,7 @@ impl Metrics {
             registry,
             "fm_catalog_swap_duration_seconds",
             "Duration from inotify event to swap() complete",
-            Histogram::new(REQUEST_DURATION_BUCKETS.iter().copied())
+            Histogram::new(CATALOG_SWAP_DURATION_BUCKETS.iter().copied())
         );
         let active_datasets = reg!(
             registry,
