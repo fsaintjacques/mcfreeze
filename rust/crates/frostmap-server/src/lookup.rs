@@ -1,34 +1,57 @@
+//! Lookup trait, factory, and implementations.
+//!
+//! ## Design
+//!
+//! [`Lookup`] takes `&mut self` so each connection can maintain per-connection
+//! state without a lock.  The accept loop calls [`LookupFactory::for_connection`]
+//! once per accepted connection to obtain a `Box<dyn Lookup>`; the connection
+//! handler owns it exclusively for its lifetime.
+//!
+//! [`SnapshotLookup`] — single static snapshot; factory clones the inner Arc.
+//!
+//! [`CatalogLookup`] — shared factory for catalog mode; each connection gets a
+//! [`PerConnectionCatalogLookup`] that caches the current `Arc<ActiveCatalog>`
+//! and refreshes it on generation change.  On the hot path (no swap since last
+//! request) there is zero atomic traffic to the registry.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use frostmap_format::reader::SnapshotReader;
 
+use crate::registry::{ActiveCatalog, Registry};
 use crate::ServeError;
 
 // ---------------------------------------------------------------------------
-// Lookup trait
+// Lookup
 // ---------------------------------------------------------------------------
 
-/// The single interface between the connection/protocol layer and the storage
-/// layer.  Both `SnapshotLookup` and `CatalogLookup` implement this trait;
-/// the connection handler works exclusively against `Arc<dyn Lookup>`.
+/// Per-connection interface between the protocol layer and storage.
+///
+/// `&mut self` allows implementations to cache state across calls (e.g. the
+/// current [`ActiveCatalog`]) without any locking.
 #[async_trait]
-pub trait Lookup: Send + Sync + 'static {
-    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, ServeError>;
+pub trait Lookup: Send + 'static {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError>;
+}
+
+// ---------------------------------------------------------------------------
+// LookupFactory
+// ---------------------------------------------------------------------------
+
+/// Shared factory (`Arc<dyn LookupFactory>`) held by the accept loops.
+/// Called once per accepted connection to produce a per-connection `Lookup`.
+pub trait LookupFactory: Send + Sync + 'static {
+    fn for_connection(&self) -> Box<dyn Lookup>;
 }
 
 // ---------------------------------------------------------------------------
 // SnapshotLookup
 // ---------------------------------------------------------------------------
 
-/// Wraps a single [`SnapshotReader`] behind an `Arc` so it can be shared
-/// across tokio tasks without cloning the mmap handles.
-///
-/// `get` offloads the `pread` syscall to the blocking thread pool via
-/// `spawn_blocking`, keeping the async runtime free for I/O multiplexing.
-/// When io_uring becomes the primary target, only this `impl` block changes;
-/// nothing above it is affected.
+/// Single-snapshot lookup.  `pread` is offloaded to the blocking thread pool;
+/// the inner `Arc<SnapshotReader>` is cheaply cloned per connection.
 pub struct SnapshotLookup {
     inner: Arc<SnapshotReader>,
 }
@@ -41,7 +64,7 @@ impl SnapshotLookup {
 
 #[async_trait]
 impl Lookup for SnapshotLookup {
-    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
         let key   = Bytes::copy_from_slice(key);
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
@@ -54,6 +77,84 @@ impl Lookup for SnapshotLookup {
     }
 }
 
+impl LookupFactory for SnapshotLookup {
+    fn for_connection(&self) -> Box<dyn Lookup> {
+        Box::new(Self { inner: Arc::clone(&self.inner) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CatalogLookup  (factory)
+// ---------------------------------------------------------------------------
+
+/// Catalog-mode factory.  Shared across all connections; each call to
+/// [`for_connection`] snapshots the current `Arc<ActiveCatalog>` and hands it
+/// to a [`PerConnectionCatalogLookup`].
+pub struct CatalogLookup {
+    registry: Arc<Registry>,
+}
+
+impl CatalogLookup {
+    pub fn new(registry: Arc<Registry>) -> Self {
+        Self { registry }
+    }
+}
+
+impl LookupFactory for CatalogLookup {
+    fn for_connection(&self) -> Box<dyn Lookup> {
+        let catalog = Arc::clone(&*self.registry.load());
+        Box::new(PerConnectionCatalogLookup {
+            registry: Arc::clone(&self.registry),
+            catalog,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PerConnectionCatalogLookup
+// ---------------------------------------------------------------------------
+
+/// Per-connection catalog lookup.
+///
+/// Holds one `Arc<ActiveCatalog>` for the connection lifetime and refreshes it
+/// only when the catalog generation changes.  On the hot path (no swap) the
+/// only registry access is a seqlock `load()` to read the generation — no
+/// atomic increment, no heap allocation.
+struct PerConnectionCatalogLookup {
+    registry: Arc<Registry>,
+    catalog:  Arc<ActiveCatalog>,
+}
+
+#[async_trait]
+impl Lookup for PerConnectionCatalogLookup {
+    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+        // Both Guards below are temporaries dropped before any .await point,
+        // so the future remains Send.
+        let reg_gen = self.registry.load().generation;
+        if reg_gen != self.catalog.generation {
+            self.catalog = Arc::clone(&*self.registry.load());
+        }
+
+        let (dataset_bytes, actual_key) = split_prefix(key)?;
+        let dataset = std::str::from_utf8(dataset_bytes)
+            .map_err(|_| ServeError::MissingDatasetPrefix)?;
+        // Clone the Arc so we don't borrow self across the .await.
+        Arc::clone(&self.catalog).get(dataset, actual_key).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Split `b"<dataset>:<actual-key>"` on the first `b':'`.
+/// Both slices borrow from `key`; no allocation.
+fn split_prefix(key: &[u8]) -> Result<(&[u8], &[u8]), ServeError> {
+    let pos = key.iter().position(|&b| b == b':')
+        .ok_or(ServeError::MissingDatasetPrefix)?;
+    Ok((&key[..pos], &key[pos + 1..]))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -61,66 +162,139 @@ impl Lookup for SnapshotLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{DatasetHandle, Registry};
     use frostmap_format::{reader::SnapshotReader, writer::SnapshotWriter};
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
-    fn build_snapshot(pairs: &[(&[u8], &[u8])], n_partitions: u32) -> TempDir {
+    fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {
         let dir = TempDir::new().unwrap();
-        let mut w = SnapshotWriter::new(dir.path(), n_partitions).unwrap();
-        for &(k, v) in pairs {
-            w.write(k, v).unwrap();
-        }
+        let mut w = SnapshotWriter::new(dir.path(), 4).unwrap();
+        for &(k, v) in pairs { w.write(k, v).unwrap(); }
         w.finish(dir.path()).unwrap();
         dir
     }
 
+    // --- SnapshotLookup ---
+
     #[tokio::test]
     async fn hit_returns_value() {
-        let dir    = build_snapshot(&[(b"hello", b"world")], 4);
+        let dir    = build_snapshot(&[(b"hello", b"world")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
-        let lookup = SnapshotLookup::new(Arc::new(reader));
-
-        let got = lookup.get(b"hello").await.unwrap();
-        assert_eq!(got, Some(Bytes::from_static(b"world")));
+        let mut lookup = SnapshotLookup::new(Arc::new(reader));
+        assert_eq!(lookup.get(b"hello").await.unwrap(), Some(Bytes::from_static(b"world")));
     }
 
     #[tokio::test]
     async fn miss_returns_none() {
-        let dir    = build_snapshot(&[(b"present", b"yes")], 4);
+        let dir    = build_snapshot(&[(b"present", b"yes")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
-        let lookup = SnapshotLookup::new(Arc::new(reader));
-
-        let got = lookup.get(b"absent").await.unwrap();
-        assert_eq!(got, None);
+        let mut lookup = SnapshotLookup::new(Arc::new(reader));
+        assert_eq!(lookup.get(b"absent").await.unwrap(), None);
     }
 
     #[tokio::test]
-    async fn dyn_lookup_works() {
-        let dir    = build_snapshot(&[(b"k", b"v")], 4);
+    async fn factory_creates_independent_connection_lookups() {
+        let dir    = build_snapshot(&[(b"k", b"v")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
-        let lookup: Arc<dyn Lookup> = Arc::new(SnapshotLookup::new(Arc::new(reader)));
-
-        assert_eq!(lookup.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
-        assert_eq!(lookup.get(b"missing").await.unwrap(), None);
+        let factory = SnapshotLookup::new(Arc::new(reader));
+        let mut c1 = factory.for_connection();
+        let mut c2 = factory.for_connection();
+        assert_eq!(c1.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
+        assert_eq!(c2.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
     }
 
     #[tokio::test]
     async fn io_error_surfaces_as_format_error() {
-        // Build a single-partition snapshot so the data file is at a known path.
-        let dir    = build_snapshot(&[(b"key", b"value")], 1);
+        let dir    = build_snapshot(&[(b"key", b"value")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
-        let lookup = SnapshotLookup::new(Arc::new(reader));
-
-        // Truncate data.bin to 0 bytes while the reader still holds the fd open.
-        // The next pread will hit an UnexpectedEof, which propagates as ServeError::Format.
+        let mut lookup = SnapshotLookup::new(Arc::new(reader));
         std::fs::OpenOptions::new()
             .write(true)
             .open(dir.path().join("data/part-0/data.bin"))
             .unwrap()
             .set_len(0)
             .unwrap();
-
         let err = lookup.get(b"key").await.unwrap_err();
         assert!(matches!(err, ServeError::Format(_)));
+    }
+
+    // --- CatalogLookup / PerConnectionCatalogLookup ---
+
+    fn make_registry(pairs: &[(&[u8], &[u8])], gen: u64) -> (Arc<Registry>, TempDir) {
+        let dir = build_snapshot(pairs);
+        let mut ds = HashMap::new();
+        ds.insert("ds".into(), DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap());
+        (Registry::new(ActiveCatalog::new(ds, gen)), dir)
+    }
+
+    #[tokio::test]
+    async fn catalog_hit() {
+        let (reg, _dir) = make_registry(&[(b"key", b"val")], 1);
+        let mut conn = CatalogLookup::new(reg).for_connection();
+        assert_eq!(conn.get(b"ds:key").await.unwrap(), Some(Bytes::from_static(b"val")));
+    }
+
+    #[tokio::test]
+    async fn catalog_miss_known_dataset() {
+        let (reg, _dir) = make_registry(&[(b"key", b"val")], 1);
+        let mut conn = CatalogLookup::new(reg).for_connection();
+        assert_eq!(conn.get(b"ds:absent").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn catalog_miss_unknown_dataset() {
+        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0));
+        let mut conn = CatalogLookup::new(reg).for_connection();
+        assert_eq!(conn.get(b"unknown:key").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn catalog_missing_prefix_returns_error() {
+        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0));
+        let mut conn = CatalogLookup::new(reg).for_connection();
+        assert!(matches!(
+            conn.get(b"no-colon").await.unwrap_err(),
+            ServeError::MissingDatasetPrefix
+        ));
+    }
+
+    #[tokio::test]
+    async fn catalog_refreshes_on_generation_change() {
+        let dir1 = build_snapshot(&[(b"k", b"v1")]);
+        let dir2 = build_snapshot(&[(b"k", b"v2")]);
+
+        let mut ds1 = HashMap::new();
+        ds1.insert("ds".into(), DatasetHandle::open("ds".into(), "v1".into(), dir1.path()).unwrap());
+        let mut ds2 = HashMap::new();
+        ds2.insert("ds".into(), DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap());
+
+        let reg = Registry::new(ActiveCatalog::new(ds1, 0));
+        let mut conn = CatalogLookup::new(Arc::clone(&reg)).for_connection();
+
+        assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v1")));
+
+        reg.swap(Arc::new(ActiveCatalog::new(ds2, 1)));
+
+        assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v2")));
+    }
+
+    // --- split_prefix ---
+
+    #[test]
+    fn split_prefix_valid() {
+        let (ds, key) = split_prefix(b"myds:mykey").unwrap();
+        assert_eq!((ds, key), (b"myds".as_ref(), b"mykey".as_ref()));
+    }
+
+    #[test]
+    fn split_prefix_first_colon_only() {
+        let (ds, key) = split_prefix(b"ds:key:with:colons").unwrap();
+        assert_eq!((ds, key), (b"ds".as_ref(), b"key:with:colons".as_ref()));
+    }
+
+    #[test]
+    fn split_prefix_no_colon() {
+        assert!(matches!(split_prefix(b"nocolon"), Err(ServeError::MissingDatasetPrefix)));
     }
 }

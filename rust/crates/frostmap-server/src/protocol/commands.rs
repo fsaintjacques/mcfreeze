@@ -43,7 +43,7 @@ pub enum Disposition {
 /// Dispatch one command, write the response into `dst`, return the disposition.
 pub async fn dispatch(
     cmd: Command,
-    lookup: &dyn Lookup,
+    lookup: &mut dyn Lookup,
     dst: &mut BytesMut,
     semver: &str,
     generation: u64,
@@ -78,7 +78,7 @@ pub async fn dispatch(
 async fn dispatch_mg(
     key: &[u8],
     flags: &MgFlags,
-    lookup: &dyn Lookup,
+    lookup: &mut dyn Lookup,
     dst: &mut BytesMut,
     metrics: &Metrics,
 ) {
@@ -140,7 +140,7 @@ mod tests {
 
     #[async_trait]
     impl Lookup for MockLookup {
-        async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+        async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
             Ok(self.0.get(key).map(|&v| Bytes::from_static(v)))
         }
     }
@@ -150,7 +150,7 @@ mod tests {
 
     #[async_trait]
     impl Lookup for ErrLookup {
-        async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+        async fn get(&mut self, _key: &[u8]) -> Result<Option<Bytes>, ServeError> {
             Err(ServeError::BlockingTaskPanicked("test".into()))
         }
     }
@@ -161,35 +161,35 @@ mod tests {
 
     #[tokio::test]
     async fn mg_hit_writes_va() {
-        let lookup = MockLookup::new(&[(b"hello", b"world")]);
+        let mut lookup = MockLookup::new(&[(b"hello", b"world")]);
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"hello"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        let d = dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VA 5\r\nworld\r\n");
     }
 
     #[tokio::test]
     async fn mg_hit_with_key_flag() {
-        let lookup = MockLookup::new(&[(b"k", b"v")]);
+        let mut lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
         let cmd = Command::Mg {
             key:   Bytes::from_static(b"k"),
             flags: MgFlags { k: true, ..Default::default() },
         };
-        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 kk\r\nv\r\n");
     }
 
     #[tokio::test]
     async fn mg_hit_with_ttl_flag() {
-        let lookup = MockLookup::new(&[(b"k", b"v")]);
+        let mut lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
         let cmd = Command::Mg {
             key:   Bytes::from_static(b"k"),
             flags: MgFlags { t: true, ..Default::default() },
         };
-        dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 t-1\r\nv\r\n");
     }
 
@@ -197,10 +197,10 @@ mod tests {
 
     #[tokio::test]
     async fn mg_miss_writes_en() {
-        let lookup = MockLookup::new(&[]);
+        let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        let d = dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"EN\r\n");
     }
@@ -211,7 +211,7 @@ mod tests {
     async fn mg_error_writes_server_error() {
         let mut dst = buf();
         let cmd = Command::Mg { key: Bytes::from_static(b"k"), flags: MgFlags::default() };
-        let d = dispatch(cmd, &ErrLookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        let d = dispatch(cmd, &mut ErrLookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR internal error\r\n");
     }
@@ -220,9 +220,9 @@ mod tests {
 
     #[tokio::test]
     async fn version_writes_version_line() {
-        let lookup = MockLookup::new(&[]);
+        let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 3, &noop_metrics()).await;
+        let d = dispatch(Command::Version, &mut lookup, &mut dst, "0.1.0", 3, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VERSION 0.1.0 gen/3\r\n");
     }
@@ -231,9 +231,9 @@ mod tests {
 
     #[tokio::test]
     async fn quit_returns_close() {
-        let lookup = MockLookup::new(&[]);
+        let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Quit, &lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        let d = dispatch(Command::Quit, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Close);
         assert!(dst.is_empty());  // no response bytes
     }
@@ -243,11 +243,11 @@ mod tests {
     #[tokio::test]
     async fn write_rejected_md_returns_continue() {
         // md/ma: data_len=0, parser already consumed the CRLF — nothing to drain.
-        let lookup = MockLookup::new(&[]);
+        let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 0 },
-            &lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
+            &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
         ).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
@@ -256,11 +256,11 @@ mod tests {
     #[tokio::test]
     async fn write_rejected_ms_returns_drain_data_len_plus_2() {
         // ms with a 5-byte body: drain = 5+2 = 7.
-        let lookup = MockLookup::new(&[]);
+        let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 5 },
-            &lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
+            &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
         ).await;
         assert_eq!(d, Disposition::Drain(7));
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
@@ -270,13 +270,13 @@ mod tests {
 
     #[tokio::test]
     async fn pipeline_accumulates_responses() {
-        let lookup = MockLookup::new(&[(b"k", b"v")]);
+        let mut lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
 
         let m = noop_metrics();
-        dispatch(Command::Mg { key: Bytes::from_static(b"k"),      flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1, &m).await;
-        dispatch(Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() }, &lookup, &mut dst, "0.1.0", 1, &m).await;
-        dispatch(Command::Version, &lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(Command::Mg { key: Bytes::from_static(b"k"),      flags: MgFlags::default() }, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() }, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(Command::Version, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
 
         assert_eq!(&dst[..], b"VA 1\r\nv\r\nEN\r\nVERSION 0.1.0 gen/1\r\n");
     }

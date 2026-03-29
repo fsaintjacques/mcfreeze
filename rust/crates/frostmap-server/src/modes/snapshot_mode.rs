@@ -11,7 +11,7 @@ use frostmap_format::reader::SnapshotReader;
 use prometheus_client::registry::Registry;
 
 use crate::listener::run_listeners;
-use crate::lookup::SnapshotLookup;
+use crate::lookup::{LookupFactory, SnapshotLookup};
 use crate::metrics::Metrics;
 use crate::ServeError;
 
@@ -49,7 +49,7 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     let reader = SnapshotReader::open(&cfg.dir)?;
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
-    let lookup: Arc<dyn crate::lookup::Lookup> =
+    let factory: Arc<dyn LookupFactory> =
         Arc::new(SnapshotLookup::new(Arc::new(reader)));
 
     // Metrics server is secondary: fire-and-forget, never blocks startup.
@@ -63,6 +63,6 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     }
 
     // Propagate bind / accept errors so process supervisors see a non-zero exit.
-    run_listeners(lookup, cfg.uds_path, cfg.tcp_addr, cfg.semver, 0, metrics).await?;
+    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, 0, metrics).await?;
     Ok(())
 }

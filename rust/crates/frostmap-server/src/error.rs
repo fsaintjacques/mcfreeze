@@ -8,4 +8,7 @@ pub enum ServeError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error("key has no dataset prefix (expected <dataset>:<key>)")]
+    MissingDatasetPrefix,
 }

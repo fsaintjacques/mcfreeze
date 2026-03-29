@@ -22,30 +22,37 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use frostmap_format::reader::SnapshotReader;
 
-use crate::lookup::{Lookup, SnapshotLookup};
 use crate::ServeError;
 
 // ---------------------------------------------------------------------------
 // DatasetHandle
 // ---------------------------------------------------------------------------
 
-/// An opened, named snapshot.  Wraps [`SnapshotLookup`] so all `pread` paths
-/// go through the same implementation as snapshot mode.
+/// An opened, named snapshot.
 pub struct DatasetHandle {
     pub name:    String,
     pub version: String,
-    lookup:      SnapshotLookup,
+    reader:      Arc<SnapshotReader>,
 }
 
 impl DatasetHandle {
     /// Open the snapshot at `dir` and wrap it in a named handle.
     pub fn open(name: String, version: String, dir: &Path) -> Result<Self, ServeError> {
         let reader = SnapshotReader::open(dir)?;
-        Ok(Self {
-            name,
-            version,
-            lookup: SnapshotLookup::new(Arc::new(reader)),
+        Ok(Self { name, version, reader: Arc::new(reader) })
+    }
+
+    /// Look up `key`.  Offloads `pread` to the blocking thread pool.
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+        let key    = Bytes::copy_from_slice(key);
+        let reader = Arc::clone(&self.reader);
+        tokio::task::spawn_blocking(move || {
+            reader.get(key.as_ref())
+                  .map(|v| v.map(Bytes::from))
+                  .map_err(Into::into)
         })
+        .await
+        .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
     }
 }
 
@@ -76,7 +83,7 @@ impl ActiveCatalog {
     pub async fn get(&self, dataset: &str, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
         match self.datasets.get(dataset) {
             None    => Ok(None),
-            Some(h) => h.lookup.get(key).await,
+            Some(h) => h.get(key).await,
         }
     }
 }
@@ -136,7 +143,7 @@ mod tests {
     async fn dataset_handle_hit() {
         let dir = build_snapshot(&[(b"k", b"v")]);
         let h = DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap();
-        let got = h.lookup.get(b"k").await.unwrap();
+        let got = h.get(b"k").await.unwrap();
         assert_eq!(got, Some(Bytes::from_static(b"v")));
     }
 
