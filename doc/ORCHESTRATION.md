@@ -22,7 +22,7 @@ writing and reading the on-disk format. `fmtctl` owns the control plane — deci
 │  │                 │   watched    ┌──────────────────────┐  │
 │  │                 │─────────────▶│    node-agent        │  │
 │  │                 │◀─────────────│    DaemonSet         │  │
-│  └─────────────────┘   ack/state  └──────────────────────┘  │
+│  └─────────────────┘   NodeState  └──────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -41,19 +41,23 @@ touches nodes or disks directly — it delegates all node-level work to
 `node-agent` and all build work to `job`.
 
 Responsibilities:
-- Maintain a registry of `DatasetSpec` resources (name, source, shard count,
-  retention policy) via Kubernetes CRDs
+- Maintain a registry of `DatasetSpec` resources (name, key prefix, source,
+  shard count, retention policy) via Kubernetes CRDs
 - Accept requests to produce a new version of a dataset; create a `job` and
   track its progress
-- Promote a finished snapshot to `active` once the `job` reports completion
-- Expose a watched HTTP API that `node-agent` instances poll for the active
-  version of each dataset
-- Collect per-node `NodeStatus` acknowledgements from `node-agent`
-- Drive rollout: advance the active version across nodes as acknowledgements
-  arrive
+- On job completion: create a Kubernetes `PersistentVolume` referencing the
+  finished disk, set `VersionRecord.PVName`, and promote the version to `ready`
+- Promote a `ready` version to `active` and expose it via the watched API
+- Expose a watched HTTP API that `node-agent` instances poll for active
+  assignments; `NodeAssignment` carries the `PVName` so node-agents never need
+  cloud credentials
+- Collect periodic `NodeState` reports from `node-agent` instances; diff
+  reported actual state against desired assignments to drive rollout
+- Drive rollout: advance the active version across nodes as `NodeState` reports
+  confirm convergence
 - Drive rollback: revert the active version to a previous `ready` snapshot on
   operator request or policy trigger
-- Retire old versions once all nodes have acknowledged the new active version
+- Retire old versions once all nodes have converged on the new active version
   and the retention window has elapsed
 
 ### job
@@ -83,26 +87,46 @@ Responsibilities:
 
 **Binary:** `fmtctl node-agent`
 **Deployment:** Kubernetes `DaemonSet`, privileged container
-**Communicates with:** control-plane API (outbound), KV server (shared EmptyDir)
+**Communicates with:** control-plane API (outbound), KV server HTTP (loopback)
 
-One instance per node. Performs all privileged OS and GCP operations required
-to materialise a dataset version onto the local node.
+One instance per node. Performs all privileged OS operations required to
+materialise a dataset version onto the local node.
 
 Responsibilities:
-- Poll the control-plane watched API for the active version of each dataset
-- Call the Compute Engine API to attach the active version's Hyperdisk ML
-  volume to the local node
-- Wait for the block device to appear (`udevadm settle` / polling), then mount
-  it read-only at `/mnt/kv/<dataset>/v<N>/`
+- Poll the control-plane watched API for active `NodeAssignment`s
+- Create a Kubernetes `VolumeAttachment` referencing the assignment's
+  `PVName`; the CSI driver handles the underlying cloud attach call — no
+  cloud credentials are required in the pod
+- Wait for `VolumeAttachment.status.attached == true` and read the device
+  path from `status.attachmentMetadata["devicePath"]`
+- Mount the block device read-only at `/mnt/kv/<dataset>/v<N>/`
 - Write `catalog.json` atomically (via `rename(2)`) to the shared EmptyDir to
   signal the KV server that a new version is available
-- Wait for the KV server to acknowledge the version swap (via the shared
-  EmptyDir) — see `HIGHLEVEL.md § KV Server` for the full acknowledgement
-  protocol; the KV server is a separate Rust component outside `fmtctl`
-- Detach and unmount the previous version's disk after acknowledgement
-- Report per-node `NodeStatus` back to the control-plane (active version,
-  swap timestamp, error state)
+- Poll `GET http://localhost:7777/version` until the KV server reports the
+  new version as active (converging check — if the KV server crashes and
+  restarts it will reload from `catalog.json` and the poll naturally resolves)
+- Detach and unmount the previous version's disk after the KV server confirms
+  the swap
+- Periodically report the full `NodeState` (all datasets, phases, versions) to
+  the control-plane; this is a level-triggered converging report — a missed
+  report never causes permanent divergence
 - Handle node drain / shutdown: gracefully detach all attached disks
+
+#### Node-agent phase lifecycle (per dataset)
+
+```
+[attaching] ──(VolumeAttachment ready)──▶ [mounting] ──(mount + catalog.json)──▶ [active]
+     │                                                                                │
+     └──(error)──▶ [error]            (new version assigned)──▶ [unmounting] ────────┘
+```
+
+| Phase | Meaning |
+|---|---|
+| `attaching` | VolumeAttachment created; waiting for CSI driver to attach the disk |
+| `mounting` | Block device present; mount syscall in progress |
+| `active` | Mounted, catalog.json written, KV server confirmed via `/version` |
+| `unmounting` | Previous version being unmounted and disk detached |
+| `error` | An operation failed; full error in `NodeState.DatasetState.Error` |
 
 ---
 
@@ -112,44 +136,62 @@ Each `VersionRecord` transitions through the following states:
 
 ```
   [building] ──(job succeeds)──▶ [ready] ──(control-plane promotes)──▶ [active]
-      │                                                                     │
-      └──(job fails)──▶ [failed]              (all nodes ack + retention)──▶ [retired]
-                            │
-                            └──(control-plane retries)──▶ [building]  (new VersionRecord)
+      │                              │                                      │
+      └──(job fails)──▶ [failed]     └──(PV created, PVName set)           │
+                            │                                   (all nodes converged
+                            └──(retry)──▶ [building]             + retention)──▶ [retired]
 ```
 
-> **Retry semantics:** a retry creates a fresh `VersionRecord` in `building` state rather
-> than transitioning the failed record. The failed record is retained for audit purposes.
+> **Retry semantics:** a retry creates a fresh `VersionRecord` in `building`
+> state rather than transitioning the failed record.
 
 | State | Owner | Meaning |
 |---|---|---|
 | `building` | control-plane / job | Snapshot builder Job is running |
-| `ready` | control-plane | Disk is written; not yet active on any node |
+| `ready` | control-plane | Disk written; PV created; `PVName` set; not yet active on any node |
 | `active` | control-plane | Currently being served; node-agents are attaching |
-| `retired` | control-plane | Superseded; disk pending deletion |
+| `retired` | control-plane | Superseded; disk and PV pending deletion |
 | `failed` | control-plane / job | Build failed; disk may be incomplete |
 
 ---
 
 ## API Contract
 
-The control-plane exposes a single long-poll HTTP endpoint consumed by
-`node-agent` instances:
+### control-plane → node-agent (watched)
 
 ```
 GET /api/v1/node/{node-name}/assignments
 ```
 
-Returns the current active `VersionRecord` for each dataset assigned to this
-node. `node-agent` uses a `?generation=N` query parameter to block until the
-assignment changes (watched / long-poll pattern).
+Returns the current active `NodeAssignment` for each dataset assigned to this
+node.  `node-agent` uses a `?generation=N` query parameter to block until the
+assignment changes (long-poll).  Each `NodeAssignment` includes the
+`PVName` so node-agents need no cloud credentials.
 
-`node-agent` reports state back via:
+### node-agent → control-plane (converging state report)
 
 ```
-POST /api/v1/node/{node-name}/status
-Body: NodeStatus { dataset, active_version, state, timestamp }
+POST /api/v1/node/{node-name}/state
+Body: NodeState { node, datasets: []DatasetState, reported_at }
 ```
+
+Full state of all datasets on the node.  Reported periodically (default 30 s)
+and on every assignment change.  The control-plane diffs this against desired
+assignments to drive rollout.  A missed report is harmless — the next one
+self-heals.
+
+### node-agent → KV server (version confirmation)
+
+```
+GET http://localhost:7777/version
+Response: KVVersionResponse { datasets: []KVDatasetVersion }
+```
+
+The node-agent polls this endpoint after writing `catalog.json` and waits until
+the reported `version_id` for the dataset matches the desired version.  If the
+KV server is unreachable the call fails, which is itself a signal that the swap
+is not yet complete.  If the KV server crashes and restarts it reloads from
+`catalog.json` and the poll resolves naturally — no stale state, no cleanup.
 
 ---
 
@@ -160,8 +202,37 @@ contains the canonical type definitions:
 
 | Type | Description |
 |---|---|
-| `DatasetSpec` | Dataset name, BQ source, shard count, retention |
-| `VersionRecord` | Version ID, disk URL, state, build metadata |
-| `CatalogEntry` | Per-dataset entry written to `catalog.json` |
-| `NodeStatus` | Per-node version acknowledgement reported to control-plane |
-| `NodeAssignment` | Active version assignment returned by the watched API |
+| `DatasetSpec` | Dataset name, key prefix, BQ source, shard count, retention |
+| `VersionRecord` | Version ID, disk URL, PV name, state, build metadata |
+| `CatalogEntry` | Per-dataset entry written to `catalog.json`; includes key prefix |
+| `NodeAssignment` | Active version assignment returned by the watched API; includes key prefix |
+| `NodeState` | Full per-node state report: all datasets, phases, versions |
+| `DatasetState` | Phase, version, mount path, error for one dataset on one node |
+| `DatasetPhase` | Node-local lifecycle phase: attaching / mounting / active / unmounting / error |
+| `KVVersionResponse` | Response from `GET /version` on the KV server |
+| `KVDatasetVersion` | Per-dataset version entry in `KVVersionResponse` |
+
+## Go module structure
+
+```
+go/
+  go.mod                          module frostmap.io/fmtctl
+  api/types.go                    shared wire types
+  internal/
+    volume/
+      volume.go                   VolumeManager interface (AttachDisk, WaitForDevice, DetachDisk)
+      k8s.go                      ComputeDiskManager — Kubernetes VolumeAttachment via CSI
+      fs.go                       FSVolumeManager — filesystem simulation for local dev / tests
+      fake.go                     FakeVolumeManager — in-memory fake for unit tests
+    mount/
+      mount.go                    Mounter interface (Mount, Unmount)
+      mount_linux.go              LinuxMounter — syscall.Mount
+      mount_stub.go               stub for non-Linux builds
+      fs.go                       FSMounter — symlink-based for local dev / tests
+      fake.go                     FakeMounter — in-memory fake for unit tests
+    nodeagent/
+      agent.go                    Agent struct, reconcile loop, catalog write, state reporting
+  cmd/
+    node-agent/
+      main.go                     flags, signal handling, dependency wiring
+```

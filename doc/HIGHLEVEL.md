@@ -108,26 +108,34 @@ Responsibilities:
 
 **Language:** Go
 **Deployment:** DaemonSet, privileged container
-**Communicates with:** Control plane API (outbound), KV server (shared EmptyDir)
+**Communicates with:** Control plane API (outbound), KV server HTTP (loopback)
 
-One instance per node. Performs all privileged OS and GCP operations.
+One instance per node. Performs all privileged OS operations required to
+materialise a dataset version.  Uses the Kubernetes `VolumeAttachment` API for
+disk attachment so it requires no cloud credentials — the CSI driver handles the
+underlying cloud call.
 
 Responsibilities:
-- Watch the control plane API for the active version of each dataset
-- Call the Compute Engine API to attach Hyperdisk ML volumes to the local node
-- Wait for block devices to appear, then mount them read-only at
-  `/mnt/kv/<dataset>/v<N>/`
-- Write `catalog.json` atomically (via `rename(2)`) to a shared EmptyDir when a
-  new version is mounted and ready
-- Detach and unmount the previous version's disk after the KV server acknowledges
-  the swap
-- Report per-node version state back to the control plane
+- Watch the control plane API for active `NodeAssignment`s; each assignment
+  carries a `PVName` (set by the control-plane when the version becomes ready)
+- Create a `VolumeAttachment` for the PV; wait for
+  `status.attached == true` and read the device path from
+  `status.attachmentMetadata["devicePath"]`
+- Mount the block device read-only at `/mnt/kv/<dataset>/v<N>/`
+- Write `catalog.json` atomically (via `rename(2)`) to a shared EmptyDir;
+  `catalog.json` includes the dataset name, key prefix, version ID, and mount path
+- Poll `GET http://localhost:7777/version` until the KV server reports the new
+  version as active; if the KV server crashes and restarts it reloads from
+  `catalog.json` and the poll resolves naturally
+- Detach and unmount the previous version's disk after the KV server confirms
+- Periodically POST the full `NodeState` (all datasets, phases, versions) to
+  the control plane — level-triggered, so a missed report self-heals
 
 ### KV Server
 
 **Language:** Rust
 **Deployment:** DaemonSet, unprivileged container
-**Communicates with:** Clients (UDS + TCP), lifecycle manager (shared EmptyDir)
+**Communicates with:** Clients (UDS + TCP), node-agent (shared EmptyDir + HTTP)
 
 One instance per node. The latency-critical serving path. Never performs privileged
 operations.
@@ -139,12 +147,13 @@ Responsibilities:
 - Serve MGET requests over:
   - Unix domain socket: `/run/kv/kv.sock` (same-node clients, lowest latency)
   - TCP port `7777` (off-node access and tooling)
-- Route each key by prefix `<dataset>:<key>`, then `xxhash64(key) & (N-1)` to
-  the correct partition
+- Route each key by prefix `<key_prefix>:<key>` (from `catalog.json`), then
+  `xxhash64(key) & (N-1)` to the correct partition
 - Perform Robin Hood index probe; on hit, `pread` the value from `data.bin`
 - Swap versions atomically using RCU: in-flight requests complete against the old
   mmap before it is released
-- Acknowledge version swap to the lifecycle manager via the shared EmptyDir
+- Expose `GET /version` returning the currently loaded version per dataset;
+  node-agent polls this to confirm the swap before detaching the old disk
 
 ### Snapshot Builder
 
@@ -174,16 +183,18 @@ Responsibilities:
 
 ### `go/api`
 
-Go module imported by both the control plane and the lifecycle manager. Contains
+Go module imported by both the control plane and the node-agent. Contains
 the canonical type definitions for the system's wire contracts:
 
 | Type | Description |
 |---|---|
-| `DatasetSpec` | Dataset name, source config, shard count, retention |
-| `VersionRecord` | Version ID, disk URL, state (building / ready / active / retired) |
-| `CatalogEntry` | Per-dataset entry written to `catalog.json` |
-| `NodeStatus` | Per-node version acknowledgement reported to the control plane |
-| `NodeAssignment` | Active version assignment returned by the control plane watched API |
+| `DatasetSpec` | Dataset name, key prefix, source config, shard count, retention |
+| `VersionRecord` | Version ID, disk URL, PV name, state (building / ready / active / retired) |
+| `CatalogEntry` | Per-dataset entry written to `catalog.json`; includes key prefix |
+| `NodeAssignment` | Active version assignment from the watched API; includes PV name and key prefix |
+| `NodeState` | Full per-node state report: all datasets, phases, versions, timestamps |
+| `DatasetState` | Phase, version, mount path, error for one dataset on one node |
+| `KVVersionResponse` | Response body from `GET /version` on the KV server |
 
 ### `rust/crates/frostmap-format`
 
@@ -208,24 +219,32 @@ server (read path).
    a. Opens N parallel BQ Storage streams
    b. Writes N × (index.idx, data.bin) to the provisioned Hyperdisk ML volume
    c. Writes meta.json
-   d. Reports completion to control plane
+   d. Reports completion (disk URL) to control plane
 
-3. Control plane marks version V as active
+3. Control plane transitions V to ready:
+   a. Creates a Kubernetes PersistentVolume referencing the disk
+   b. Sets VersionRecord.PVName
+   c. Promotes V to active and surfaces it via the watched API
 
-4. Lifecycle manager (on each node):
-   a. Detects new active version via control plane watch
-   b. Attaches the Hyperdisk ML volume to the node
-   c. Mounts it read-only at /mnt/kv/D/vV/
-   d. Writes catalog.json atomically
+4. node-agent (on each node):
+   a. Detects new active NodeAssignment via long-poll
+   b. Creates a VolumeAttachment for the PV; CSI driver attaches the disk
+   c. Waits for VolumeAttachment.status.attached == true
+   d. Mounts the block device read-only at /mnt/kv/D/vV/
+   e. Writes catalog.json atomically (dataset, key_prefix, version_id, mount_path)
 
 5. KV server (on each node):
    a. Detects catalog.json change via inotify
    b. mmaps new index partitions, opens new data.bin fds
    c. Atomically swaps the active dataset handle (RCU)
-   d. Acknowledges swap; lifecycle manager detaches the old disk
+   d. Updates GET /version response to reflect new version
 
-6. Clients query via MGET on /run/kv/kv.sock or :7777
-   Dataset is selected by key prefix: "<dataset>:<key>"
+6. node-agent polls GET http://localhost:7777/version until version_id matches;
+   then deletes the VolumeAttachment for the old disk and unmounts it.
+   node-agent POSTs NodeState to the control plane to confirm convergence.
+
+7. Clients query via MGET on /run/kv/kv.sock or :7777
+   Dataset is selected by key prefix: "<key_prefix>:<key>"
 ```
 
 ---
