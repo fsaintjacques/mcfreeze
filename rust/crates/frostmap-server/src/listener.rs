@@ -14,6 +14,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -46,6 +47,8 @@ pub async fn run_listeners(
     let mut tasks = tokio::task::JoinSet::new();
 
     if let Some(path) = uds_path {
+        // Remove a stale socket file so that restart after a crash succeeds.
+        std::fs::remove_file(&path).ok();
         let listener = UnixListener::bind(&path)?;
         tracing::info!(path = %path.display(), "UDS listener bound");
         let lookup  = Arc::clone(&lookup);
@@ -156,7 +159,10 @@ async fn accept_uds(
                     handle_connection(stream, lookup, semver, generation).await;
                 });
             }
-            Err(e) => tracing::error!("UDS accept error: {e}"),
+            Err(e) => {
+                tracing::error!("UDS accept error: {e}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 }
@@ -177,7 +183,10 @@ async fn accept_tcp(
                     handle_connection(stream, lookup, semver, generation).await;
                 });
             }
-            Err(e) => tracing::error!("TCP accept error: {e}"),
+            Err(e) => {
+                tracing::error!("TCP accept error: {e}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 }
@@ -303,6 +312,17 @@ mod tests {
         let lookup = MockLookup::new(&[]);
         let out = roundtrip(lookup, b"md somekey\r\n").await;
         assert_eq!(out, b"SERVER_ERROR read-only\r\n");
+    }
+
+    #[tokio::test]
+    async fn write_command_pipelined_does_not_stall() {
+        // md/ma have no body (data_len == 0) so they take the Continue path.
+        // A command following them in the same pipeline batch must still be
+        // dispatched — a parser bug that leaves bytes unconsumed would cause
+        // the version response to be silently dropped.
+        let lookup = MockLookup::new(&[]);
+        let out = roundtrip(lookup, b"md somekey\r\nversion\r\n").await;
+        assert_eq!(out, b"SERVER_ERROR read-only\r\nVERSION 0.1.0 gen/0\r\n");
     }
 
     // --- pipelining ---
