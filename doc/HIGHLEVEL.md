@@ -195,6 +195,7 @@ the canonical type definitions for the system's wire contracts:
 | `NodeState` | Full per-node state report: all datasets, phases, versions, timestamps |
 | `DatasetState` | Phase, version, mount path, error for one dataset on one node |
 | `KVVersionResponse` | Response body from `GET /version` on the KV server |
+| `KVDatasetVersion` | Per-dataset version entry in `KVVersionResponse` |
 
 ### `rust/crates/frostmap-format`
 
@@ -240,7 +241,7 @@ server (read path).
    d. Updates GET /version response to reflect new version
 
 6. node-agent polls GET http://localhost:7777/version until version_id matches;
-   then deletes the VolumeAttachment for the old disk and unmounts it.
+   then unmounts the old disk's mountpoint and deletes its VolumeAttachment.
    node-agent POSTs NodeState to the control plane to confirm convergence.
 
 7. Clients query via MGET on /run/kv/kv.sock or :7777

@@ -117,7 +117,8 @@ Responsibilities:
 ```
 [attaching] ──(VolumeAttachment ready)──▶ [mounting] ──(mount + catalog.json)──▶ [active]
      │                                                                                │
-     └──(error)──▶ [error]            (new version assigned)──▶ [unmounting] ────────┘
+     └──(error)──▶ [error] ──(next reconcile cycle)──▶ [attaching]                  │
+                                         (new version assigned)──▶ [unmounting] ─────┘
 ```
 
 | Phase | Meaning |
@@ -205,7 +206,7 @@ contains the canonical type definitions:
 | `DatasetSpec` | Dataset name, key prefix, BQ source, shard count, retention |
 | `VersionRecord` | Version ID, disk URL, PV name, state, build metadata |
 | `CatalogEntry` | Per-dataset entry written to `catalog.json`; includes key prefix |
-| `NodeAssignment` | Active version assignment returned by the watched API; includes key prefix |
+| `NodeAssignment` | Active version assignment returned by the watched API; includes PV name and key prefix |
 | `NodeState` | Full per-node state report: all datasets, phases, versions |
 | `DatasetState` | Phase, version, mount path, error for one dataset on one node |
 | `DatasetPhase` | Node-local lifecycle phase: attaching / mounting / active / unmounting / error |
