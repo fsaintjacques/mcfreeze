@@ -50,12 +50,6 @@ const REQUEST_DURATION_BUCKETS: [f64; 10] = [
     0.001, 0.002, 0.005, 0.010, 0.050, 0.100,
 ];
 
-/// Catalog hot-swap duration: inotify → read → parse → swap().
-/// Expected range: tens of milliseconds to several seconds.
-const CATALOG_SWAP_DURATION_BUCKETS: [f64; 10] = [
-    0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0,
-];
-
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -79,8 +73,6 @@ pub struct Metrics {
     pub catalog_generation: Gauge<i64, AtomicI64>,
     /// Catalog hot-swaps; label `result` ∈ {ok, error}; always 0 in snapshot mode.
     pub catalog_swap_total: Family<ResultLabels, Counter>,
-    /// Duration from inotify event to `swap()` complete; unused in snapshot mode.
-    pub catalog_swap_duration_seconds: Histogram,
     /// Active dataset count; always 1 in snapshot mode.
     pub active_datasets: Gauge<i64, AtomicI64>,
 
@@ -148,12 +140,6 @@ impl Metrics {
             "Catalog hot-swaps by result; always 0 in snapshot mode",
             Family::<ResultLabels, Counter>::default()
         );
-        let catalog_swap_duration_seconds = reg!(
-            registry,
-            "fm_catalog_swap_duration_seconds",
-            "Duration from inotify event to swap() complete",
-            Histogram::new(CATALOG_SWAP_DURATION_BUCKETS.iter().copied())
-        );
         let active_datasets = reg!(
             registry,
             "fm_active_datasets",
@@ -181,7 +167,6 @@ impl Metrics {
             response_bytes_total,
             catalog_generation,
             catalog_swap_total,
-            catalog_swap_duration_seconds,
             active_datasets,
             connections_active,
             connections_total,
