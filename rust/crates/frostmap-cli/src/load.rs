@@ -9,6 +9,7 @@ use tracing::info;
 
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
+use frostmap_loader::source::CsvSource;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -80,6 +81,17 @@ pub enum Source {
         #[arg(long)]
         no_compression: bool,
     },
+    /// Load from a two-column CSV (base64-encoded key, base64-encoded value).
+    /// Reads from stdin if --file is not provided.
+    Csv {
+        /// Path to the CSV file. Reads from stdin when omitted.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Number of rows per internal batch
+        #[arg(long, default_value = "1024")]
+        batch_size: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +125,10 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                 no_compression,
             )
             .await
+        }
+        Source::Csv { file, batch_size } => {
+            let output = args.output.context("--output is required for csv source")?;
+            run_csv(output, args.partitions, args.index_parallelism, file, batch_size).await
         }
     }
 }
@@ -221,6 +237,56 @@ async fn run_bq(
         scatter_secs     = stats.scatter_duration.as_secs_f64(),
         index_secs       = stats.index_duration.as_secs_f64(),
         "load complete",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CSV load
+// ---------------------------------------------------------------------------
+
+async fn run_csv(
+    output:            PathBuf,
+    partitions:        u32,
+    index_parallelism: usize,
+    file:              Option<PathBuf>,
+    batch_size:        usize,
+) -> Result<()> {
+    let source: CsvSource<Box<dyn std::io::Read + Send>> = match &file {
+        Some(path) => {
+            info!(file = %path.display(), "loading CSV from file");
+            let f = std::fs::File::open(path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            CsvSource::new(Box::new(f), batch_size)
+        }
+        None => {
+            info!("loading CSV from stdin");
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)
+                .context("failed to read stdin")?;
+            CsvSource::new(Box::new(std::io::Cursor::new(buf)), batch_size)
+        }
+    };
+
+    let loader_config = LoaderConfig {
+        n_partitions:      partitions,
+        index_parallelism,
+        ..LoaderConfig::default()
+    };
+
+    let loader = SnapshotLoader::new(&output, loader_config)
+        .context("failed to create SnapshotLoader")?;
+
+    let stats = loader
+        .load(&mut { source })
+        .await
+        .context("csv load failed")?;
+
+    info!(
+        n_keys       = stats.n_keys,
+        data_bytes   = stats.data_bytes,
+        "csv load complete",
     );
 
     Ok(())
