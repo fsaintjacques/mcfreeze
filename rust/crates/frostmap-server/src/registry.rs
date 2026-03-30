@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -60,6 +61,14 @@ impl DatasetHandle {
 // ActiveCatalog
 // ---------------------------------------------------------------------------
 
+/// One entry returned by [`ActiveCatalog::version_snapshot`]; used to build
+/// the `GET /version` HTTP response.
+pub struct VersionEntry {
+    pub dataset:    String,
+    pub version_id: String,
+    pub loaded_at:  SystemTime,
+}
+
 /// Immutable snapshot of the currently-active dataset set.
 ///
 /// Stored behind an `ArcSwap`; the catalog-watcher task atomically replaces
@@ -68,15 +77,26 @@ pub struct ActiveCatalog {
     datasets:       HashMap<String, DatasetHandle>,
     /// Monotonically increasing; incremented on each successful hot-swap.
     pub generation: u64,
+    /// Wall-clock time at which this catalog was loaded.
+    pub loaded_at:  SystemTime,
 }
 
 impl ActiveCatalog {
-    pub fn new(datasets: HashMap<String, DatasetHandle>, generation: u64) -> Self {
-        Self { datasets, generation }
+    pub fn new(datasets: HashMap<String, DatasetHandle>, generation: u64, loaded_at: SystemTime) -> Self {
+        Self { datasets, generation, loaded_at }
     }
 
     pub fn dataset_count(&self) -> usize {
         self.datasets.len()
+    }
+
+    /// Snapshot of per-dataset version info for the `GET /version` HTTP response.
+    pub fn version_snapshot(&self) -> Vec<VersionEntry> {
+        self.datasets.values().map(|h| VersionEntry {
+            dataset:    h.name.clone(),
+            version_id: h.version.clone(),
+            loaded_at:  self.loaded_at,
+        }).collect()
     }
 
     /// Look up `key` in `dataset`.  Returns `Ok(None)` for unknown datasets.
@@ -163,7 +183,7 @@ mod tests {
             "myds".into(),
             DatasetHandle::open("myds".into(), "v1".into(), dir.path()).unwrap(),
         );
-        let catalog = ActiveCatalog::new(datasets, 1);
+        let catalog = ActiveCatalog::new(datasets, 1, SystemTime::UNIX_EPOCH);
         let got = catalog.get("myds", b"key").await.unwrap();
         assert_eq!(got, Some(Bytes::from_static(b"val")));
     }
@@ -176,14 +196,14 @@ mod tests {
             "myds".into(),
             DatasetHandle::open("myds".into(), "v1".into(), dir.path()).unwrap(),
         );
-        let catalog = ActiveCatalog::new(datasets, 1);
+        let catalog = ActiveCatalog::new(datasets, 1, SystemTime::UNIX_EPOCH);
         let got = catalog.get("myds", b"absent").await.unwrap();
         assert_eq!(got, None);
     }
 
     #[tokio::test]
     async fn active_catalog_miss_unknown_dataset() {
-        let catalog = ActiveCatalog::new(HashMap::new(), 0);
+        let catalog = ActiveCatalog::new(HashMap::new(), 0, SystemTime::UNIX_EPOCH);
         let got = catalog.get("unknown", b"key").await.unwrap();
         assert_eq!(got, None);
     }
@@ -200,7 +220,7 @@ mod tests {
         let mut ds2 = HashMap::new();
         ds2.insert("ds".into(), DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap());
 
-        let reg = Registry::new(ActiveCatalog::new(ds1, 0));
+        let reg = Registry::new(ActiveCatalog::new(ds1, 0, SystemTime::UNIX_EPOCH));
 
         // Initial load.
         let catalog = Arc::clone(&*reg.load());
@@ -208,7 +228,7 @@ mod tests {
         assert_eq!(catalog.get("ds", b"a").await.unwrap(), Some(Bytes::from_static(b"1")));
 
         // Swap to generation 1.
-        let old = reg.swap(Arc::new(ActiveCatalog::new(ds2, 1)));
+        let old = reg.swap(Arc::new(ActiveCatalog::new(ds2, 1, SystemTime::UNIX_EPOCH)));
         assert_eq!(old.generation, 0);
 
         let catalog = Arc::clone(&*reg.load());

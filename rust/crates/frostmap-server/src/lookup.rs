@@ -233,7 +233,7 @@ mod tests {
         let dir = build_snapshot(pairs);
         let mut ds = HashMap::new();
         ds.insert("ds".into(), DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap());
-        (Registry::new(ActiveCatalog::new(ds, gen)), dir)
+        (Registry::new(ActiveCatalog::new(ds, gen, std::time::SystemTime::UNIX_EPOCH)), dir)
     }
 
     #[tokio::test]
@@ -252,14 +252,14 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_miss_unknown_dataset() {
-        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0));
+        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::UNIX_EPOCH));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert_eq!(conn.get(b"unknown:key").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn catalog_missing_prefix_returns_error() {
-        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0));
+        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::UNIX_EPOCH));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert!(matches!(
             conn.get(b"no-colon").await.unwrap_err(),
@@ -277,12 +277,12 @@ mod tests {
         let mut ds2 = HashMap::new();
         ds2.insert("ds".into(), DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap());
 
-        let reg = Registry::new(ActiveCatalog::new(ds1, 0));
+        let reg = Registry::new(ActiveCatalog::new(ds1, 0, std::time::SystemTime::UNIX_EPOCH));
         let mut conn = CatalogLookup::new(Arc::clone(&reg)).for_connection();
 
         assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v1")));
 
-        reg.swap(Arc::new(ActiveCatalog::new(ds2, 1)));
+        reg.swap(Arc::new(ActiveCatalog::new(ds2, 1, std::time::SystemTime::UNIX_EPOCH)));
 
         assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v2")));
     }

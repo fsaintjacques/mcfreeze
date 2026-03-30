@@ -76,12 +76,13 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         PathBuf::from(p)
     });
 
-    // Metrics server: fire-and-forget.
+    // HTTP server (serves /metrics and /version): fire-and-forget.
     if let Some(addr) = cfg.metrics_addr {
-        let prom = Arc::clone(&prom);
+        let prom     = Arc::clone(&prom);
+        let data_reg = Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(e) = Metrics::run_server(prom, addr).await {
-                tracing::error!("metrics server error: {e}");
+            if let Err(e) = Metrics::run_server(prom, Some(data_reg), addr).await {
+                tracing::error!("HTTP server error: {e}");
             }
         });
     }
@@ -302,5 +303,5 @@ fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, Ser
         )?;
         datasets.insert(entry.key_prefix, handle);
     }
-    Ok(ActiveCatalog::new(datasets, generation))
+    Ok(ActiveCatalog::new(datasets, generation, std::time::SystemTime::now()))
 }

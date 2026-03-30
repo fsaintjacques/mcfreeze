@@ -8,12 +8,16 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::time::SystemTime;
 
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use axum::routing::get;
+use serde::Serialize;
+use crate::registry::Registry as DataRegistry;
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
@@ -173,16 +177,23 @@ impl Metrics {
         })
     }
 
-    /// Bind `addr` and serve the Prometheus text format at `/metrics`.
+    /// Bind `addr` and serve `/metrics` (Prometheus) and `GET /version` (KV
+    /// version state for the node-agent convergence poll).
     ///
     /// Returns when the HTTP server exits (it normally runs forever).
-    pub async fn run_server(registry: Arc<Registry>, addr: SocketAddr) -> std::io::Result<()> {
+    pub async fn run_server(
+        prom:     Arc<Registry>,
+        data_reg: Option<Arc<DataRegistry>>,
+        addr:     SocketAddr,
+    ) -> std::io::Result<()> {
+        let state = HttpState { prom, data_reg };
         let router = Router::new()
             .route("/metrics", get(metrics_handler))
-            .with_state(registry);
+            .route("/version", get(version_handler))
+            .with_state(state);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "metrics server listening");
+        tracing::info!(%addr, "HTTP server listening");
 
         axum::serve(listener, router)
             .await
@@ -191,15 +202,67 @@ impl Metrics {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP handler
+// Shared HTTP state
+// ---------------------------------------------------------------------------
+
+/// State shared across all HTTP handlers.
+#[derive(Clone)]
+struct HttpState {
+    prom:     Arc<Registry>,
+    /// `None` in snapshot mode, which has no catalog registry.
+    data_reg: Option<Arc<DataRegistry>>,
+}
+
+// ---------------------------------------------------------------------------
+// Response types for GET /version
+// ---------------------------------------------------------------------------
+
+/// Wire type for one dataset entry in the `GET /version` response.
+/// Matches the Go `api.KVDatasetVersion` JSON shape.
+#[derive(Serialize)]
+struct KVDatasetVersion {
+    dataset:    String,
+    version_id: String,
+    loaded_at:  String, // RFC3339 UTC
+}
+
+/// Wire type for the `GET /version` response body.
+/// Matches the Go `api.KVVersionResponse` JSON shape.
+#[derive(Serialize)]
+struct KVVersionResponse {
+    datasets: Vec<KVDatasetVersion>,
+}
+
+// ---------------------------------------------------------------------------
+// HTTP handlers
 // ---------------------------------------------------------------------------
 
 const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-async fn metrics_handler(State(registry): State<Arc<Registry>>) -> impl IntoResponse {
+async fn metrics_handler(State(state): State<HttpState>) -> impl IntoResponse {
     let mut buf = String::new();
-    encode(&mut buf, &registry).unwrap();
+    encode(&mut buf, &state.prom).unwrap();
     ([(CONTENT_TYPE, METRICS_CONTENT_TYPE)], buf)
+}
+
+async fn version_handler(State(state): State<HttpState>) -> Json<KVVersionResponse> {
+    let datasets = match &state.data_reg {
+        None => vec![],
+        Some(reg) => {
+            let catalog = Arc::clone(&*reg.load());
+            catalog.version_snapshot().into_iter().map(|e| KVDatasetVersion {
+                dataset:    e.dataset,
+                version_id: e.version_id,
+                loaded_at:  format_rfc3339(e.loaded_at),
+            }).collect()
+        }
+    };
+    Json(KVVersionResponse { datasets })
+}
+
+/// Format a [`SystemTime`] as an RFC3339 UTC string (e.g. `"2024-01-15T10:30:00Z"`).
+fn format_rfc3339(t: SystemTime) -> String {
+    humantime::format_rfc3339_seconds(t).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -231,5 +294,33 @@ mod tests {
         let mut buf = String::new();
         encode(&mut buf, &reg).unwrap();
         assert!(buf.contains("fm_keys_hit_total"));
+    }
+
+    #[test]
+    fn version_snapshot_none_returns_empty_datasets() {
+        let state = HttpState {
+            prom:     Arc::new(Registry::default()),
+            data_reg: None,
+        };
+        // When data_reg is None (snapshot mode), version_snapshot must yield
+        // an empty dataset list — the node-agent convergence poll must not panic.
+        let datasets: Vec<KVDatasetVersion> = match &state.data_reg {
+            None => vec![],
+            Some(reg) => {
+                let catalog = Arc::clone(&*reg.load());
+                catalog.version_snapshot().into_iter().map(|e| KVDatasetVersion {
+                    dataset:    e.dataset,
+                    version_id: e.version_id,
+                    loaded_at:  format_rfc3339(e.loaded_at),
+                }).collect()
+            }
+        };
+        assert!(datasets.is_empty());
+    }
+
+    #[test]
+    fn format_rfc3339_unix_epoch() {
+        // UNIX_EPOCH = 1970-01-01T00:00:00Z
+        assert_eq!(format_rfc3339(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00Z");
     }
 }

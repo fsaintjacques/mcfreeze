@@ -57,7 +57,7 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     if let Some(addr) = cfg.metrics_addr {
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(e) = Metrics::run_server(registry, addr).await {
+            if let Err(e) = Metrics::run_server(registry, None, addr).await {
                 tracing::error!("metrics server error: {e}");
             }
         });
