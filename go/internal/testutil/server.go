@@ -13,15 +13,6 @@ import (
 	"frostmap.io/fmtctl/api"
 )
 
-// FMServerBinary returns the path to the frostmap-server binary.
-func FMServerBinary(t *testing.T) string {
-	t.Helper()
-	if p := os.Getenv("FM_SERVER"); p != "" {
-		return p
-	}
-	return "frostmap-server"
-}
-
 // Server is a running frostmap-server in catalog mode.
 type Server struct {
 	// TCPAddr is the memcache protocol address.
@@ -46,19 +37,15 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	// Write the initial catalog.
 	writeCatalogFile(t, catalogPath, entries)
 
-	tcpPort := freePort(t)
-	httpPort := freePort(t)
-	tcpAddr := fmt.Sprintf("127.0.0.1:%d", tcpPort)
-	httpAddr := fmt.Sprintf("127.0.0.1:%d", httpPort)
+	ports := freePorts(t, 2)
+	tcpAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", ports[1])
 
-	bin := FMServerBinary(t)
-	// frostmap-server is invoked as `fm serve catalog ...`
 	cmd := exec.Command(FMBinary(t), "serve", "catalog",
 		"--catalog", catalogPath,
 		"--tcp", tcpAddr,
 		"--metrics", httpAddr,
 	)
-	_ = bin // FM_SERVER not used directly; fm binary has the serve subcommand
 	cmd.Stdout = os.Stderr // show server logs in test output
 	cmd.Stderr = os.Stderr
 
@@ -112,15 +99,25 @@ func writeCatalogFile(t *testing.T, path string, entries []api.CatalogEntry) {
 	}
 }
 
-func freePort(t *testing.T) int {
+// freePorts returns n distinct free TCP ports. All listeners are held open
+// until the slice is returned, avoiding the TOCTOU race where two calls
+// could return the same port.
+func freePorts(t *testing.T, n int) []int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to find free port: %v", err)
+	listeners := make([]net.Listener, n)
+	ports := make([]int, n)
+	for i := range n {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to find free port: %v", err)
+		}
+		listeners[i] = l
+		ports[i] = l.Addr().(*net.TCPAddr).Port
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	return port
+	for _, l := range listeners {
+		l.Close()
+	}
+	return ports
 }
 
 func waitForTCP(t *testing.T, addr string, timeout time.Duration) {

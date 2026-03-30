@@ -3,11 +3,13 @@
 package testutil
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,18 +144,46 @@ func httpGetBody(t *testing.T, url string) string {
 }
 
 // mcGet sends a memcache meta-get and returns the value string.
+// It parses the "VA <len>\r\n<value>\r\n" response correctly by reading
+// exactly <len> bytes for the value body.
 func mcGet(t *testing.T, addr, key string) string {
 	t.Helper()
-	raw := mcGetRaw(t, addr, key)
-	// Expected: "VA <len>\r\n<value>\r\n"
-	lines := strings.Split(raw, "\r\n")
-	if len(lines) < 2 || !strings.HasPrefix(lines[0], "VA ") {
-		t.Fatalf("mg %s: unexpected response: %q", key, raw)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
 	}
-	return lines[1]
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	fmt.Fprintf(conn, "mg %s v\r\n", key)
+
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("mg %s: read status line: %v", key, err)
+	}
+	line = strings.TrimRight(line, "\r\n")
+
+	if !strings.HasPrefix(line, "VA ") {
+		t.Fatalf("mg %s: expected VA, got %q", key, line)
+	}
+
+	// Parse value length from "VA <len> [flags...]"
+	fields := strings.Fields(line)
+	vlen, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatalf("mg %s: bad VA length %q: %v", key, fields[1], err)
+	}
+
+	// Read exactly vlen bytes + trailing \r\n
+	valueBuf := make([]byte, vlen+2)
+	if _, err := io.ReadFull(r, valueBuf); err != nil {
+		t.Fatalf("mg %s: read value body: %v", key, err)
+	}
+	return string(valueBuf[:vlen])
 }
 
-// mcGetRaw sends `mg <key> v\r\n` and returns the full raw response.
+// mcGetRaw sends `mg <key> v\r\n` and returns the first response line.
 func mcGetRaw(t *testing.T, addr, key string) string {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -165,10 +195,10 @@ func mcGetRaw(t *testing.T, addr, key string) string {
 
 	fmt.Fprintf(conn, "mg %s v\r\n", key)
 
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
 	if err != nil {
 		t.Fatalf("mg %s: read: %v", key, err)
 	}
-	return string(buf[:n])
+	return strings.TrimRight(line, "\r\n")
 }
