@@ -12,11 +12,13 @@ package nodeagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"frostmap.io/fmtctl/api"
@@ -297,6 +299,12 @@ func (a *Agent) unmountWithRetry(ctx context.Context, path string) error {
 		err := a.mounter.Unmount(ctx, path)
 		if err == nil {
 			return nil
+		}
+
+		// Only retry on EBUSY (KV server still holds mmapped fds).
+		// Non-transient errors (e.g. path not found) return immediately.
+		if !errors.Is(err, syscall.EBUSY) {
+			return err
 		}
 
 		a.log.Warn("unmount busy, retrying", "path", path, "backoff", backoff, "err", err)

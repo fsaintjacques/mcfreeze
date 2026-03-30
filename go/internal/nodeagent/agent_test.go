@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -305,9 +306,9 @@ func TestShutdown_RetriesOnBusy(t *testing.T) {
 	agent.reconcile(context.Background(), makeAssignment("ds", "ds", "v1", "pv-ds-v1"))
 	mounter.Calls = nil
 
-	// First two unmount attempts fail (simulating EBUSY), third succeeds.
-	mounter.InjectError(0, os.ErrPermission)
-	mounter.InjectError(1, os.ErrPermission)
+	// First two unmount attempts fail with EBUSY (KV server holds mmaps), third succeeds.
+	mounter.InjectError(0, syscall.EBUSY)
+	mounter.InjectError(1, syscall.EBUSY)
 
 	agent.Shutdown(context.Background())
 
