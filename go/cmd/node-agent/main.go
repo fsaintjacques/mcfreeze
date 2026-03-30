@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"frostmap.io/fmtctl/internal/mount"
 	"frostmap.io/fmtctl/internal/nodeagent"
@@ -40,7 +41,12 @@ func main() {
 
 	agent := nodeagent.New(cfg, disks, mounter, assignments, reporter, versions)
 	if err := agent.Run(ctx); err != nil {
-		slog.Error("agent exited", "err", err)
-		os.Exit(1)
+		slog.Info("agent stopped", "reason", err)
 	}
+
+	// Graceful shutdown: unmount all datasets and detach disks.
+	// Use a fresh context with the remaining grace period (Kubernetes default 30s).
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer shutdownCancel()
+	agent.Shutdown(shutdownCtx)
 }

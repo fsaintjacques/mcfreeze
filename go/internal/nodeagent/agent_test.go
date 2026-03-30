@@ -255,6 +255,73 @@ func TestReconcile_VersionUpgrade_CleansUpOldVersion(t *testing.T) {
 	}
 }
 
+// --- shutdown tests ---
+
+func TestShutdown_UnmountsAndDetaches(t *testing.T) {
+	agent, disks, mounter, _, _, _ := newTestAgent(t)
+
+	// Reconcile two datasets to PhaseActive.
+	agent.reconcile(context.Background(), makeAssignment("ds1", "ds1", "v1", "pv-ds1-v1"))
+	agent.reconcile(context.Background(), makeAssignment("ds2", "ds2", "v1", "pv-ds2-v1"))
+
+	if s := agent.datasetState("ds1"); s.Phase != api.PhaseActive {
+		t.Fatalf("ds1: expected PhaseActive, got %s", s.Phase)
+	}
+	if s := agent.datasetState("ds2"); s.Phase != api.PhaseActive {
+		t.Fatalf("ds2: expected PhaseActive, got %s", s.Phase)
+	}
+
+	// Clear call logs to isolate shutdown calls.
+	mounter.Calls = nil
+	disks.Calls = nil
+
+	agent.Shutdown(context.Background())
+
+	// Both datasets should be unmounted and detached.
+	unmounts := 0
+	detaches := 0
+	for _, c := range mounter.Calls {
+		if c.Op == "unmount" {
+			unmounts++
+		}
+	}
+	for _, c := range disks.Calls {
+		if c.Op == "detach" {
+			detaches++
+		}
+	}
+	if unmounts != 2 {
+		t.Errorf("expected 2 unmounts, got %d", unmounts)
+	}
+	if detaches != 2 {
+		t.Errorf("expected 2 detaches, got %d", detaches)
+	}
+}
+
+func TestShutdown_RetriesOnBusy(t *testing.T) {
+	agent, _, mounter, _, _, _ := newTestAgent(t)
+
+	// Reconcile one dataset.
+	agent.reconcile(context.Background(), makeAssignment("ds", "ds", "v1", "pv-ds-v1"))
+	mounter.Calls = nil
+
+	// First two unmount attempts fail (simulating EBUSY), third succeeds.
+	mounter.InjectError(0, os.ErrPermission)
+	mounter.InjectError(1, os.ErrPermission)
+
+	agent.Shutdown(context.Background())
+
+	unmounts := 0
+	for _, c := range mounter.Calls {
+		if c.Op == "unmount" {
+			unmounts++
+		}
+	}
+	if unmounts < 3 {
+		t.Errorf("expected at least 3 unmount attempts (2 failures + 1 success), got %d", unmounts)
+	}
+}
+
 // --- run loop tests ---
 
 func TestRun_SingleAssignment(t *testing.T) {

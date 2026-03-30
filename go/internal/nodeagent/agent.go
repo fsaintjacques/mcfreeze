@@ -245,6 +245,71 @@ func (a *Agent) cleanupOldVersion(ctx context.Context, dataset string, prev api.
 	}
 }
 
+// Shutdown gracefully unmounts all datasets and detaches their disks.
+// Call this after Run() returns. The provided context controls the overall
+// deadline — typically the remaining Kubernetes termination grace period.
+//
+// Unmount is retried with backoff because the KV server may still hold mmapped
+// fds when SIGTERM arrives (Kubernetes sends SIGTERM to all containers in
+// parallel). The retry loop waits for the KV server to exit and release its
+// mmaps.
+func (a *Agent) Shutdown(ctx context.Context) {
+	a.log.Info("shutting down: cleaning up mounts and disks")
+
+	a.mu.Lock()
+	snapshot := make([]api.DatasetState, 0, len(a.datasets))
+	for _, ds := range a.datasets {
+		snapshot = append(snapshot, ds)
+	}
+	a.mu.Unlock()
+
+	for _, ds := range snapshot {
+		log := a.log.With("dataset", ds.Dataset, "version", ds.VersionID)
+
+		if ds.MountPath != "" {
+			if err := a.unmountWithRetry(ctx, ds.MountPath); err != nil {
+				log.Error("shutdown unmount failed", "path", ds.MountPath, "err", err)
+			} else {
+				log.Info("unmounted", "path", ds.MountPath)
+			}
+		}
+
+		if ds.PVName != "" {
+			if err := a.disks.DetachDisk(ctx, a.cfg.NodeName, ds.PVName); err != nil {
+				log.Error("shutdown detach failed", "pv", ds.PVName, "err", err)
+			} else {
+				log.Info("detached", "pv", ds.PVName)
+			}
+		}
+	}
+
+	a.log.Info("shutdown complete")
+}
+
+// unmountWithRetry retries Unmount with exponential backoff until it succeeds
+// or ctx is cancelled.  This handles the case where the KV server still holds
+// mmapped fds (EBUSY) and hasn't exited yet.
+func (a *Agent) unmountWithRetry(ctx context.Context, path string) error {
+	backoff := 500 * time.Millisecond
+	const maxBackoff = 5 * time.Second
+
+	for {
+		err := a.mounter.Unmount(ctx, path)
+		if err == nil {
+			return nil
+		}
+
+		a.log.Warn("unmount busy, retrying", "path", path, "backoff", backoff, "err", err)
+
+		select {
+		case <-time.After(backoff):
+			backoff = min(backoff*2, maxBackoff)
+		case <-ctx.Done():
+			return fmt.Errorf("unmount %s: gave up: %w (last error: %v)", path, ctx.Err(), err)
+		}
+	}
+}
+
 // nodeState returns a snapshot of the current NodeState.
 func (a *Agent) nodeState() api.NodeState {
 	a.mu.Lock()
