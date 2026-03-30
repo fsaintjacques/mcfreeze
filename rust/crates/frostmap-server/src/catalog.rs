@@ -72,6 +72,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_prefix_differs_from_dataset() {
+        // key_prefix and dataset are independent fields; a dataset can be routed
+        // under a prefix that does not match its name.
+        let f = write_catalog(r#"{"entries":[
+            {"dataset":"my-dataset","key_prefix":"mds","version_id":"v1","mount_path":"/mnt/kv/my-dataset/v1"}
+        ]}"#);
+        let cat = CatalogFile::load(f.path()).unwrap();
+        assert_eq!(cat.entries[0].dataset, "my-dataset");
+        assert_eq!(cat.entries[0].key_prefix, "mds");
+    }
+
+    #[test]
     fn parse_empty_entries() {
         let f = write_catalog(r#"{"entries":[]}"#);
         let cat = CatalogFile::load(f.path()).unwrap();

@@ -238,6 +238,54 @@ async fn build_catalog_blocking(
     .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use frostmap_format::writer::SnapshotWriter;
+    use tempfile::{NamedTempFile, TempDir};
+
+    fn write_catalog(json: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        f
+    }
+
+    fn build_snapshot() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let mut w = SnapshotWriter::new(dir.path(), 1).unwrap();
+        w.write(b"k", b"v").unwrap();
+        w.finish(dir.path()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn duplicate_key_prefix_returns_catalog_parse_error() {
+        // Two entries sharing a key_prefix must be rejected even if they
+        // have distinct dataset names — key_prefix is the routing key.
+        // The first entry needs a valid snapshot so open() succeeds before
+        // the second entry's duplicate check fires.
+        let snap = build_snapshot();
+        let snap_path = snap.path().to_str().unwrap();
+        let json = format!(r#"{{"entries":[
+            {{"dataset":"ds-a","key_prefix":"shared","version_id":"v1","mount_path":"{snap_path}"}},
+            {{"dataset":"ds-b","key_prefix":"shared","version_id":"v1","mount_path":"{snap_path}"}}
+        ]}}"#);
+        let f = write_catalog(&json);
+        match build_catalog_sync(f.path(), 0) {
+            Err(ServeError::CatalogParse(msg)) => {
+                assert!(msg.contains("shared"), "error should mention the duplicate key_prefix: {msg}");
+            }
+            Err(other) => panic!("expected CatalogParse, got: {other}"),
+            Ok(_)      => panic!("expected error, got Ok"),
+        }
+    }
+}
+
 fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, ServeError> {
     let file = CatalogFile::load(path)?;
     let mut datasets = HashMap::new();
