@@ -104,7 +104,9 @@ Responsibilities:
   signal the KV server that a new version is available
 - Poll `GET http://localhost:7777/version` until the KV server reports the
   new version as active (converging check — if the KV server crashes and
-  restarts it will reload from `catalog.json` and the poll naturally resolves)
+  restarts it will reload from `catalog.json` and the poll naturally
+  resolves; if the file does not exist yet the server starts with an empty
+  catalog and the poll resolves once the node-agent writes the first catalog)
 - Detach and unmount the previous version's disk after the KV server confirms
   the swap
 - Periodically report the full `NodeState` (all datasets, phases, versions) to
@@ -193,6 +195,10 @@ the reported `version_id` for the dataset matches the desired version.  If the
 KV server is unreachable the call fails, which is itself a signal that the swap
 is not yet complete.  If the KV server crashes and restarts it reloads from
 `catalog.json` and the poll resolves naturally — no stale state, no cleanup.
+If `catalog.json` does not exist at server startup (pod startup race), the
+server starts with an empty catalog and returns an empty `datasets` array;
+the first `catalog.json` write triggers the initial load via the filesystem
+watcher.
 
 ---
 
@@ -233,6 +239,9 @@ go/
       fake.go                     FakeMounter — in-memory fake for unit tests
     nodeagent/
       agent.go                    Agent struct, reconcile loop, catalog write, state reporting
+    testutil/
+      snapshot.go                 BuildSnapshot helper — shells out to fm load csv
+      server.go                   StartCatalogServer — launches fm serve catalog on free ports
   cmd/
     node-agent/
       main.go                     flags, signal handling, dependency wiring
