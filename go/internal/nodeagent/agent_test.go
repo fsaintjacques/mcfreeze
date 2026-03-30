@@ -214,6 +214,47 @@ func TestWriteCatalog_MultiDataset(t *testing.T) {
 	}
 }
 
+// --- version upgrade + old version cleanup ---
+
+func TestReconcile_VersionUpgrade_CleansUpOldVersion(t *testing.T) {
+	agent, disks, mounter, _, _, _ := newTestAgent(t)
+
+	// Reconcile v1.
+	assign1 := makeAssignment("ds", "ds", "v1", "pv-ds-v1")
+	agent.reconcile(context.Background(), assign1)
+	if s := agent.datasetState("ds"); s.Phase != api.PhaseActive {
+		t.Fatalf("v1: expected PhaseActive, got %s", s.Phase)
+	}
+
+	v1MountPath := agent.datasetState("ds").MountPath
+
+	// Reconcile v2 — should promote v2 and clean up v1.
+	assign2 := makeAssignment("ds", "ds", "v2", "pv-ds-v2")
+	agent.reconcile(context.Background(), assign2)
+	if s := agent.datasetState("ds"); s.Phase != api.PhaseActive || s.VersionID != "v2" {
+		t.Fatalf("v2: expected PhaseActive v2, got %s %s", s.Phase, s.VersionID)
+	}
+
+	// Verify old version was unmounted and detached.
+	var unmounted, detached bool
+	for _, c := range mounter.Calls {
+		if c.Op == "unmount" && c.Target == v1MountPath {
+			unmounted = true
+		}
+	}
+	for _, c := range disks.Calls {
+		if c.Op == "detach" && c.PVName == "pv-ds-v1" {
+			detached = true
+		}
+	}
+	if !unmounted {
+		t.Error("old version was not unmounted")
+	}
+	if !detached {
+		t.Error("old disk was not detached")
+	}
+}
+
 // --- run loop tests ---
 
 func TestRun_SingleAssignment(t *testing.T) {

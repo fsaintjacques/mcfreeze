@@ -86,6 +86,7 @@ type DatasetState struct {
 	KeyPrefix string       `json:"key_prefix,omitempty"`
 	VersionID string       `json:"version_id"`
 	Phase     DatasetPhase `json:"phase"`
+	PVName    string       `json:"pv_name,omitempty"`
 	MountPath string       `json:"mount_path,omitempty"`
 	Error     string       `json:"error,omitempty"`
 	UpdatedAt time.Time    `json:"updated_at"`

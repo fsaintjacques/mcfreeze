@@ -158,47 +158,49 @@ func (a *Agent) doReport(ctx context.Context) {
 func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 	log := a.log.With("dataset", assign.Dataset, "version", assign.Version.ID)
 
-	if cur := a.datasetState(assign.Dataset); cur.VersionID == assign.Version.ID && cur.Phase == api.PhaseActive {
+	prev := a.datasetState(assign.Dataset)
+	if prev.VersionID == assign.Version.ID && prev.Phase == api.PhaseActive {
 		return
 	}
 
 	kp := assign.KeyPrefix
+	pv := assign.Version.PVName
 
-	if assign.Version.PVName == "" {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError,
+	if pv == "" {
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, "", api.PhaseError,
 			fmt.Sprintf("version %s has no PersistentVolume name", assign.Version.ID))
 		return
 	}
 
 	mountPath := a.mountPath(assign.Dataset, assign.Version.ID)
 
-	log.Info("attaching disk", "pv", assign.Version.PVName)
-	a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseAttaching, "")
-	if err := a.disks.AttachDisk(ctx, a.cfg.NodeName, assign.Version.PVName); err != nil {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
+	log.Info("attaching disk", "pv", pv)
+	a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseAttaching, "")
+	if err := a.disks.AttachDisk(ctx, a.cfg.NodeName, pv); err != nil {
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseError, err.Error())
 		log.Error("attach disk failed", "err", err)
 		return
 	}
 
 	log.Info("waiting for block device")
-	device, err := a.disks.WaitForDevice(ctx, assign.Version.PVName)
+	device, err := a.disks.WaitForDevice(ctx, pv)
 	if err != nil {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseError, err.Error())
 		log.Error("wait for device failed", "err", err)
 		return
 	}
 
 	log.Info("mounting", "device", device, "target", mountPath)
-	a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseMounting, "")
+	a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseMounting, "")
 	if err := a.mounter.Mount(ctx, device, mountPath); err != nil {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseError, err.Error())
 		log.Error("mount failed", "err", err)
 		return
 	}
 
 	log.Info("writing catalog.json")
 	if err := a.writeCatalog(assign.Dataset, assign.Version.ID, kp, mountPath); err != nil {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseError, err.Error())
 		log.Error("write catalog failed", "err", err)
 		return
 	}
@@ -208,13 +210,38 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 	vctx, vcancel := context.WithTimeout(ctx, versionTimeout)
 	defer vcancel()
 	if err := a.versions.WaitForVersion(vctx, assign.Dataset, assign.Version.ID); err != nil {
-		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseError, err.Error())
 		log.Error("version confirmation failed", "err", err)
 		return
 	}
 
-	a.setPhaseWithMount(assign.Dataset, kp, assign.Version.ID, api.PhaseActive, mountPath)
+	a.setPhaseWithMount(assign.Dataset, kp, assign.Version.ID, pv, api.PhaseActive, mountPath)
 	log.Info("dataset active")
+
+	// Clean up the previous version's mount and disk attachment.
+	if prev.Phase == api.PhaseActive && prev.VersionID != assign.Version.ID {
+		a.cleanupOldVersion(ctx, assign.Dataset, prev)
+	}
+}
+
+// cleanupOldVersion unmounts and detaches the previous version's disk.
+// Errors are logged but not fatal — the old version is already superseded.
+func (a *Agent) cleanupOldVersion(ctx context.Context, dataset string, prev api.DatasetState) {
+	log := a.log.With("dataset", dataset, "old_version", prev.VersionID)
+
+	if prev.MountPath != "" {
+		log.Info("unmounting old version", "path", prev.MountPath)
+		if err := a.mounter.Unmount(ctx, prev.MountPath); err != nil {
+			log.Error("unmount old version failed", "err", err)
+		}
+	}
+
+	if prev.PVName != "" {
+		log.Info("detaching old disk", "pv", prev.PVName)
+		if err := a.disks.DetachDisk(ctx, a.cfg.NodeName, prev.PVName); err != nil {
+			log.Error("detach old disk failed", "err", err)
+		}
+	}
 }
 
 // nodeState returns a snapshot of the current NodeState.
@@ -238,24 +265,28 @@ func (a *Agent) datasetState(dataset string) api.DatasetState {
 	return a.datasets[dataset]
 }
 
-func (a *Agent) setPhase(dataset, keyPrefix, versionID string, phase api.DatasetPhase, errMsg string) {
+func (a *Agent) setPhase(dataset, keyPrefix, versionID, pvName string, phase api.DatasetPhase, errMsg string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	prev := a.datasets[dataset]
 	if keyPrefix == "" {
 		keyPrefix = prev.KeyPrefix
 	}
+	if pvName == "" {
+		pvName = prev.PVName
+	}
 	a.datasets[dataset] = api.DatasetState{
 		Dataset:   dataset,
 		KeyPrefix: keyPrefix,
 		VersionID: versionID,
 		Phase:     phase,
+		PVName:    pvName,
 		Error:     errMsg,
 		UpdatedAt: time.Now(),
 	}
 }
 
-func (a *Agent) setPhaseWithMount(dataset, keyPrefix, versionID string, phase api.DatasetPhase, mountPath string) {
+func (a *Agent) setPhaseWithMount(dataset, keyPrefix, versionID, pvName string, phase api.DatasetPhase, mountPath string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.datasets[dataset] = api.DatasetState{
@@ -263,6 +294,7 @@ func (a *Agent) setPhaseWithMount(dataset, keyPrefix, versionID string, phase ap
 		KeyPrefix: keyPrefix,
 		VersionID: versionID,
 		Phase:     phase,
+		PVName:    pvName,
 		MountPath: mountPath,
 		UpdatedAt: time.Now(),
 	}
