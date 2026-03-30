@@ -85,7 +85,8 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 		agentDone <- agent.Run(ctx)
 	}()
 
-	// Push an assignment.
+	// Push an assignment. The channel is buffered (cap 8), so this send
+	// completes before the agent goroutine necessarily calls FetchAssignments.
 	assignments.Responses <- &api.AssignmentsResponse{
 		Generation: 1,
 		Assignments: []api.NodeAssignment{{
@@ -99,20 +100,7 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	}
 
 	// Wait for the agent to report state with PhaseActive.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		last, ok := reporter.LastState()
-		if ok {
-			for _, ds := range last.Datasets {
-				if ds.Dataset == "users" && ds.Phase == api.PhaseActive {
-					goto active
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatal("agent did not reach PhaseActive within 10s")
-active:
+	waitForPhase(t, reporter, "users", api.PhaseActive, 10*time.Second)
 
 	// Verify GET /version reports the correct version.
 	versionURL := fmt.Sprintf("http://%s/version", srv.HTTPAddr)
@@ -120,10 +108,14 @@ active:
 	if err != nil {
 		t.Fatalf("GET /version: %v", err)
 	}
-	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /version body: %v", err)
+	}
 	var vr api.KVVersionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&vr); err != nil {
-		t.Fatalf("decode /version: %v", err)
+	if err := json.Unmarshal(body, &vr); err != nil {
+		t.Fatalf("decode /version: %v\n%s", err, body)
 	}
 	if len(vr.Datasets) != 1 || vr.Datasets[0].VersionID != "v1" {
 		t.Fatalf("GET /version unexpected: %+v", vr)
@@ -150,6 +142,22 @@ active:
 	if err := <-agentDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() = %v, want context.Canceled", err)
 	}
+}
+
+func waitForPhase(t *testing.T, reporter *nodeagent.FakeStateReporter, dataset string, want api.DatasetPhase, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if last, ok := reporter.LastState(); ok {
+			for _, ds := range last.Datasets {
+				if ds.Dataset == dataset && ds.Phase == want {
+					return
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("dataset %q did not reach phase %q within %v", dataset, want, timeout)
 }
 
 // mcGet is a minimal memcache meta-get for integration tests.
