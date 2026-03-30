@@ -34,8 +34,11 @@ func main() {
 
 	disks := volume.NewComputeDiskManager(*project, *zone)
 	mounter := mount.NewLinuxMounter()
+	assignments := nodeagent.NewHTTPAssignmentSource(cfg.ControlPlaneURL, cfg.NodeName)
+	reporter := nodeagent.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
+	versions := nodeagent.NewHTTPVersionChecker("http://localhost:7777")
 
-	agent := nodeagent.New(cfg, disks, mounter)
+	agent := nodeagent.New(cfg, disks, mounter, assignments, reporter, versions)
 	if err := agent.Run(ctx); err != nil {
 		slog.Error("agent exited", "err", err)
 		os.Exit(1)

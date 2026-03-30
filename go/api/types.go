@@ -58,6 +58,12 @@ type CatalogEntry struct {
 	MountPath string `json:"mount_path"` // e.g. /mnt/kv/<dataset>/v<N>
 }
 
+// CatalogFile is the top-level catalog document written to catalog.json.
+// The KV server expects this format: {"entries":[...]}.
+type CatalogFile struct {
+	Entries []CatalogEntry `json:"entries"`
+}
+
 // DatasetPhase is the node-local lifecycle phase of one dataset.
 type DatasetPhase string
 

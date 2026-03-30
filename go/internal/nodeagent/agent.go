@@ -44,27 +44,40 @@ type Config struct {
 
 // Agent is the node-agent main loop.
 type Agent struct {
-	cfg     Config
-	disks   volume.VolumeManager
-	mounter mount.Mounter
-	log     *slog.Logger
+	cfg         Config
+	disks       volume.VolumeManager
+	mounter     mount.Mounter
+	assignments AssignmentSource
+	reporter    StateReporter
+	versions    VersionChecker
+	log         *slog.Logger
 
 	mu       sync.Mutex
 	datasets map[string]api.DatasetState // keyed by dataset name
 }
 
-// New creates an Agent.  disks and mounter are injected to allow testing with
+// New creates an Agent.  All dependencies are injected to allow testing with
 // fakes.
-func New(cfg Config, disks volume.VolumeManager, mounter mount.Mounter) *Agent {
+func New(
+	cfg Config,
+	disks volume.VolumeManager,
+	mounter mount.Mounter,
+	assignments AssignmentSource,
+	reporter StateReporter,
+	versions VersionChecker,
+) *Agent {
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = 30 * time.Second
 	}
 	return &Agent{
-		cfg:      cfg,
-		disks:    disks,
-		mounter:  mounter,
-		log:      slog.Default().With("component", "node-agent", "node", cfg.NodeName),
-		datasets: make(map[string]api.DatasetState),
+		cfg:         cfg,
+		disks:       disks,
+		mounter:     mounter,
+		assignments: assignments,
+		reporter:    reporter,
+		versions:    versions,
+		log:         slog.Default().With("component", "node-agent", "node", cfg.NodeName),
+		datasets:    make(map[string]api.DatasetState),
 	}
 }
 
@@ -76,28 +89,60 @@ func (a *Agent) Run(ctx context.Context) error {
 	reportTicker := time.NewTicker(a.cfg.ReportInterval)
 	defer reportTicker.Stop()
 
+	// Report initial state immediately.
+	a.doReport(ctx)
+
 	var generation int64
+	var backoff time.Duration
+	const (
+		backoffMin = 1 * time.Second
+		backoffMax = 30 * time.Second
+	)
+
 	for {
-		resp, err := a.fetchAssignments(ctx, generation)
+		resp, err := a.assignments.FetchAssignments(ctx, generation)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			a.log.Error("fetch assignments failed", "err", err)
-		} else {
-			for _, assign := range resp.Assignments {
-				a.reconcile(ctx, assign)
-			}
-			generation = resp.Generation
-		}
 
+			// Exponential backoff on failure.
+			if backoff == 0 {
+				backoff = backoffMin
+			} else {
+				backoff = min(backoff*2, backoffMax)
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			continue
+		}
+		backoff = 0 // reset on success
+
+		for _, assign := range resp.Assignments {
+			a.reconcile(ctx, assign)
+		}
+		generation = resp.Generation
+
+		// Report after every assignment change.
+		a.doReport(ctx)
+
+		// Also report on the periodic ticker while waiting for the next
+		// long-poll response.
 		select {
 		case <-reportTicker.C:
+			a.doReport(ctx)
 		default:
 		}
-		if err := a.reportState(ctx); err != nil {
-			a.log.Error("report state failed", "err", err)
-		}
+	}
+}
+
+func (a *Agent) doReport(ctx context.Context) {
+	if err := a.reporter.ReportState(ctx, a.nodeState()); err != nil {
+		a.log.Error("report state failed", "err", err)
 	}
 }
 
@@ -148,18 +193,15 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 		return
 	}
 
+	log.Info("waiting for KV server version confirmation")
+	if err := a.versions.WaitForVersion(ctx, assign.Dataset, assign.Version.ID); err != nil {
+		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+		log.Error("version confirmation failed", "err", err)
+		return
+	}
+
 	a.setPhaseWithMount(assign.Dataset, assign.Version.ID, api.PhaseActive, mountPath)
-
-	// TODO: poll GET http://localhost:7777/version until KV server confirms
-	// the new version, then unmount the previous version's disk and delete its
-	// VolumeAttachment.
-}
-
-// reportState pushes the full NodeState to the control-plane.
-func (a *Agent) reportState(ctx context.Context) error {
-	// TODO: implement HTTP POST against the control-plane.
-	_ = a.nodeState()
-	return fmt.Errorf("reportState: not implemented")
+	log.Info("dataset active")
 }
 
 // nodeState returns a snapshot of the current NodeState.
@@ -213,14 +255,35 @@ func (a *Agent) mountPath(dataset, versionID string) string {
 
 // writeCatalog atomically writes catalog.json to the shared EmptyDir using a
 // temp file + rename(2) so the KV server never sees a partial file.
+//
+// The catalog includes entries for ALL datasets that are active or being
+// promoted (the current call's dataset plus any already-active datasets).
 func (a *Agent) writeCatalog(dataset, versionID, keyPrefix, mountPath string) error {
-	entry := api.CatalogEntry{
+	a.mu.Lock()
+	entries := make([]api.CatalogEntry, 0, len(a.datasets)+1)
+	// Include all currently-active datasets.
+	for _, ds := range a.datasets {
+		if ds.Phase == api.PhaseActive && ds.Dataset != dataset {
+			entries = append(entries, api.CatalogEntry{
+				Dataset:   ds.Dataset,
+				KeyPrefix: ds.Dataset, // TODO: store key_prefix in DatasetState
+				VersionID: ds.VersionID,
+				MountPath: ds.MountPath,
+			})
+		}
+	}
+	a.mu.Unlock()
+
+	// Add the dataset being promoted.
+	entries = append(entries, api.CatalogEntry{
 		Dataset:   dataset,
 		KeyPrefix: keyPrefix,
 		VersionID: versionID,
 		MountPath: mountPath,
-	}
-	data, err := json.Marshal(entry)
+	})
+
+	catalog := api.CatalogFile{Entries: entries}
+	data, err := json.Marshal(catalog)
 	if err != nil {
 		return err
 	}
@@ -235,10 +298,3 @@ func (a *Agent) writeCatalog(dataset, versionID, keyPrefix, mountPath string) er
 	return nil
 }
 
-// fetchAssignments calls GET /api/v1/node/{node}/assignments?generation=N.
-// It blocks at the server until the generation changes (long-poll).
-func (a *Agent) fetchAssignments(ctx context.Context, generation int64) (*api.AssignmentsResponse, error) {
-	// TODO: implement HTTP long-poll against the control-plane.
-	_ = generation
-	return nil, fmt.Errorf("fetchAssignments: not implemented")
-}
