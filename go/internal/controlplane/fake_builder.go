@@ -25,7 +25,7 @@ type FakeVersionBuilder struct {
 	OutputBase string
 }
 
-func (b *FakeVersionBuilder) Build(_ context.Context, spec api.DatasetSpec, versionID string) (string, error) {
+func (b *FakeVersionBuilder) Build(ctx context.Context, spec api.DatasetSpec, versionID string) (string, error) {
 	pairs, ok := b.Data[spec.Name]
 	if !ok {
 		return "", fmt.Errorf("fake builder: no test data for dataset %q", spec.Name)
@@ -50,7 +50,7 @@ func (b *FakeVersionBuilder) Build(_ context.Context, spec api.DatasetSpec, vers
 		)
 	}
 
-	cmd := exec.Command(fm, "load",
+	cmd := exec.CommandContext(ctx, fm, "load",
 		"-o", outDir,
 		"--partitions", fmt.Sprintf("%d", partitions),
 		"csv",

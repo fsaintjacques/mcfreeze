@@ -57,8 +57,8 @@ func (s *Store) SetAssignments(nodeName string, assignments []api.NodeAssignment
 // immediately. Otherwise it returns a channel that will be closed when the
 // assignments change — the caller should select on it.
 func (s *Store) GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{}) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	gen := s.generation[nodeName]
 	resp := api.AssignmentsResponse{
@@ -70,20 +70,11 @@ func (s *Store) GetAssignments(nodeName string, afterGeneration int64) (api.Assi
 		return resp, nil // caller should return immediately
 	}
 
-	// Ensure a notify channel exists.
+	// Ensure a notify channel exists for long-poll blocking.
 	ch, ok := s.notify[nodeName]
 	if !ok {
 		ch = make(chan struct{})
-		// Upgrade to write lock to create the channel.
-		s.mu.RUnlock()
-		s.mu.Lock()
-		if _, exists := s.notify[nodeName]; !exists {
-			s.notify[nodeName] = ch
-		} else {
-			ch = s.notify[nodeName]
-		}
-		s.mu.Unlock()
-		s.mu.RLock()
+		s.notify[nodeName] = ch
 	}
 
 	return resp, ch
