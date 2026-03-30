@@ -170,6 +170,9 @@ func mcGet(t *testing.T, addr, key string) string {
 
 	// Parse value length from "VA <len> [flags...]"
 	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		t.Fatalf("mg %s: malformed VA line: %q", key, line)
+	}
 	vlen, err := strconv.Atoi(fields[1])
 	if err != nil {
 		t.Fatalf("mg %s: bad VA length %q: %v", key, fields[1], err)
