@@ -242,17 +242,17 @@ fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, Ser
     let file = CatalogFile::load(path)?;
     let mut datasets = HashMap::new();
     for entry in file.entries {
-        if datasets.contains_key(&entry.dataset) {
+        if datasets.contains_key(&entry.key_prefix) {
             return Err(ServeError::CatalogParse(
-                format!("duplicate dataset name {:?} in catalog", entry.dataset)
+                format!("duplicate key_prefix {:?} in catalog", entry.key_prefix)
             ));
         }
         let handle = DatasetHandle::open(
-            entry.dataset.clone(),
-            entry.version,
-            &entry.snapshot_dir,
+            entry.dataset,
+            entry.version_id,
+            &entry.mount_path,
         )?;
-        datasets.insert(entry.dataset, handle);
+        datasets.insert(entry.key_prefix, handle);
     }
     Ok(ActiveCatalog::new(datasets, generation))
 }

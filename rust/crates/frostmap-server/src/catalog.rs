@@ -17,11 +17,14 @@ use crate::ServeError;
 #[derive(Debug, Deserialize)]
 pub struct CatalogEntry {
     /// Dataset name, e.g. `"my-ds"`.
-    pub dataset:      String,
+    pub dataset:    String,
+    /// Routing prefix the KV server uses to match incoming requests, e.g. `"my-ds"`.
+    /// Requests whose key starts with `"<key_prefix>:"` are routed to this dataset.
+    pub key_prefix: String,
     /// Opaque version string, e.g. `"v42"`.
-    pub version:      String,
-    /// Absolute path to the snapshot directory, e.g. `/mnt/kv/my-ds/v42`.
-    pub snapshot_dir: PathBuf,
+    pub version_id: String,
+    /// Absolute path to the mounted snapshot directory, e.g. `/mnt/kv/my-ds/v42`.
+    pub mount_path: PathBuf,
 }
 
 /// Top-level catalog document.
@@ -59,13 +62,13 @@ mod tests {
     #[test]
     fn parse_valid_catalog() {
         let f = write_catalog(r#"{"entries":[
-            {"dataset":"ds1","version":"v1","snapshot_dir":"/mnt/kv/ds1/v1"},
-            {"dataset":"ds2","version":"v2","snapshot_dir":"/mnt/kv/ds2/v2"}
+            {"dataset":"ds1","key_prefix":"ds1","version_id":"v1","mount_path":"/mnt/kv/ds1/v1"},
+            {"dataset":"ds2","key_prefix":"ds2","version_id":"v2","mount_path":"/mnt/kv/ds2/v2"}
         ]}"#);
         let cat = CatalogFile::load(f.path()).unwrap();
         assert_eq!(cat.entries.len(), 2);
         assert_eq!(cat.entries[0].dataset, "ds1");
-        assert_eq!(cat.entries[1].version, "v2");
+        assert_eq!(cat.entries[1].version_id, "v2");
     }
 
     #[test]
