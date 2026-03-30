@@ -118,6 +118,13 @@ func StartEmptyCatalogServer(t *testing.T) *Server {
 	}
 }
 
+// CatalogDir returns the directory containing catalog.json. Use this to
+// configure the node-agent's CatalogDir so it writes to the same location
+// the server watches.
+func (s *Server) CatalogDir() string {
+	return filepath.Dir(s.catalogPath)
+}
+
 // WriteCatalog atomically replaces the catalog.json with new entries.
 // This triggers a hot-swap in the server.
 func (s *Server) WriteCatalog(t *testing.T, entries []api.CatalogEntry) {
