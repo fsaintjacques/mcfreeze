@@ -99,8 +99,8 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 		}},
 	}
 
-	// Wait for the agent to report state with PhaseActive.
-	waitForPhase(t, reporter, "users", api.PhaseActive, 10*time.Second)
+	// Wait for the agent to report state with PhaseActive for v1.
+	waitForPhase(t, reporter, "users", "v1", api.PhaseActive, 10*time.Second)
 
 	// Verify GET /version reports the correct version.
 	versionURL := fmt.Sprintf("http://%s/version", srv.HTTPAddr)
@@ -137,6 +137,54 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 		t.Errorf("reported node = %q, want %q", last.Node, "integration-node")
 	}
 
+	// --- Upgrade to v2 with different data ---
+	v2Pairs := []testutil.KV{
+		{Key: []byte("user-1"), Value: []byte("Alice-v2")},
+		{Key: []byte("user-2"), Value: []byte("Bob-v2")},
+		{Key: []byte("user-3"), Value: []byte("Charlie")},
+	}
+	v2SnapDir := testutil.BuildSnapshot(t, v2Pairs, 4)
+	v2PVName := "pv-users-v2"
+	if err := os.Symlink(v2SnapDir, filepath.Join(volumeBase, v2PVName)); err != nil {
+		t.Fatalf("symlink v2 snapshot: %v", err)
+	}
+
+	assignments.Responses <- &api.AssignmentsResponse{
+		Generation: 2,
+		Assignments: []api.NodeAssignment{{
+			Dataset:   "users",
+			KeyPrefix: "users",
+			Version: api.VersionRecord{
+				ID:     "v2",
+				PVName: v2PVName,
+			},
+		}},
+	}
+
+	// Wait for v2 to become active.
+	waitForPhase(t, reporter, "users", "v2", api.PhaseActive, 10*time.Second)
+
+	// Verify new data is served.
+	got = mcGet(t, srv.TCPAddr, "users:user-1")
+	if got != "Alice-v2" {
+		t.Fatalf("v2: mg users:user-1 = %q, want %q", got, "Alice-v2")
+	}
+	got = mcGet(t, srv.TCPAddr, "users:user-3")
+	if got != "Charlie" {
+		t.Fatalf("v2: mg users:user-3 = %q, want %q", got, "Charlie")
+	}
+
+	// Verify the agent reported v2 active.
+	last, _ = reporter.LastState()
+	for _, ds := range last.Datasets {
+		if ds.Dataset == "users" {
+			if ds.VersionID != "v2" {
+				t.Errorf("reported version = %q, want v2", ds.VersionID)
+			}
+			break
+		}
+	}
+
 	// Stop the agent.
 	cancel()
 	if err := <-agentDone; !errors.Is(err, context.Canceled) {
@@ -144,20 +192,43 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	}
 }
 
-func waitForPhase(t *testing.T, reporter *nodeagent.FakeStateReporter, dataset string, want api.DatasetPhase, timeout time.Duration) {
+func waitForVersion(t *testing.T, srv *testutil.Server, dataset, wantVersion string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	url := fmt.Sprintf("http://%s/version", srv.HTTPAddr)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			var vr api.KVVersionResponse
+			if json.Unmarshal(body, &vr) == nil {
+				for _, ds := range vr.Datasets {
+					if ds.Dataset == dataset && ds.VersionID == wantVersion {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("dataset %q did not reach version %q within %v", dataset, wantVersion, timeout)
+}
+
+func waitForPhase(t *testing.T, reporter *nodeagent.FakeStateReporter, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if last, ok := reporter.LastState(); ok {
 			for _, ds := range last.Datasets {
-				if ds.Dataset == dataset && ds.Phase == want {
+				if ds.Dataset == dataset && ds.VersionID == versionID && ds.Phase == want {
 					return
 				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("dataset %q did not reach phase %q within %v", dataset, want, timeout)
+	t.Fatalf("dataset %q version %q did not reach phase %q within %v", dataset, versionID, want, timeout)
 }
 
 // mcGet is a minimal memcache meta-get for integration tests.
