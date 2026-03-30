@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -106,13 +107,21 @@ func NewHTTPVersionChecker(baseURL string) *HTTPVersionChecker {
 
 func (c *HTTPVersionChecker) WaitForVersion(ctx context.Context, dataset, versionID string) error {
 	url := fmt.Sprintf("%s/version", c.baseURL)
+	var failures int
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
 		}
 		resp, err := c.client.Do(req)
-		if err == nil {
+		if err != nil {
+			failures++
+			if failures%10 == 1 { // log first failure, then every 10th
+				slog.Warn("version check: KV server unreachable",
+					"dataset", dataset, "version", versionID,
+					"err", err, "consecutive_failures", failures)
+			}
+		} else {
 			var vr api.KVVersionResponse
 			if decErr := json.NewDecoder(resp.Body).Decode(&vr); decErr == nil {
 				for _, ds := range vr.Datasets {
@@ -123,6 +132,7 @@ func (c *HTTPVersionChecker) WaitForVersion(ctx context.Context, dataset, versio
 				}
 			}
 			resp.Body.Close()
+			failures = 0
 		}
 
 		select {

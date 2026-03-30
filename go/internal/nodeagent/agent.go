@@ -86,11 +86,9 @@ func New(
 func (a *Agent) Run(ctx context.Context) error {
 	a.log.Info("starting")
 
-	reportTicker := time.NewTicker(a.cfg.ReportInterval)
-	defer reportTicker.Stop()
-
-	// Report initial state immediately.
-	a.doReport(ctx)
+	// Periodic reporter runs in a separate goroutine so it fires even
+	// while FetchAssignments blocks on the long-poll.
+	go a.reportLoop(ctx)
 
 	var generation int64
 	var backoff time.Duration
@@ -127,15 +125,25 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		generation = resp.Generation
 
-		// Report after every assignment change.
+		// Report immediately after processing assignments.
 		a.doReport(ctx)
+	}
+}
 
-		// Also report on the periodic ticker while waiting for the next
-		// long-poll response.
+// reportLoop periodically reports the full NodeState to the control-plane.
+// Runs until ctx is cancelled.
+func (a *Agent) reportLoop(ctx context.Context) {
+	// Report initial state immediately.
+	a.doReport(ctx)
+
+	ticker := time.NewTicker(a.cfg.ReportInterval)
+	defer ticker.Stop()
+	for {
 		select {
-		case <-reportTicker.C:
+		case <-ticker.C:
 			a.doReport(ctx)
-		default:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -154,8 +162,10 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 		return
 	}
 
+	kp := assign.KeyPrefix
+
 	if assign.Version.PVName == "" {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError,
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError,
 			fmt.Sprintf("version %s has no PersistentVolume name", assign.Version.ID))
 		return
 	}
@@ -163,9 +173,9 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 	mountPath := a.mountPath(assign.Dataset, assign.Version.ID)
 
 	log.Info("attaching disk", "pv", assign.Version.PVName)
-	a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseAttaching, "")
+	a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseAttaching, "")
 	if err := a.disks.AttachDisk(ctx, a.cfg.NodeName, assign.Version.PVName); err != nil {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
 		log.Error("attach disk failed", "err", err)
 		return
 	}
@@ -173,34 +183,37 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 	log.Info("waiting for block device")
 	device, err := a.disks.WaitForDevice(ctx, assign.Version.PVName)
 	if err != nil {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
 		log.Error("wait for device failed", "err", err)
 		return
 	}
 
 	log.Info("mounting", "device", device, "target", mountPath)
-	a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseMounting, "")
+	a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseMounting, "")
 	if err := a.mounter.Mount(ctx, device, mountPath); err != nil {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
 		log.Error("mount failed", "err", err)
 		return
 	}
 
 	log.Info("writing catalog.json")
-	if err := a.writeCatalog(assign.Dataset, assign.Version.ID, assign.KeyPrefix, mountPath); err != nil {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+	if err := a.writeCatalog(assign.Dataset, assign.Version.ID, kp, mountPath); err != nil {
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
 		log.Error("write catalog failed", "err", err)
 		return
 	}
 
 	log.Info("waiting for KV server version confirmation")
-	if err := a.versions.WaitForVersion(ctx, assign.Dataset, assign.Version.ID); err != nil {
-		a.setPhase(assign.Dataset, assign.Version.ID, api.PhaseError, err.Error())
+	versionTimeout := 2 * time.Minute
+	vctx, vcancel := context.WithTimeout(ctx, versionTimeout)
+	defer vcancel()
+	if err := a.versions.WaitForVersion(vctx, assign.Dataset, assign.Version.ID); err != nil {
+		a.setPhase(assign.Dataset, kp, assign.Version.ID, api.PhaseError, err.Error())
 		log.Error("version confirmation failed", "err", err)
 		return
 	}
 
-	a.setPhaseWithMount(assign.Dataset, assign.Version.ID, api.PhaseActive, mountPath)
+	a.setPhaseWithMount(assign.Dataset, kp, assign.Version.ID, api.PhaseActive, mountPath)
 	log.Info("dataset active")
 }
 
@@ -225,11 +238,16 @@ func (a *Agent) datasetState(dataset string) api.DatasetState {
 	return a.datasets[dataset]
 }
 
-func (a *Agent) setPhase(dataset, versionID string, phase api.DatasetPhase, errMsg string) {
+func (a *Agent) setPhase(dataset, keyPrefix, versionID string, phase api.DatasetPhase, errMsg string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	prev := a.datasets[dataset]
+	if keyPrefix == "" {
+		keyPrefix = prev.KeyPrefix
+	}
 	a.datasets[dataset] = api.DatasetState{
 		Dataset:   dataset,
+		KeyPrefix: keyPrefix,
 		VersionID: versionID,
 		Phase:     phase,
 		Error:     errMsg,
@@ -237,11 +255,12 @@ func (a *Agent) setPhase(dataset, versionID string, phase api.DatasetPhase, errM
 	}
 }
 
-func (a *Agent) setPhaseWithMount(dataset, versionID string, phase api.DatasetPhase, mountPath string) {
+func (a *Agent) setPhaseWithMount(dataset, keyPrefix, versionID string, phase api.DatasetPhase, mountPath string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.datasets[dataset] = api.DatasetState{
 		Dataset:   dataset,
+		KeyPrefix: keyPrefix,
 		VersionID: versionID,
 		Phase:     phase,
 		MountPath: mountPath,
@@ -266,7 +285,7 @@ func (a *Agent) writeCatalog(dataset, versionID, keyPrefix, mountPath string) er
 		if ds.Phase == api.PhaseActive && ds.Dataset != dataset {
 			entries = append(entries, api.CatalogEntry{
 				Dataset:   ds.Dataset,
-				KeyPrefix: ds.Dataset, // TODO: store key_prefix in DatasetState
+				KeyPrefix: ds.KeyPrefix,
 				VersionID: ds.VersionID,
 				MountPath: ds.MountPath,
 			})

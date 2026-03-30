@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -170,10 +171,11 @@ func TestWriteCatalog_SingleDataset(t *testing.T) {
 func TestWriteCatalog_MultiDataset(t *testing.T) {
 	agent, _, _, _, _, _ := newTestAgent(t)
 
-	// Simulate ds1 already active.
+	// Simulate ds1 already active with a key_prefix that differs from dataset name.
 	agent.mu.Lock()
 	agent.datasets["ds1"] = api.DatasetState{
 		Dataset:   "ds1",
+		KeyPrefix: "prefix1",
 		VersionID: "v1",
 		Phase:     api.PhaseActive,
 		MountPath: "/mnt/kv/ds1/v1",
@@ -181,7 +183,7 @@ func TestWriteCatalog_MultiDataset(t *testing.T) {
 	agent.mu.Unlock()
 
 	// Write catalog for ds2 being promoted.
-	if err := agent.writeCatalog("ds2", "v2", "ds2", "/mnt/kv/ds2/v2"); err != nil {
+	if err := agent.writeCatalog("ds2", "v2", "prefix2", "/mnt/kv/ds2/v2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,11 +196,21 @@ func TestWriteCatalog_MultiDataset(t *testing.T) {
 	for _, e := range cat.Entries {
 		byDataset[e.Dataset] = e
 	}
-	if _, ok := byDataset["ds1"]; !ok {
-		t.Fatal("ds1 missing from catalog")
+
+	ds1 := byDataset["ds1"]
+	if ds1.KeyPrefix != "prefix1" {
+		t.Errorf("ds1 KeyPrefix = %q, want %q", ds1.KeyPrefix, "prefix1")
 	}
-	if _, ok := byDataset["ds2"]; !ok {
-		t.Fatal("ds2 missing from catalog")
+	if ds1.VersionID != "v1" || ds1.MountPath != "/mnt/kv/ds1/v1" {
+		t.Errorf("ds1 fields: %+v", ds1)
+	}
+
+	ds2 := byDataset["ds2"]
+	if ds2.KeyPrefix != "prefix2" {
+		t.Errorf("ds2 KeyPrefix = %q, want %q", ds2.KeyPrefix, "prefix2")
+	}
+	if ds2.VersionID != "v2" || ds2.MountPath != "/mnt/kv/ds2/v2" {
+		t.Errorf("ds2 fields: %+v", ds2)
 	}
 }
 
@@ -224,7 +236,10 @@ func TestRun_SingleAssignment(t *testing.T) {
 		cancel()
 	}()
 
-	_ = agent.Run(ctx) // returns context.Canceled
+	err := agent.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
 
 	state := agent.datasetState("ds")
 	if state.Phase != api.PhaseActive {

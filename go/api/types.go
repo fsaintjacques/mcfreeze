@@ -83,6 +83,7 @@ const (
 // DatasetState is the node-local state of one dataset at a point in time.
 type DatasetState struct {
 	Dataset   string       `json:"dataset"`
+	KeyPrefix string       `json:"key_prefix,omitempty"`
 	VersionID string       `json:"version_id"`
 	Phase     DatasetPhase `json:"phase"`
 	MountPath string       `json:"mount_path,omitempty"`
