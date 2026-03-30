@@ -111,6 +111,149 @@ func TestVersion_InvalidTransitions(t *testing.T) {
 	}
 }
 
+// --- rollout and retirement tests ---
+
+func TestRolloutStatus_AllConverged(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+	s.RegisterNode("node-2")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+	s.Promote("ds", "v1")
+
+	// Both nodes report PhaseActive for v1.
+	s.ReportState("node-1", api.NodeState{Node: "node-1", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v1", Phase: api.PhaseActive},
+	}})
+	s.ReportState("node-2", api.NodeState{Node: "node-2", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v1", Phase: api.PhaseActive},
+	}})
+
+	status := s.RolloutStatus("ds")
+	if len(status.ConvergedNodes) != 2 {
+		t.Errorf("converged = %d, want 2", len(status.ConvergedNodes))
+	}
+	if len(status.PendingNodes) != 0 {
+		t.Errorf("pending = %v, want empty", status.PendingNodes)
+	}
+}
+
+func TestRolloutStatus_PartialConvergence(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+	s.RegisterNode("node-2")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+	s.Promote("ds", "v1")
+
+	// Only node-1 has reported.
+	s.ReportState("node-1", api.NodeState{Node: "node-1", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v1", Phase: api.PhaseActive},
+	}})
+
+	status := s.RolloutStatus("ds")
+	if len(status.ConvergedNodes) != 1 {
+		t.Errorf("converged = %d, want 1", len(status.ConvergedNodes))
+	}
+	if len(status.PendingNodes) != 1 {
+		t.Errorf("pending = %d, want 1", len(status.PendingNodes))
+	}
+}
+
+func TestRolloutStatus_ErrorNode(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+	s.Promote("ds", "v1")
+
+	s.ReportState("node-1", api.NodeState{Node: "node-1", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v1", Phase: api.PhaseError, Error: "mount failed"},
+	}})
+
+	status := s.RolloutStatus("ds")
+	if len(status.ErrorNodes) != 1 {
+		t.Errorf("error nodes = %d, want 1", len(status.ErrorNodes))
+	}
+}
+
+func TestCheckRetirement_EligibleAfterConvergence(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap/v1", "pv-v1")
+	s.Promote("ds", "v1")
+
+	// Node converges on v1.
+	s.ReportState("node-1", api.NodeState{Node: "node-1", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v1", Phase: api.PhaseActive},
+	}})
+
+	// Promote v2 — v1 moves to retired.
+	s.CreateVersion("ds", "v2")
+	s.MarkReady("ds", "v2", "/snap/v2", "pv-v2")
+	s.Promote("ds", "v2")
+
+	// v1 is retired but node still reports v1 — not yet eligible.
+	eligible := s.CheckRetirement("ds")
+	if len(eligible) != 0 {
+		t.Fatalf("expected 0 eligible (node still on v1), got %d", len(eligible))
+	}
+
+	// Node converges on v2 — v1 is now eligible.
+	s.ReportState("node-1", api.NodeState{Node: "node-1", Datasets: []api.DatasetState{
+		{Dataset: "ds", VersionID: "v2", Phase: api.PhaseActive},
+	}})
+
+	eligible = s.CheckRetirement("ds")
+	if len(eligible) != 1 || eligible[0].ID != "v1" {
+		t.Fatalf("expected v1 eligible, got %+v", eligible)
+	}
+}
+
+func TestDeleteVersion_Retired(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+	s.Promote("ds", "v1")
+
+	s.CreateVersion("ds", "v2")
+	s.MarkReady("ds", "v2", "/snap", "pv")
+	s.Promote("ds", "v2") // v1 → retired
+
+	if err := s.DeleteVersion("ds", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	versions := s.GetVersions("ds")
+	if len(versions) != 1 || versions[0].ID != "v2" {
+		t.Fatalf("expected only v2, got %+v", versions)
+	}
+}
+
+func TestDeleteVersion_RejectsNonRetired(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+	s.Promote("ds", "v1")
+
+	if err := s.DeleteVersion("ds", "v1"); err == nil {
+		t.Fatal("expected error deleting active version")
+	}
+}
+
 func TestVersion_PromoteMultiNode(t *testing.T) {
 	s := NewStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})

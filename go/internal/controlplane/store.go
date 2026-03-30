@@ -282,6 +282,114 @@ func (s *Store) GetActiveVersion(dataset string) (VersionEntry, bool) {
 	return VersionEntry{}, false
 }
 
+// ---------------------------------------------------------------------------
+// Rollout and retirement
+// ---------------------------------------------------------------------------
+
+// RolloutStatus summarises per-node convergence for a dataset.
+type RolloutStatus struct {
+	Dataset        string
+	ActiveVersion  string
+	NodeCounts     map[string]int // version_id → count of nodes reporting it active
+	ConvergedNodes []string       // nodes reporting the active version
+	PendingNodes   []string       // nodes not yet on the active version
+	ErrorNodes     []string       // nodes in error state for this dataset
+}
+
+// RolloutStatus returns the convergence status for a dataset by diffing the
+// active assignment against reported NodeStates.
+func (s *Store) RolloutStatus(dataset string) RolloutStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status := RolloutStatus{
+		Dataset:    dataset,
+		NodeCounts: make(map[string]int),
+	}
+
+	// Find the active version.
+	for _, v := range s.versions[dataset] {
+		if v.State == api.StateActive {
+			status.ActiveVersion = v.ID
+			break
+		}
+	}
+
+	for nodeName := range s.nodes {
+		ns, ok := s.nodeStates[nodeName]
+		if !ok {
+			status.PendingNodes = append(status.PendingNodes, nodeName)
+			continue
+		}
+
+		found := false
+		for _, ds := range ns.Datasets {
+			if ds.Dataset != dataset {
+				continue
+			}
+			found = true
+			if ds.Phase == api.PhaseError {
+				status.ErrorNodes = append(status.ErrorNodes, nodeName)
+			} else if ds.Phase == api.PhaseActive && ds.VersionID == status.ActiveVersion {
+				status.ConvergedNodes = append(status.ConvergedNodes, nodeName)
+			} else {
+				status.PendingNodes = append(status.PendingNodes, nodeName)
+			}
+			status.NodeCounts[ds.VersionID]++
+			break
+		}
+		if !found {
+			status.PendingNodes = append(status.PendingNodes, nodeName)
+		}
+	}
+
+	return status
+}
+
+// CheckRetirement returns retired versions eligible for cleanup: all
+// registered nodes have converged on a newer version.
+func (s *Store) CheckRetirement(dataset string) []VersionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// A retired version is eligible if no node still reports it.
+	reportedVersions := make(map[string]bool)
+	for _, ns := range s.nodeStates {
+		for _, ds := range ns.Datasets {
+			if ds.Dataset == dataset {
+				reportedVersions[ds.VersionID] = true
+			}
+		}
+	}
+
+	var eligible []VersionEntry
+	for _, v := range s.versions[dataset] {
+		if v.State == api.StateRetired && !reportedVersions[v.ID] {
+			eligible = append(eligible, v)
+		}
+	}
+	return eligible
+}
+
+// DeleteVersion removes a retired version from the store. Returns an error
+// if the version is not in retired state.
+func (s *Store) DeleteVersion(dataset, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	versions := s.versions[dataset]
+	for i, v := range versions {
+		if v.ID == versionID {
+			if v.State != api.StateRetired {
+				return fmt.Errorf("version %q is %q, expected retired", versionID, v.State)
+			}
+			s.versions[dataset] = append(versions[:i], versions[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("version %q not found for dataset %q", versionID, dataset)
+}
+
 // findVersion returns a pointer to the version entry (caller must hold mu).
 func (s *Store) findVersion(dataset, versionID string) (*VersionEntry, error) {
 	for i := range s.versions[dataset] {

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -113,6 +115,131 @@ func TestFullLoop(t *testing.T) {
 	// --- shutdown ---
 	cancel()
 	<-agentDone
+}
+
+// TestMultiNodeConvergenceAndRetirement runs two node-agents against the same
+// control-plane, verifies both converge, then upgrades and checks that the
+// old version becomes eligible for retirement.
+func TestMultiNodeConvergenceAndRetirement(t *testing.T) {
+	buildBase := t.TempDir()
+
+	builder := &controlplane.FakeVersionBuilder{
+		FMBinary:   testutil.FMBinary(t),
+		Partitions: 4,
+		OutputBase: buildBase,
+		Data: map[string][][2][]byte{
+			"ds": {
+				{[]byte("k"), []byte("val-v1")},
+			},
+		},
+	}
+
+	// Shared volume base — each node gets its own subdirectory.
+	vol1 := t.TempDir()
+	vol2 := t.TempDir()
+
+	orch, err := controlplane.NewOrchestrator(builder, vol1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Override VolumeBase for node-2 symlinking later.
+	t.Cleanup(func() { orch.Close() })
+
+	orch.RegisterNode("node-1")
+	orch.RegisterNode("node-2")
+
+	// Each node gets its own KV server.
+	kv1 := testutil.StartEmptyCatalogServer(t)
+	kv2 := testutil.StartEmptyCatalogServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startAgent := func(name, volBase, mountBase, catalogDir, kvHTTP string) chan error {
+		agent := nodeagent.New(
+			nodeagent.Config{
+				NodeName:       name,
+				MountBase:      mountBase,
+				CatalogDir:     catalogDir,
+				ReportInterval: time.Hour,
+			},
+			volume.NewFSVolumeManager(volBase),
+			mount.NewFSMounter(),
+			nodeagent.NewHTTPAssignmentSource(orch.Addr(), name),
+			nodeagent.NewHTTPStateReporter(orch.Addr(), name),
+			nodeagent.NewHTTPVersionChecker(fmt.Sprintf("http://%s", kvHTTP)),
+		)
+		done := make(chan error, 1)
+		go func() { done <- agent.Run(ctx) }()
+		return done
+	}
+
+	mount1 := t.TempDir()
+	mount2 := t.TempDir()
+	done1 := startAgent("node-1", vol1, mount1, kv1.CatalogDir(), kv1.HTTPAddr)
+	done2 := startAgent("node-2", vol2, mount2, kv2.CatalogDir(), kv2.HTTPAddr)
+
+	// --- v1: build and promote ---
+	spec := api.DatasetSpec{Name: "ds", KeyPrefix: "ds"}
+	if err := orch.BuildAndPromote(ctx, spec, "v1"); err != nil {
+		t.Fatalf("BuildAndPromote v1: %v", err)
+	}
+
+	// Symlink the snapshot into vol2 as well (Promote pushed to both nodes,
+	// but only vol1 got the symlink from BuildAndPromote).
+	symlinkPV(t, buildBase+"/ds/v1", vol2, "pv-ds-v1")
+
+	// Wait for both nodes to converge.
+	if err := orch.WaitForConvergence(ctx, "ds", "v1"); err != nil {
+		t.Fatalf("WaitForConvergence v1: %v", err)
+	}
+
+	status := orch.Store.RolloutStatus("ds")
+	if len(status.ConvergedNodes) != 2 {
+		t.Fatalf("converged = %d, want 2: pending=%v error=%v", len(status.ConvergedNodes), status.PendingNodes, status.ErrorNodes)
+	}
+
+	// Verify both KV servers serve the data.
+	assertMcGet(t, kv1.TCPAddr, "ds:k", "val-v1")
+	assertMcGet(t, kv2.TCPAddr, "ds:k", "val-v1")
+
+	// --- v2: upgrade ---
+	builder.Data["ds"] = [][2][]byte{
+		{[]byte("k"), []byte("val-v2")},
+	}
+	if err := orch.BuildAndPromote(ctx, spec, "v2"); err != nil {
+		t.Fatalf("BuildAndPromote v2: %v", err)
+	}
+	symlinkPV(t, buildBase+"/ds/v2", vol2, "pv-ds-v2")
+
+	if err := orch.WaitForConvergence(ctx, "ds", "v2"); err != nil {
+		t.Fatalf("WaitForConvergence v2: %v", err)
+	}
+
+	assertMcGet(t, kv1.TCPAddr, "ds:k", "val-v2")
+	assertMcGet(t, kv2.TCPAddr, "ds:k", "val-v2")
+
+	// v1 should be eligible for retirement (both nodes on v2).
+	eligible := orch.Store.CheckRetirement("ds")
+	if len(eligible) != 1 || eligible[0].ID != "v1" {
+		t.Fatalf("expected v1 eligible for retirement, got %+v", eligible)
+	}
+
+	if err := orch.Store.DeleteVersion("ds", "v1"); err != nil {
+		t.Fatalf("DeleteVersion v1: %v", err)
+	}
+
+	cancel()
+	<-done1
+	<-done2
+}
+
+func symlinkPV(t *testing.T, snapPath, volBase, pvName string) {
+	t.Helper()
+	link := filepath.Join(volBase, pvName)
+	if err := os.Symlink(snapPath, link); err != nil && !os.IsExist(err) {
+		t.Fatalf("symlink PV %s: %v", pvName, err)
+	}
 }
 
 // --- helpers ---

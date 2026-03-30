@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"frostmap.io/fmtctl/api"
 )
@@ -88,6 +89,22 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 	}
 
 	return nil
+}
+
+// WaitForConvergence polls until all registered nodes report the given
+// version as active for the dataset, or ctx is cancelled.
+func (o *Orchestrator) WaitForConvergence(ctx context.Context, dataset, versionID string) error {
+	for {
+		status := o.Store.RolloutStatus(dataset)
+		if status.ActiveVersion == versionID && len(status.PendingNodes) == 0 && len(status.ErrorNodes) == 0 {
+			return nil
+		}
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // Close shuts down the HTTP server.
