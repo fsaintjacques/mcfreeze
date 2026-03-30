@@ -101,14 +101,18 @@ Responsibilities:
   path from `status.attachmentMetadata["devicePath"]`
 - Mount the block device read-only at `/mnt/kv/<dataset>/v<N>/`
 - Write `catalog.json` atomically (via `rename(2)`) to the shared EmptyDir to
-  signal the KV server that a new version is available
+  signal the KV server that a new version is available; the file uses the
+  `CatalogFile` envelope (`{"entries":[...]}`) and includes entries for ALL
+  active datasets on the node, not just the one being promoted
 - Poll `GET http://localhost:7777/version` until the KV server reports the
   new version as active (converging check — if the KV server crashes and
   restarts it will reload from `catalog.json` and the poll naturally
   resolves; if the file does not exist yet the server starts with an empty
   catalog and the poll resolves once the node-agent writes the first catalog)
-- Detach and unmount the previous version's disk after the KV server confirms
-  the swap
+- Unmount and detach the previous version's disk immediately after the KV
+  server confirms the new version — this is a local operation that does not
+  require control-plane coordination; freeing the disk slot promptly allows
+  the node to accept new attachments
 - Periodically report the full `NodeState` (all datasets, phases, versions) to
   the control-plane; this is a level-triggered converging report — a missed
   report never causes permanent divergence
@@ -211,10 +215,11 @@ contains the canonical type definitions:
 |---|---|
 | `DatasetSpec` | Dataset name, key prefix, BQ source, shard count, retention |
 | `VersionRecord` | Version ID, disk URL, PV name, state, build metadata |
-| `CatalogEntry` | Per-dataset entry written to `catalog.json`; includes key prefix |
+| `CatalogFile` | Top-level `catalog.json` document: `{"entries":[...]}` |
+| `CatalogEntry` | Per-dataset entry in `CatalogFile`; includes key prefix |
 | `NodeAssignment` | Active version assignment returned by the watched API; includes PV name and key prefix |
 | `NodeState` | Full per-node state report: all datasets, phases, versions |
-| `DatasetState` | Phase, version, mount path, error for one dataset on one node |
+| `DatasetState` | Phase, version, key prefix, PV name, mount path, error for one dataset on one node |
 | `DatasetPhase` | Node-local lifecycle phase: attaching / mounting / active / unmounting / error |
 | `KVVersionResponse` | Response from `GET /version` on the KV server |
 | `KVDatasetVersion` | Per-dataset version entry in `KVVersionResponse` |
@@ -238,7 +243,10 @@ go/
       fs.go                       FSMounter — symlink-based for local dev / tests
       fake.go                     FakeMounter — in-memory fake for unit tests
     nodeagent/
-      agent.go                    Agent struct, reconcile loop, catalog write, state reporting
+      agent.go                    Agent struct, reconcile loop, catalog write, old-version cleanup
+      interfaces.go               AssignmentSource, StateReporter, VersionChecker interfaces
+      http.go                     HTTP client implementations of the three interfaces
+      fake.go                     In-memory fakes with call recording for unit tests
     testutil/
       snapshot.go                 BuildSnapshot helper — shells out to fm load csv
       server.go                   StartCatalogServer — launches fm serve catalog on free ports
