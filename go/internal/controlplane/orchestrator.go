@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -61,7 +62,9 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 
 	snapPath, err := o.Builder.Build(ctx, spec, versionID)
 	if err != nil {
-		o.Store.MarkFailed(spec.Name, versionID, err.Error())
+		if mfErr := o.Store.MarkFailed(spec.Name, versionID, err.Error()); mfErr != nil {
+			slog.Error("failed to mark version as failed", "dataset", spec.Name, "version", versionID, "err", mfErr)
+		}
 		return fmt.Errorf("build: %w", err)
 	}
 
@@ -70,7 +73,9 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 	pvName := fmt.Sprintf("pv-%s-%s", spec.Name, versionID)
 	pvLink := filepath.Join(o.VolumeBase, pvName)
 	if err := os.Symlink(snapPath, pvLink); err != nil && !os.IsExist(err) {
-		o.Store.MarkFailed(spec.Name, versionID, err.Error())
+		if mfErr := o.Store.MarkFailed(spec.Name, versionID, err.Error()); mfErr != nil {
+			slog.Error("failed to mark version as failed", "dataset", spec.Name, "version", versionID, "err", mfErr)
+		}
 		return fmt.Errorf("symlink pv: %w", err)
 	}
 

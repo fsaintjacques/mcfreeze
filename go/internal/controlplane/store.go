@@ -167,12 +167,19 @@ func (s *Store) CreateVersion(dataset, versionID string) error {
 		}
 	}
 
+	// Populate ShardCount from the spec if registered.
+	var shardCount int
+	if spec, ok := s.specs[dataset]; ok {
+		shardCount = spec.ShardCount
+	}
+
 	s.versions[dataset] = append(s.versions[dataset], VersionEntry{
 		VersionRecord: api.VersionRecord{
-			ID:        versionID,
-			Dataset:   dataset,
-			State:     api.StateBuilding,
-			CreatedAt: time.Now(),
+			ID:         versionID,
+			Dataset:    dataset,
+			State:      api.StateBuilding,
+			ShardCount: shardCount,
+			CreatedAt:  time.Now(),
 		},
 	})
 	return nil
