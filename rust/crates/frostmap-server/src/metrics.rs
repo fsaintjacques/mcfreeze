@@ -297,30 +297,56 @@ mod tests {
     }
 
     #[test]
-    fn version_snapshot_none_returns_empty_datasets() {
-        let state = HttpState {
-            prom:     Arc::new(Registry::default()),
-            data_reg: None,
-        };
-        // When data_reg is None (snapshot mode), version_snapshot must yield
-        // an empty dataset list — the node-agent convergence poll must not panic.
-        let datasets: Vec<KVDatasetVersion> = match &state.data_reg {
-            None => vec![],
-            Some(reg) => {
-                let catalog = Arc::clone(&*reg.load());
-                catalog.version_snapshot().into_iter().map(|e| KVDatasetVersion {
-                    dataset:    e.dataset,
-                    version_id: e.version_id,
-                    loaded_at:  format_rfc3339(e.loaded_at),
-                }).collect()
-            }
-        };
-        assert!(datasets.is_empty());
+    fn format_rfc3339_unix_epoch() {
+        assert_eq!(format_rfc3339(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00Z");
     }
 
-    #[test]
-    fn format_rfc3339_unix_epoch() {
-        // UNIX_EPOCH = 1970-01-01T00:00:00Z
-        assert_eq!(format_rfc3339(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00Z");
+    // --- version handler ---
+
+    use crate::registry::{ActiveCatalog, DatasetHandle};
+    use axum::extract::State;
+    use frostmap_format::writer::SnapshotWriter;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let mut w = SnapshotWriter::new(dir.path(), 1).unwrap();
+        for &(k, v) in pairs { w.write(k, v).unwrap(); }
+        w.finish(dir.path()).unwrap();
+        dir
+    }
+
+    fn make_state(data_reg: Option<Arc<DataRegistry>>) -> HttpState {
+        HttpState {
+            prom: Arc::new(Registry::default()),
+            data_reg,
+        }
+    }
+
+    #[tokio::test]
+    async fn version_handler_none_returns_empty_datasets() {
+        let Json(resp) = version_handler(State(make_state(None))).await;
+        assert!(resp.datasets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn version_handler_returns_loaded_datasets() {
+        let dir = build_snapshot(&[(b"k", b"v")]);
+        let mut ds = HashMap::new();
+        ds.insert(
+            "pfx".into(),
+            DatasetHandle::open("my-ds".into(), "v42".into(), dir.path()).unwrap(),
+        );
+        let loaded_at = SystemTime::UNIX_EPOCH;
+        let catalog = ActiveCatalog::new(ds, 1, loaded_at);
+        let reg = DataRegistry::new(catalog);
+
+        let Json(resp) = version_handler(State(make_state(Some(reg)))).await;
+
+        assert_eq!(resp.datasets.len(), 1);
+        assert_eq!(resp.datasets[0].dataset, "my-ds");
+        assert_eq!(resp.datasets[0].version_id, "v42");
+        assert_eq!(resp.datasets[0].loaded_at, "1970-01-01T00:00:00Z");
     }
 }

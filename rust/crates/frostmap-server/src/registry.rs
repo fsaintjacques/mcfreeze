@@ -91,12 +91,15 @@ impl ActiveCatalog {
     }
 
     /// Snapshot of per-dataset version info for the `GET /version` HTTP response.
+    /// Sorted by dataset name for deterministic JSON output.
     pub fn version_snapshot(&self) -> Vec<VersionEntry> {
-        self.datasets.values().map(|h| VersionEntry {
+        let mut entries: Vec<_> = self.datasets.values().map(|h| VersionEntry {
             dataset:    h.name.clone(),
             version_id: h.version.clone(),
             loaded_at:  self.loaded_at,
-        }).collect()
+        }).collect();
+        entries.sort_by(|a, b| a.dataset.cmp(&b.dataset));
+        entries
     }
 
     /// Look up `key` in `dataset`.  Returns `Ok(None)` for unknown datasets.
