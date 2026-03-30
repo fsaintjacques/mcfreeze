@@ -7,6 +7,128 @@ import (
 	"frostmap.io/fmtctl/api"
 )
 
+// --- version state machine tests ---
+
+func TestVersion_FullLifecycle(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	if err := s.CreateVersion("ds", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkReady("ds", "v1", "/snap/v1", "pv-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Promote("ds", "v1"); err != nil {
+		t.Fatal(err)
+	}
+
+	v, ok := s.GetActiveVersion("ds")
+	if !ok || v.ID != "v1" || v.State != api.StateActive {
+		t.Fatalf("active version: %+v, ok=%v", v, ok)
+	}
+
+	// Assignments should have been pushed to node-1.
+	resp, ch := s.GetAssignments("node-1", 0)
+	if ch != nil {
+		t.Fatal("expected immediate response")
+	}
+	if len(resp.Assignments) != 1 || resp.Assignments[0].Version.ID != "v1" {
+		t.Fatalf("assignments: %+v", resp.Assignments)
+	}
+}
+
+func TestVersion_PromoteRetiresOldActive(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap/v1", "pv-v1")
+	s.Promote("ds", "v1")
+
+	s.CreateVersion("ds", "v2")
+	s.MarkReady("ds", "v2", "/snap/v2", "pv-v2")
+	s.Promote("ds", "v2")
+
+	versions := s.GetVersions("ds")
+	for _, v := range versions {
+		switch v.ID {
+		case "v1":
+			if v.State != api.StateRetired {
+				t.Errorf("v1 state = %q, want retired", v.State)
+			}
+		case "v2":
+			if v.State != api.StateActive {
+				t.Errorf("v2 state = %q, want active", v.State)
+			}
+		}
+	}
+}
+
+func TestVersion_DuplicateBuildingRejected(t *testing.T) {
+	s := NewStore()
+	if err := s.CreateVersion("ds", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateVersion("ds", "v2"); err == nil {
+		t.Fatal("expected error for duplicate building version")
+	}
+}
+
+func TestVersion_CreateAfterFailedSucceeds(t *testing.T) {
+	s := NewStore()
+	s.CreateVersion("ds", "v1")
+	s.MarkFailed("ds", "v1", "build error")
+
+	if err := s.CreateVersion("ds", "v2"); err != nil {
+		t.Fatalf("expected success after failed version: %v", err)
+	}
+}
+
+func TestVersion_InvalidTransitions(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+
+	// Can't promote a building version.
+	s.CreateVersion("ds", "v1")
+	if err := s.Promote("ds", "v1"); err == nil {
+		t.Error("expected error promoting building version")
+	}
+
+	// Can't mark ready a failed version.
+	s.MarkFailed("ds", "v1", "oops")
+	if err := s.MarkReady("ds", "v1", "/snap", "pv"); err == nil {
+		t.Error("expected error marking failed version ready")
+	}
+
+	// Can't mark failed a ready version.
+	s.CreateVersion("ds", "v2")
+	s.MarkReady("ds", "v2", "/snap", "pv")
+	if err := s.MarkFailed("ds", "v2", "oops"); err == nil {
+		t.Error("expected error marking ready version failed")
+	}
+}
+
+func TestVersion_PromoteMultiNode(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+	s.RegisterNode("node-2")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap/v1", "pv-v1")
+	s.Promote("ds", "v1")
+
+	for _, node := range []string{"node-1", "node-2"} {
+		resp, _ := s.GetAssignments(node, 0)
+		if len(resp.Assignments) != 1 || resp.Assignments[0].Version.ID != "v1" {
+			t.Errorf("%s: assignments = %+v", node, resp.Assignments)
+		}
+	}
+}
+
 func TestStore_SetAndGetAssignments(t *testing.T) {
 	s := NewStore()
 

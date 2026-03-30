@@ -75,12 +75,14 @@ func TestFullLoop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	orch.RegisterNode(nodeName)
+
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(ctx) }()
 
 	// --- v1: build and promote ---
 	spec := api.DatasetSpec{Name: "users", KeyPrefix: "users"}
-	if err := orch.BuildAndPromote(ctx, spec, "v1", nodeName); err != nil {
+	if err := orch.BuildAndPromote(ctx, spec, "v1"); err != nil {
 		t.Fatalf("BuildAndPromote v1: %v", err)
 	}
 
@@ -98,7 +100,7 @@ func TestFullLoop(t *testing.T) {
 		{[]byte("user-3"), []byte("Charlie")},
 	}
 
-	if err := orch.BuildAndPromote(ctx, spec, "v2", nodeName); err != nil {
+	if err := orch.BuildAndPromote(ctx, spec, "v2"); err != nil {
 		t.Fatalf("BuildAndPromote v2: %v", err)
 	}
 

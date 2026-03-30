@@ -22,6 +22,11 @@ type Orchestrator struct {
 	VolumeBase string
 }
 
+// RegisterNode registers a node so Promote pushes assignments to it.
+func (o *Orchestrator) RegisterNode(nodeName string) {
+	o.Store.RegisterNode(nodeName)
+}
+
 // NewOrchestrator creates an Orchestrator with an HTTP server bound to a free port.
 func NewOrchestrator(builder VersionBuilder, volumeBase string) (*Orchestrator, error) {
 	store := NewStore()
@@ -44,12 +49,19 @@ func (o *Orchestrator) Addr() string {
 	return "http://" + o.Server.Addr()
 }
 
-// BuildAndPromote builds a snapshot for the dataset, creates a PV symlink in
-// VolumeBase, and sets the assignment for the node. This triggers the
-// node-agent's long-poll to return.
-func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec, versionID, nodeName string) error {
+// BuildAndPromote runs the full version lifecycle: register dataset, create
+// version (building), build snapshot, mark ready, promote (active). This
+// triggers the node-agent's long-poll to return for all registered nodes.
+func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec, versionID string) error {
+	o.Store.RegisterDataset(spec)
+
+	if err := o.Store.CreateVersion(spec.Name, versionID); err != nil {
+		return fmt.Errorf("create version: %w", err)
+	}
+
 	snapPath, err := o.Builder.Build(ctx, spec, versionID)
 	if err != nil {
+		o.Store.MarkFailed(spec.Name, versionID, err.Error())
 		return fmt.Errorf("build: %w", err)
 	}
 
@@ -58,19 +70,18 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 	pvName := fmt.Sprintf("pv-%s-%s", spec.Name, versionID)
 	pvLink := filepath.Join(o.VolumeBase, pvName)
 	if err := os.Symlink(snapPath, pvLink); err != nil && !os.IsExist(err) {
+		o.Store.MarkFailed(spec.Name, versionID, err.Error())
 		return fmt.Errorf("symlink pv: %w", err)
 	}
 
-	assignment := api.NodeAssignment{
-		Dataset:   spec.Name,
-		KeyPrefix: spec.KeyPrefix,
-		Version: api.VersionRecord{
-			ID:     versionID,
-			PVName: pvName,
-		},
+	if err := o.Store.MarkReady(spec.Name, versionID, snapPath, pvName); err != nil {
+		return fmt.Errorf("mark ready: %w", err)
 	}
 
-	o.Store.MergeAssignment(nodeName, assignment)
+	if err := o.Store.Promote(spec.Name, versionID); err != nil {
+		return fmt.Errorf("promote: %w", err)
+	}
+
 	return nil
 }
 

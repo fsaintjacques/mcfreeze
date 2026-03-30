@@ -3,16 +3,32 @@
 package controlplane
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	"frostmap.io/fmtctl/api"
 )
+
+// VersionEntry extends api.VersionRecord with the local snapshot path
+// (used by the orchestrator to symlink into the volume base).
+type VersionEntry struct {
+	api.VersionRecord
+	SnapshotPath string
+}
 
 // Store holds the control-plane state in memory. All methods are safe for
 // concurrent use. Tests manipulate it directly; production (Phase 4) will
 // back it with Kubernetes CRDs.
 type Store struct {
-	mu sync.RWMutex
+	mu sync.Mutex
+
+	// Dataset specs keyed by dataset name.
+	specs map[string]api.DatasetSpec
+	// Versions per dataset, ordered by creation time.
+	versions map[string][]VersionEntry
+	// Registered node names (assignments are pushed to all registered nodes).
+	nodes map[string]struct{}
 
 	// assignments keyed by node name.
 	assignments map[string][]api.NodeAssignment
@@ -29,6 +45,9 @@ type Store struct {
 // NewStore creates an empty Store.
 func NewStore() *Store {
 	return &Store{
+		specs:       make(map[string]api.DatasetSpec),
+		versions:    make(map[string][]VersionEntry),
+		nodes:       make(map[string]struct{}),
 		assignments: make(map[string][]api.NodeAssignment),
 		generation:  make(map[string]int64),
 		notify:      make(map[string]chan struct{}),
@@ -89,8 +108,8 @@ func (s *Store) ReportState(nodeName string, state api.NodeState) {
 
 // GetNodeState returns the last reported state for a node.
 func (s *Store) GetNodeState(nodeName string) (api.NodeState, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	state, ok := s.nodeStates[nodeName]
 	return state, ok
 }
@@ -100,7 +119,174 @@ func (s *Store) GetNodeState(nodeName string) (api.NodeState, bool) {
 func (s *Store) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.mergeAssignmentLocked(nodeName, assignment)
+}
 
+// Generation returns the current generation for a node.
+func (s *Store) Generation(nodeName string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.generation[nodeName]
+}
+
+// ---------------------------------------------------------------------------
+// Dataset and version lifecycle
+// ---------------------------------------------------------------------------
+
+// RegisterDataset registers a dataset spec. Idempotent.
+func (s *Store) RegisterDataset(spec api.DatasetSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specs[spec.Name] = spec
+}
+
+// RegisterNode registers a node name so Promote can push assignments to it.
+func (s *Store) RegisterNode(nodeName string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nodes[nodeName] = struct{}{}
+}
+
+// GetDatasetSpec returns the spec for a dataset.
+func (s *Store) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spec, ok := s.specs[name]
+	return spec, ok
+}
+
+// CreateVersion creates a new VersionRecord in building state.
+// Returns an error if a building version already exists for this dataset.
+func (s *Store) CreateVersion(dataset, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, v := range s.versions[dataset] {
+		if v.State == api.StateBuilding {
+			return fmt.Errorf("dataset %q already has a building version %q", dataset, v.ID)
+		}
+	}
+
+	s.versions[dataset] = append(s.versions[dataset], VersionEntry{
+		VersionRecord: api.VersionRecord{
+			ID:        versionID,
+			Dataset:   dataset,
+			State:     api.StateBuilding,
+			CreatedAt: time.Now(),
+		},
+	})
+	return nil
+}
+
+// MarkReady transitions a version from building to ready.
+func (s *Store) MarkReady(dataset, versionID, snapshotPath, pvName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.findVersion(dataset, versionID)
+	if err != nil {
+		return err
+	}
+	if v.State != api.StateBuilding {
+		return fmt.Errorf("version %q is %q, expected building", versionID, v.State)
+	}
+	v.State = api.StateReady
+	v.PVName = pvName
+	v.SnapshotPath = snapshotPath
+	return nil
+}
+
+// MarkFailed transitions a version from building to failed.
+func (s *Store) MarkFailed(dataset, versionID, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.findVersion(dataset, versionID)
+	if err != nil {
+		return err
+	}
+	if v.State != api.StateBuilding {
+		return fmt.Errorf("version %q is %q, expected building", versionID, v.State)
+	}
+	v.State = api.StateFailed
+	return nil
+}
+
+// Promote transitions a version from ready to active. The previously active
+// version (if any) moves to retired. Assignments are updated for all
+// registered nodes.
+func (s *Store) Promote(dataset, versionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.findVersion(dataset, versionID)
+	if err != nil {
+		return err
+	}
+	if v.State != api.StateReady {
+		return fmt.Errorf("version %q is %q, expected ready", versionID, v.State)
+	}
+
+	spec, ok := s.specs[dataset]
+	if !ok {
+		return fmt.Errorf("dataset %q not registered", dataset)
+	}
+
+	// Retire the current active version.
+	for i := range s.versions[dataset] {
+		if s.versions[dataset][i].State == api.StateActive {
+			s.versions[dataset][i].State = api.StateRetired
+		}
+	}
+
+	v.State = api.StateActive
+
+	// Push assignment to all registered nodes.
+	assignment := api.NodeAssignment{
+		Dataset:   dataset,
+		KeyPrefix: spec.KeyPrefix,
+		Version:   v.VersionRecord,
+	}
+	for nodeName := range s.nodes {
+		s.mergeAssignmentLocked(nodeName, assignment)
+	}
+
+	return nil
+}
+
+// GetVersions returns all versions for a dataset.
+func (s *Store) GetVersions(dataset string) []VersionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]VersionEntry, len(s.versions[dataset]))
+	copy(out, s.versions[dataset])
+	return out
+}
+
+// GetActiveVersion returns the active version for a dataset, if any.
+func (s *Store) GetActiveVersion(dataset string) (VersionEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.versions[dataset] {
+		if v.State == api.StateActive {
+			return v, true
+		}
+	}
+	return VersionEntry{}, false
+}
+
+// findVersion returns a pointer to the version entry (caller must hold mu).
+func (s *Store) findVersion(dataset, versionID string) (*VersionEntry, error) {
+	for i := range s.versions[dataset] {
+		if s.versions[dataset][i].ID == versionID {
+			return &s.versions[dataset][i], nil
+		}
+	}
+	return nil, fmt.Errorf("version %q not found for dataset %q", versionID, dataset)
+}
+
+// mergeAssignmentLocked updates or adds an assignment for a node (caller must hold mu).
+func (s *Store) mergeAssignmentLocked(nodeName string, assignment api.NodeAssignment) {
 	existing := s.assignments[nodeName]
 	merged := make([]api.NodeAssignment, 0, len(existing)+1)
 	for _, a := range existing {
@@ -117,11 +303,4 @@ func (s *Store) MergeAssignment(nodeName string, assignment api.NodeAssignment) 
 		close(ch)
 	}
 	s.notify[nodeName] = make(chan struct{})
-}
-
-// Generation returns the current generation for a node.
-func (s *Store) Generation(nodeName string) int64 {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.generation[nodeName]
 }
