@@ -32,6 +32,13 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	t.Helper()
 
 	dir := t.TempDir()
+	// Canonicalize the path to work around macOS /var → /private/var symlink.
+	// FSEvents reports canonical paths, so the server's watcher must compare
+	// against the same canonical path or renames won't be detected.
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("failed to canonicalize temp dir: %v", err)
+	}
 	catalogPath := filepath.Join(dir, "catalog.json")
 
 	// Write the initial catalog.
