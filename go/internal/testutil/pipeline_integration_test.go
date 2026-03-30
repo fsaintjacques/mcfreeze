@@ -154,6 +154,6 @@ func assertPipelineMiss(t *testing.T, r *bufio.Reader) {
 	}
 	line = strings.TrimRight(line, "\r\n")
 	if line != "EN" {
-		t.Errorf("expected EN, got %q", line)
+		t.Fatalf("expected EN, got %q", line)
 	}
 }
