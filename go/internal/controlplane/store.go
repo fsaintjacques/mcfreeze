@@ -95,6 +95,30 @@ func (s *Store) GetNodeState(nodeName string) (api.NodeState, bool) {
 	return state, ok
 }
 
+// MergeAssignment atomically updates or adds an assignment for a single
+// dataset on a node. Existing assignments for other datasets are preserved.
+func (s *Store) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing := s.assignments[nodeName]
+	merged := make([]api.NodeAssignment, 0, len(existing)+1)
+	for _, a := range existing {
+		if a.Dataset != assignment.Dataset {
+			merged = append(merged, a)
+		}
+	}
+	merged = append(merged, assignment)
+
+	s.assignments[nodeName] = merged
+	s.generation[nodeName]++
+
+	if ch, ok := s.notify[nodeName]; ok {
+		close(ch)
+	}
+	s.notify[nodeName] = make(chan struct{})
+}
+
 // Generation returns the current generation for a node.
 func (s *Store) Generation(nodeName string) int64 {
 	s.mu.RLock()

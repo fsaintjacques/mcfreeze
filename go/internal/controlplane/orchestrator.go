@@ -70,20 +70,7 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 		},
 	}
 
-	// Merge with existing assignments for other datasets on this node.
-	o.Store.mu.RLock()
-	existing := o.Store.assignments[nodeName]
-	o.Store.mu.RUnlock()
-
-	merged := make([]api.NodeAssignment, 0, len(existing)+1)
-	for _, a := range existing {
-		if a.Dataset != spec.Name {
-			merged = append(merged, a)
-		}
-	}
-	merged = append(merged, assignment)
-
-	o.Store.SetAssignments(nodeName, merged)
+	o.Store.MergeAssignment(nodeName, assignment)
 	return nil
 }
 

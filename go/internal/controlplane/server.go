@@ -2,13 +2,15 @@ package controlplane
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 
 	"frostmap.io/fmtctl/api"
 )
+
+const maxBodySize = 1 << 20 // 1 MiB
 
 // Server is the control-plane HTTP server. It serves the node-agent API
 // (assignments long-poll, state reporting) and an admin API for tests.
@@ -53,7 +55,12 @@ func (s *Server) handleGetAssignments(w http.ResponseWriter, r *http.Request) {
 
 	var generation int64
 	if g := r.URL.Query().Get("generation"); g != "" {
-		fmt.Sscanf(g, "%d", &generation)
+		var err error
+		generation, err = strconv.ParseInt(g, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid generation parameter", http.StatusBadRequest)
+			return
+		}
 	}
 
 	resp, ch := s.store.GetAssignments(node, generation)
@@ -76,7 +83,7 @@ func (s *Server) handleGetAssignments(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePostState(w http.ResponseWriter, r *http.Request) {
 	node := r.PathValue("node")
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -97,7 +104,7 @@ func (s *Server) handlePostState(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminSetAssignments(w http.ResponseWriter, r *http.Request) {
 	node := r.PathValue("node")
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
