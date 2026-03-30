@@ -89,6 +89,40 @@ func TestCatalogHotSwapMultiDataset(t *testing.T) {
 	assertMcGet(t, srv, "ds2:k", "ds2-v1") // unchanged
 }
 
+// TestCatalogLateArrival verifies that the server starts with an empty catalog
+// when catalog.json does not exist, and loads it when it first appears.
+// This matches the Kubernetes pod startup race: the KV server container starts
+// before the node-agent has written catalog.json.
+func TestCatalogLateArrival(t *testing.T) {
+	srv := StartEmptyCatalogServer(t)
+
+	// GET /version should return an empty dataset list.
+	resp := httpGetJSON[api.KVVersionResponse](t, fmt.Sprintf("http://%s/version", srv.HTTPAddr))
+	if len(resp.Datasets) != 0 {
+		t.Fatalf("expected 0 datasets before catalog write, got %d", len(resp.Datasets))
+	}
+
+	// All lookups should miss.
+	raw := mcGetRaw(t, srv.TCPAddr, "ds:anything")
+	if raw != "EN" {
+		t.Fatalf("expected EN before catalog write, got %q", raw)
+	}
+
+	// Node-agent writes the first catalog.
+	snapDir := BuildSnapshot(t, []KV{
+		{Key: []byte("hello"), Value: []byte("world")},
+	}, 4)
+	srv.WriteCatalog(t, []api.CatalogEntry{{
+		Dataset:   "ds",
+		KeyPrefix: "ds",
+		VersionID: "v1",
+		MountPath: snapDir,
+	}})
+
+	waitForVersion(t, srv, "ds", "v1", 5*time.Second)
+	assertMcGet(t, srv, "ds:hello", "world")
+}
+
 // --- helpers ---
 
 func assertVersion(t *testing.T, srv *Server, dataset, wantVersion string) {

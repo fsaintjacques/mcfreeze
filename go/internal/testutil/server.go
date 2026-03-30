@@ -75,6 +75,49 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	}
 }
 
+// StartEmptyCatalogServer starts frostmap-server in catalog mode without an
+// initial catalog.json. The server starts with an empty catalog and waits for
+// the first catalog write. Use WriteCatalog to trigger the first load.
+func StartEmptyCatalogServer(t *testing.T) *Server {
+	t.Helper()
+
+	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("failed to canonicalize temp dir: %v", err)
+	}
+	catalogPath := filepath.Join(dir, "catalog.json")
+
+	ports := freePorts(t, 2)
+	tcpAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
+	httpAddr := fmt.Sprintf("127.0.0.1:%d", ports[1])
+
+	cmd := exec.Command(FMBinary(t), "serve", "catalog",
+		"--catalog", catalogPath,
+		"--tcp", tcpAddr,
+		"--metrics", httpAddr,
+	)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start frostmap-server: %v", err)
+	}
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	})
+
+	waitForTCP(t, tcpAddr, 5*time.Second)
+
+	return &Server{
+		TCPAddr:     tcpAddr,
+		HTTPAddr:    httpAddr,
+		catalogPath: catalogPath,
+		cmd:         cmd,
+	}
+}
+
 // WriteCatalog atomically replaces the catalog.json with new entries.
 // This triggers a hot-swap in the server.
 func (s *Server) WriteCatalog(t *testing.T, entries []api.CatalogEntry) {

@@ -55,8 +55,17 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
     let metrics     = Metrics::new(&mut prom);
     let prom        = Arc::new(prom);
 
-    // Load initial catalog synchronously (blocking is fine before serving starts).
-    let initial  = build_catalog_blocking(cfg.catalog_path.clone(), 0).await?;
+    // Load initial catalog synchronously.  If the file does not exist yet
+    // (e.g. the node-agent hasn't written it), start with an empty catalog;
+    // the watcher will pick up the first write.
+    let initial = match build_catalog_blocking(cfg.catalog_path.clone(), 0).await {
+        Ok(cat) => cat,
+        Err(ServeError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!("catalog file not found; starting with empty catalog");
+            ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::now())
+        }
+        Err(e) => return Err(e),
+    };
     let n_ds     = initial.dataset_count() as i64;
     let registry = DataRegistry::new(initial);
 
