@@ -169,6 +169,10 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	if got != "Alice-v2" {
 		t.Fatalf("v2: mg users:user-1 = %q, want %q", got, "Alice-v2")
 	}
+	got = mcGet(t, srv.TCPAddr, "users:user-2")
+	if got != "Bob-v2" {
+		t.Fatalf("v2: mg users:user-2 = %q, want %q", got, "Bob-v2")
+	}
 	got = mcGet(t, srv.TCPAddr, "users:user-3")
 	if got != "Charlie" {
 		t.Fatalf("v2: mg users:user-3 = %q, want %q", got, "Charlie")
@@ -176,13 +180,18 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 
 	// Verify the agent reported v2 active.
 	last, _ = reporter.LastState()
+	found := false
 	for _, ds := range last.Datasets {
 		if ds.Dataset == "users" {
+			found = true
 			if ds.VersionID != "v2" {
 				t.Errorf("reported version = %q, want v2", ds.VersionID)
 			}
 			break
 		}
+	}
+	if !found {
+		t.Error("dataset \"users\" not found in reported state")
 	}
 
 	// Stop the agent.
@@ -190,29 +199,6 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	if err := <-agentDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() = %v, want context.Canceled", err)
 	}
-}
-
-func waitForVersion(t *testing.T, srv *testutil.Server, dataset, wantVersion string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	url := fmt.Sprintf("http://%s/version", srv.HTTPAddr)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
-		if err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			var vr api.KVVersionResponse
-			if json.Unmarshal(body, &vr) == nil {
-				for _, ds := range vr.Datasets {
-					if ds.Dataset == dataset && ds.VersionID == wantVersion {
-						return
-					}
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("dataset %q did not reach version %q within %v", dataset, wantVersion, timeout)
 }
 
 func waitForPhase(t *testing.T, reporter *nodeagent.FakeStateReporter, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {

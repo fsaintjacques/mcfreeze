@@ -219,7 +219,8 @@ func (a *Agent) reconcile(ctx context.Context, assign api.NodeAssignment) {
 	log.Info("dataset active")
 
 	// Clean up the previous version's mount and disk attachment.
-	if prev.Phase == api.PhaseActive && prev.VersionID != assign.Version.ID {
+	// Also clean up partially-failed reconciliations that left a disk attached.
+	if prev.VersionID != assign.Version.ID && prev.VersionID != "" {
 		a.cleanupOldVersion(ctx, assign.Dataset, prev)
 	}
 }
@@ -271,9 +272,6 @@ func (a *Agent) setPhase(dataset, keyPrefix, versionID, pvName string, phase api
 	prev := a.datasets[dataset]
 	if keyPrefix == "" {
 		keyPrefix = prev.KeyPrefix
-	}
-	if pvName == "" {
-		pvName = prev.PVName
 	}
 	a.datasets[dataset] = api.DatasetState{
 		Dataset:   dataset,
