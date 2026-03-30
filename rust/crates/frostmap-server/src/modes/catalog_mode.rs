@@ -35,9 +35,6 @@ use crate::ServeError;
 pub struct CatalogConfig {
     /// Path to `catalog.json` watched for changes.
     pub catalog_path: PathBuf,
-    /// Ack file written after each successful swap.
-    /// Defaults to `<catalog_path>.ack` if `None`.
-    pub ack_path:     Option<PathBuf>,
     /// Unix-domain socket path to bind, if any.
     pub uds_path:     Option<PathBuf>,
     /// TCP address to bind, if any.
@@ -69,13 +66,6 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
     let generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let factory: Arc<dyn LookupFactory> = Arc::new(CatalogLookup::new(Arc::clone(&registry)));
 
-    // Ack path: explicit or derived from catalog path.
-    let ack_path = cfg.ack_path.unwrap_or_else(|| {
-        let mut p = cfg.catalog_path.clone().into_os_string();
-        p.push(".ack");
-        PathBuf::from(p)
-    });
-
     // HTTP server (serves /metrics and /version): fire-and-forget.
     if let Some(addr) = cfg.metrics_addr {
         let prom     = Arc::clone(&prom);
@@ -97,7 +87,7 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         let metrics      = Arc::clone(&metrics);
         let gen_watcher  = Arc::clone(&generation);
         tokio::spawn(async move {
-            watch_catalog(catalog_path, ack_path, registry, metrics, gen_watcher, startup_tx).await;
+            watch_catalog(catalog_path, registry, metrics, gen_watcher, startup_tx).await;
         });
     }
     // Wait for the watcher to confirm it started before accepting connections.
@@ -125,7 +115,6 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
 /// and processes reload requests on the async side.
 async fn watch_catalog(
     catalog_path: PathBuf,
-    ack_path:     PathBuf,
     registry:     Arc<DataRegistry>,
     metrics:      Arc<Metrics>,
     generation:   Arc<AtomicU64>,
@@ -210,13 +199,6 @@ async fn watch_catalog(
                 metrics.catalog_generation.set(next_gen as i64);
                 metrics.active_datasets.set(n_ds);
                 tracing::info!(generation = next_gen, datasets = n_ds, "catalog swapped");
-
-                // Ack file: write generation number so the Lifecycle Manager
-                // knows the swap completed and can proceed with unmount.
-                let ack_content = format!("{next_gen}\n");
-                if let Err(e) = tokio::fs::write(&ack_path, ack_content.as_bytes()).await {
-                    tracing::error!("failed to write ack file {}: {e}", ack_path.display());
-                }
             }
         }
     }

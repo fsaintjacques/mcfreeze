@@ -49,10 +49,6 @@ pub struct CatalogArgs {
     #[arg(long)]
     pub catalog: PathBuf,
 
-    /// Ack file written after each successful swap (default: <catalog>.ack)
-    #[arg(long)]
-    pub ack: Option<PathBuf>,
-
     /// Unix-domain socket path to bind
     #[arg(long)]
     pub uds: Option<PathBuf>,
@@ -92,7 +88,6 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             }
             let cfg = CatalogConfig {
                 catalog_path: a.catalog,
-                ack_path:     a.ack,
                 uds_path:     a.uds,
                 tcp_addr:     a.tcp,
                 semver:       env!("CARGO_PKG_VERSION").to_owned(),
