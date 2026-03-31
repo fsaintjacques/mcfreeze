@@ -10,7 +10,6 @@
 # Rust binaries (real file targets — Make skips rebuild if up-to-date)
 RUST_RELEASE  := rust/target/release
 FM            := $(RUST_RELEASE)/fm
-FM_SERVER     := $(RUST_RELEASE)/frostmap-server
 
 # Go binaries
 GO_BIN        := go/bin
@@ -20,9 +19,9 @@ FMTCTL        := $(GO_BIN)/fmtctl
 
 # --- Build ---
 
-all: $(FM) $(FM_SERVER) $(FMTCTL)
+all: $(FM) $(FMTCTL)
 
-$(FM) $(FM_SERVER): $(shell find rust/crates -name '*.rs' -o -name 'Cargo.toml') rust/Cargo.lock
+$(FM): $(shell find rust/crates -name '*.rs' -o -name 'Cargo.toml') rust/Cargo.lock
 	cd rust && cargo build --release
 
 $(FMTCTL): $(shell find go -name '*.go') go/go.mod
@@ -37,8 +36,8 @@ test-unit:
 	cd rust && cargo test
 	cd go && go test ./...
 
-test-integration: $(FM) $(FM_SERVER)
-	cd go && FM=$(abspath $(FM)) FM_SERVER=$(abspath $(FM_SERVER)) go test -tags integration ./...
+test-integration: $(FM)
+	cd go && FM=$(abspath $(FM)) go test -tags integration ./...
 
 # --- Clean ---
 
