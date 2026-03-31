@@ -94,15 +94,23 @@ func (o *Orchestrator) BuildAndPromote(ctx context.Context, spec api.DatasetSpec
 // WaitForConvergence polls until all registered nodes report the given
 // version as active for the dataset, or ctx is cancelled.
 func (o *Orchestrator) WaitForConvergence(ctx context.Context, dataset, versionID string) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		status := o.Store.RolloutStatus(dataset)
+		if status.ActiveVersion == "" {
+			return fmt.Errorf("no active version for dataset %q", dataset)
+		}
 		if status.ActiveVersion == versionID && len(status.PendingNodes) == 0 && len(status.ErrorNodes) == 0 {
 			return nil
 		}
 		select {
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
 		case <-ctx.Done():
-			return ctx.Err()
+			status = o.Store.RolloutStatus(dataset)
+			return fmt.Errorf("convergence timeout: active=%s converged=%d pending=%v error=%v: %w",
+				status.ActiveVersion, len(status.ConvergedNodes), status.PendingNodes, status.ErrorNodes, ctx.Err())
 		}
 	}
 }

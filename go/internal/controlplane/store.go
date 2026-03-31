@@ -347,12 +347,21 @@ func (s *Store) RolloutStatus(dataset string) RolloutStatus {
 }
 
 // CheckRetirement returns retired versions eligible for cleanup: all
-// registered nodes have converged on a newer version.
+// registered nodes have reported state AND none of them report the
+// retired version.
 func (s *Store) CheckRetirement(dataset string) []VersionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A retired version is eligible if no node still reports it.
+	// If any registered node has never reported, no version is eligible —
+	// we can't know what that node is still serving.
+	for nodeName := range s.nodes {
+		if _, ok := s.nodeStates[nodeName]; !ok {
+			return nil
+		}
+	}
+
+	// Build set of versions still reported by any node.
 	reportedVersions := make(map[string]bool)
 	for _, ns := range s.nodeStates {
 		for _, ds := range ns.Datasets {
