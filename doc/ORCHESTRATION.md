@@ -34,11 +34,20 @@ writing and reading the on-disk format. `fmtctl` owns the control plane — deci
 
 **Binary:** `fmtctl control-plane`
 **Deployment:** Kubernetes `Deployment` (single replica)
-**State:** Kubernetes CRDs
+**State:** In-memory store (Phases 1–3); Kubernetes CRDs (Phase 4)
 
 The authoritative source of truth for all dataset and version state. Never
 touches nodes or disks directly — it delegates all node-level work to
 `node-agent` and all build work to `job`.
+
+The control-plane exposes an HTTP server with:
+- Node-agent API: long-poll assignments (`GET /api/v1/node/{node}/assignments`)
+  and state reporting (`POST /api/v1/node/{node}/state`)
+- Admin API (tests/ops): set assignments, list versions, rollout status
+
+All external dependencies are injected via interfaces (`VersionBuilder`,
+`AssignmentSource`, `StateReporter`) so the system can be integration-tested
+without Kubernetes.
 
 Responsibilities:
 - Maintain a registry of `DatasetSpec` resources (name, key prefix, source,
@@ -57,8 +66,12 @@ Responsibilities:
   confirm convergence
 - Drive rollback: revert the active version to a previous `ready` snapshot on
   operator request or policy trigger
-- Retire old versions once all nodes have converged on the new active version
-  and the retention window has elapsed
+- Track rollout convergence: diff reported `NodeState` against desired
+  assignments to produce per-version node counts (converged, pending, error)
+- Retire old versions: promoting a new version atomically moves the previous
+  active version to `retired`; a retired version is eligible for cleanup
+  (disk + PV deletion) only after ALL registered nodes have reported state
+  AND none of them report the retired version
 
 ### job
 
@@ -116,7 +129,10 @@ Responsibilities:
 - Periodically report the full `NodeState` (all datasets, phases, versions) to
   the control-plane; this is a level-triggered converging report — a missed
   report never causes permanent divergence
-- Handle node drain / shutdown: gracefully detach all attached disks
+- Handle node drain / shutdown: on SIGTERM, unmount all datasets and detach
+  their disks; unmount retries with exponential backoff (500ms → 5s) on
+  `EBUSY` to wait for the KV server to release mmapped fds (Kubernetes
+  sends SIGTERM to all containers in parallel)
 
 #### Node-agent phase lifecycle (per dataset)
 
@@ -242,6 +258,12 @@ go/
       mount_stub.go               stub for non-Linux builds
       fs.go                       FSMounter — symlink-based for local dev / tests
       fake.go                     FakeMounter — in-memory fake for unit tests
+    controlplane/
+      store.go                    In-memory store: assignments, versions, rollout status
+      server.go                   HTTP server: long-poll assignments, state reports, admin API
+      orchestrator.go             Orchestrator: ties store + builder for builds and promotions
+      builder.go                  VersionBuilder interface
+      fake_builder.go             FakeVersionBuilder — shells out to fm load csv
     nodeagent/
       agent.go                    Agent struct, reconcile loop, catalog write, old-version cleanup
       interfaces.go               AssignmentSource, StateReporter, VersionChecker interfaces
