@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -18,7 +18,6 @@ use frostmap_loader::source::CsvSource;
 #[derive(Args)]
 pub struct LoadArgs {
     /// Output snapshot directory (created if absent).
-    /// Required unless --download-benchmark is set.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
@@ -30,14 +29,9 @@ pub struct LoadArgs {
     #[arg(long, default_value = "2")]
     pub index_parallelism: usize,
 
-    /// Validate and print the load plan without writing any data
+    /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Download all batches from the source and discard them, reporting
-    /// throughput.  No data is written to --output.
-    #[arg(long)]
-    pub download_benchmark: bool,
 
     /// Progress report interval in seconds.
     #[arg(long, default_value = "5")]
@@ -80,6 +74,11 @@ pub enum Source {
         /// Recommended when values are high-entropy (hashes, ciphertext).
         #[arg(long)]
         no_compression: bool,
+
+        /// Download all batches from the source and discard them, reporting
+        /// throughput.  No data is written to --output.
+        #[arg(long)]
+        download_benchmark: bool,
     },
     /// Load from a two-column CSV (base64-encoded key, base64-encoded value).
     /// Reads from stdin if --file is not provided.
@@ -108,101 +107,73 @@ pub async fn run(args: LoadArgs) -> Result<()> {
             streams,
             row_restriction,
             no_compression,
+            download_benchmark,
         } => {
-            run_bq(
-                args.output,
-                args.partitions,
-                args.index_parallelism,
-                args.dry_run,
-                args.download_benchmark,
-                args.progress_secs,
-                project,
-                table,
-                key_column,
-                value_column,
-                streams,
-                row_restriction,
-                no_compression,
-            )
-            .await
+            // Open BQ session even on dry-run to validate credentials and table.
+            let session = open_bq_session(
+                project, &table, &key_column, &value_column,
+                streams, row_restriction.as_deref(), no_compression,
+            ).await?;
+
+            if args.dry_run {
+                info!("dry-run: source validated, no data written");
+                return Ok(());
+            }
+
+            let meta           = session.metadata();
+            let estimated_rows = meta.estimated_rows;
+
+            let sources = session.into_sources()
+                .context("failed to split session into sources")?;
+
+            if download_benchmark {
+                return benchmark_download(sources, estimated_rows, args.progress_secs).await;
+            }
+
+            let output = args.output.context("--output is required")?;
+            load_sources(
+                &output, args.partitions, args.index_parallelism,
+                args.progress_secs, estimated_rows, sources,
+            ).await
         }
         Source::Csv { file, batch_size } => {
-            let output = args.output.context("--output is required for csv source")?;
-            run_csv(output, args.partitions, args.index_parallelism, file, batch_size).await
+            // Validate the source is readable even on dry-run.
+            let source = open_csv_source(file, batch_size)?;
+
+            if args.dry_run {
+                info!("dry-run: source validated, no data written");
+                return Ok(());
+            }
+
+            let output = args.output.context("--output is required")?;
+            load_sources(
+                &output, args.partitions, args.index_parallelism,
+                args.progress_secs, None, vec![source],
+            ).await
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// BigQuery load
+// Shared load orchestration
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-async fn run_bq(
-    output:              Option<PathBuf>,
-    partitions:          u32,
-    index_parallelism:   usize,
-    dry_run:             bool,
-    download_benchmark:  bool,
-    progress_secs:       u64,
-    project:             Option<String>,
-    table:               String,
-    key_column:          String,
-    value_column:        String,
-    streams:             i32,
-    row_restriction:     Option<String>,
-    no_compression:      bool,
-) -> Result<()> {
-    let (billing_project, table_resource) = parse_table(&table, project.as_deref())?;
-
-    let config = BqSourceConfig {
-        project:             billing_project.clone(),
-        table:               table_resource,
-        key_column:          key_column.clone(),
-        value_column:        value_column.clone(),
-        n_streams:           streams,
-        row_restriction:     row_restriction.clone(),
-        disable_compression: no_compression,
-    };
-
-    info!(
-        billing_project = %billing_project,
-        table           = %table,
-        key_column      = %key_column,
-        value_column    = %value_column,
-        compression     = if no_compression { "off" } else { "LZ4_FRAME" },
-        row_restriction = row_restriction.as_deref().unwrap_or(""),
-        "opening BigQuery read session",
-    );
-
-    let session = BqReadSession::open(config)
-        .await
-        .context("failed to open BigQuery read session")?;
-
-    let meta           = session.metadata();
-    let estimated_rows = meta.estimated_rows;
-    info!(
-        n_streams       = session.n_streams(),
-        estimated_rows  = meta.estimated_rows,
-        estimated_bytes = meta.estimated_bytes,
-        "BigQuery read session opened",
-    );
-
-    if dry_run {
-        info!("dry-run: skipping load");
-        return Ok(());
-    }
-
-    let sources = session.into_sources()
-        .context("failed to split session into sources")?;
-
-    if download_benchmark {
-        return benchmark_download(sources, estimated_rows, progress_secs).await;
-    }
-
-    let output = output.context("--output is required unless --download-benchmark is set")?;
-
+/// Load from one or more sources. All sources run in parallel via
+/// `scatter_parallel`; a single-element vec works fine.
+async fn load_sources<S>(
+    output:            &Path,
+    partitions:        u32,
+    index_parallelism: usize,
+    progress_secs:     u64,
+    estimated_rows:    Option<u64>,
+    sources:           Vec<S>,
+) -> Result<()>
+where
+    S: KvSource + Send + 'static,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
     let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
+
     let loader_config = LoaderConfig {
         n_partitions:      partitions,
         index_parallelism,
@@ -211,9 +182,9 @@ async fn run_bq(
         ..LoaderConfig::default()
     };
 
-    info!(output = %output.display(), "loading snapshot");
+    info!(output = %output.display(), partitions, n_sources = sources.len(), "loading snapshot");
 
-    let loader = SnapshotLoader::new(&output, loader_config)
+    let loader = SnapshotLoader::new(output, loader_config)
         .context("failed to create SnapshotLoader")?;
 
     let scatter_result = loader
@@ -230,70 +201,93 @@ async fn run_bq(
         .context("index/finalize failed")?;
 
     index_reporter.stop();
-
-    info!(
-        n_keys           = stats.n_keys,
-        data_bytes       = stats.data_bytes,
-        scatter_secs     = stats.scatter_duration.as_secs_f64(),
-        index_secs       = stats.index_duration.as_secs_f64(),
-        "load complete",
-    );
-
+    log_stats(&stats);
     Ok(())
 }
 
+fn log_stats(stats: &frostmap_loader::LoadStats) {
+    info!(
+        n_keys       = stats.n_keys,
+        data_bytes   = stats.data_bytes,
+        scatter_secs = stats.scatter_duration.as_secs_f64(),
+        index_secs   = stats.index_duration.as_secs_f64(),
+        "load complete",
+    );
+}
+
 // ---------------------------------------------------------------------------
-// CSV load
+// Source constructors
 // ---------------------------------------------------------------------------
 
-async fn run_csv(
-    output:            PathBuf,
-    partitions:        u32,
-    index_parallelism: usize,
-    file:              Option<PathBuf>,
-    batch_size:        usize,
-) -> Result<()> {
-    let source: CsvSource<Box<dyn std::io::Read + Send>> = match &file {
+async fn open_bq_session(
+    project:         Option<String>,
+    table:           &str,
+    key_column:      &str,
+    value_column:    &str,
+    streams:         i32,
+    row_restriction: Option<&str>,
+    no_compression:  bool,
+) -> Result<BqReadSession> {
+    let (billing_project, table_resource) = parse_table(table, project.as_deref())?;
+
+    let config = BqSourceConfig {
+        project:             billing_project.clone(),
+        table:               table_resource,
+        key_column:          key_column.to_owned(),
+        value_column:        value_column.to_owned(),
+        n_streams:           streams,
+        row_restriction:     row_restriction.map(|s| s.to_owned()),
+        disable_compression: no_compression,
+    };
+
+    info!(
+        billing_project = %billing_project,
+        table,
+        key_column,
+        value_column,
+        compression = if no_compression { "off" } else { "LZ4_FRAME" },
+        row_restriction = row_restriction.unwrap_or(""),
+        "opening BigQuery read session",
+    );
+
+    let session = BqReadSession::open(config)
+        .await
+        .context("failed to open BigQuery read session")?;
+
+    let meta = session.metadata();
+    info!(
+        n_streams      = session.n_streams(),
+        estimated_rows = meta.estimated_rows,
+        estimated_bytes = meta.estimated_bytes,
+        "BigQuery read session opened",
+    );
+
+    Ok(session)
+}
+
+fn open_csv_source(
+    file:       Option<PathBuf>,
+    batch_size: usize,
+) -> Result<CsvSource<Box<dyn std::io::Read + Send>>> {
+    match &file {
         Some(path) => {
             info!(file = %path.display(), "loading CSV from file");
             let f = std::fs::File::open(path)
                 .with_context(|| format!("failed to open {}", path.display()))?;
-            CsvSource::new(Box::new(f), batch_size)
+            Ok(CsvSource::new(Box::new(f), batch_size))
         }
         None => {
             info!("loading CSV from stdin");
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)
                 .context("failed to read stdin")?;
-            CsvSource::new(Box::new(std::io::Cursor::new(buf)), batch_size)
+            Ok(CsvSource::new(Box::new(std::io::Cursor::new(buf)), batch_size))
         }
-    };
-
-    let loader_config = LoaderConfig {
-        n_partitions:      partitions,
-        index_parallelism,
-        ..LoaderConfig::default()
-    };
-
-    let loader = SnapshotLoader::new(&output, loader_config)
-        .context("failed to create SnapshotLoader")?;
-
-    let stats = loader
-        .load(&mut { source })
-        .await
-        .context("csv load failed")?;
-
-    info!(
-        n_keys       = stats.n_keys,
-        data_bytes   = stats.data_bytes,
-        "csv load complete",
-    );
-
-    Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Download benchmark
+// Download benchmark (BQ-specific)
 // ---------------------------------------------------------------------------
 
 async fn benchmark_download<S>(
