@@ -58,7 +58,6 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
         let dir = frostmap_format::meta::partition_dir(root, layout.n_partitions, i);
         let data_path  = dir.join("data.bin");
         let spill_path = dir.join("spill.bin");
-        let idx_path   = dir.join("index.idx");
 
         if !data_path.exists() {
             return Ok(None);
@@ -79,13 +78,11 @@ async fn check_scatter_done(root: &Path, layout: Layout) -> Result<Option<Scatte
             total_sum += part_sum;
             let vs = ValueSizeHistogram::from_histogram(&part_hist, part_sum, n_part);
             partitions.push(PartitionDone { n_keys: n_part, value_sizes: Some(vs) });
-        } else if idx_path.exists() {
-            use std::io::Read;
-            let mut f   = std::fs::File::open(&idx_path)?;
-            let mut buf = [0u8; frostmap_format::index::INDEX_HEADER_SIZE];
-            f.read_exact(&mut buf)?;
-            let n_part = frostmap_format::index::IndexHeader::from_bytes(&buf)?.n_keys;
-            partitions.push(PartitionDone { n_keys: n_part, value_sizes: None });
+        } else if frostmap_format::meta::index_path(root).exists() {
+            // index.all exists but no spill — partition was already indexed.
+            // We can't know per-partition key counts without index.done, so
+            // read it from the phase sentinel if available.
+            partitions.push(PartitionDone { n_keys: 0, value_sizes: None });
         } else {
             return Ok(None);
         }
@@ -278,14 +275,16 @@ impl SnapshotLoader {
                 .and_then(|s| serde_json::from_str(&s).ok());
 
         let meta = Meta {
-            format_version: FORMAT_VERSION,
-            n_partitions:   self.config.n_partitions,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys:         index_done.n_keys,
-            verify_seed:    DEFAULT_VERIFY_SEED,
-            created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            scatter:        scatter_val,
-            index:          index_val,
+            format_version:  FORMAT_VERSION,
+            n_partitions:    self.config.n_partitions,
+            hash_algorithm:  HASH_ALGORITHM.to_string(),
+            n_keys:          index_done.n_keys,
+            verify_seed:     DEFAULT_VERIFY_SEED,
+            created_at:      Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            index_offsets:   index_done.index_offsets,
+            index_n_buckets: index_done.index_n_buckets,
+            scatter:         scatter_val,
+            index:           index_val,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(frostmap_format::Error::from)?;
         tokio::fs::write(self.root.join("meta.json"), json).await?;

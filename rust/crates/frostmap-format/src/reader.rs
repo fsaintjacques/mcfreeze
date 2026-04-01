@@ -5,77 +5,97 @@ use memmap2::MmapOptions;
 
 use crate::{
     data::pread,
-    index::{self, Bucket, IndexHeader, fingerprint, verify_fingerprint, compact_fingerprint,
-            home_position, probe_group, GROUP_SIZE, NO_MATCH, INDEX_HEADER_SIZE},
-    meta::{Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
+    index::{self, Bucket, fingerprint, verify_fingerprint, compact_fingerprint,
+            home_position, probe_group, GROUP_SIZE, NO_MATCH},
+    meta::{Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE, index_path, partition_dir},
     Result,
 };
 
 // ---------------------------------------------------------------------------
-// PartitionReader
+// PartitionSlice — per-partition view into the unified index mmap
 // ---------------------------------------------------------------------------
 
-/// Read-only view of one partition.
-///
-/// `index.idx` is memory-mapped (past the header) with `MADV_RANDOM`; the OS
-/// page cache provides hot-key residency without explicit caching logic.
-/// `data.bin` is opened for on-demand `pread` calls — never mmap'd.
-struct PartitionReader {
-    /// Read-only mmap of the bucket array (bytes after the 64-byte header).
-    buckets:   memmap2::Mmap,
+/// Per-partition metadata: byte range within the shared index mmap + data file.
+struct PartitionSlice {
+    /// Byte offset of this partition's bucket array within the index mmap.
+    bucket_offset: usize,
+    /// Number of logical buckets in this partition.
+    n_buckets:     usize,
     /// Open file descriptor for `pread` calls into `data.bin`.
-    data:      File,
+    data:          File,
 }
 
-impl PartitionReader {
-    fn open(dir: &Path) -> Result<Self> {
-        // --- index.idx ---
-        let idx_file = File::open(dir.join("index.idx"))?;
-        let idx_len  = idx_file.metadata()?.len() as usize;
+// ---------------------------------------------------------------------------
+// SnapshotReader
+// ---------------------------------------------------------------------------
 
-        // Map the entire file; we'll slice off the header below.
-        // SAFETY: the file is read-only and we hold it open for the mmap lifetime.
-        let full_map = unsafe { MmapOptions::new().map(&idx_file)? };
+/// Read-only handle to a complete snapshot directory.
+///
+/// The unified `index.all` is memory-mapped once; each partition is a slice
+/// within that mapping. `data.bin` files are opened for on-demand `pread`.
+///
+/// ```text
+/// let r = SnapshotReader::open("/snapshots/v42")?;
+/// if let Some(val) = r.get(b"my-key")? {
+///     // use val
+/// }
+/// ```
+pub struct SnapshotReader {
+    layout:      Layout,
+    verify_seed: u64,
+    /// Single mmap of `index.all` (all partitions, 2MB-aligned).
+    index_mmap:  memmap2::Mmap,
+    partitions:  Vec<PartitionSlice>,
+}
 
-        // Parse the header from the first 64 bytes.
-        let hdr_bytes: &[u8; INDEX_HEADER_SIZE] = full_map[..INDEX_HEADER_SIZE]
-            .try_into()
-            .unwrap();
-        let header = IndexHeader::from_bytes(hdr_bytes)?;
+impl SnapshotReader {
+    /// Open a snapshot directory.  Reads `meta.json`, validates the format,
+    /// mmaps `index.all`, then opens every partition's `data.bin`.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref();
 
-        // Map only the bucket region (skip the header).
-        let buckets = unsafe {
-            MmapOptions::new()
-                .offset(INDEX_HEADER_SIZE as u64)
-                .len(idx_len - INDEX_HEADER_SIZE)
-                .map(&idx_file)?
-        };
+        let json   = fs::read_to_string(root.join("meta.json"))?;
+        let meta: Meta = serde_json::from_str(&json)?;
+        let layout = meta.layout()?;
 
-        // Advise random access — readahead would waste I/O and pollute the cache.
-        #[cfg(unix)]
-        buckets.advise(memmap2::Advice::Random)?;
+        // Single mmap of index.all.
+        let idx_file  = File::open(index_path(root))?;
+        let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
 
-        // --- data.bin ---
-        let data = File::open(dir.join("data.bin"))?;
+        // Advise huge pages on Linux for TLB efficiency.
+        #[cfg(target_os = "linux")]
+        index_mmap.advise(memmap2::Advice::HugePage)?;
 
-        let _ = header; // n_buckets is derived from the mmap length at probe time
-        Ok(Self { buckets, data })
+        let n = layout.n_partitions as usize;
+        let mut partitions = Vec::with_capacity(n);
+        for i in 0..n {
+            let data = File::open(partition_dir(root, layout.n_partitions, i).join("data.bin"))?;
+            partitions.push(PartitionSlice {
+                bucket_offset: meta.index_offsets[i] as usize,
+                n_buckets:     meta.index_n_buckets[i] as usize,
+                data,
+            });
+        }
+
+        Ok(Self { layout, verify_seed: meta.verify_seed, index_mmap, partitions })
     }
 
-    /// Look up `fp` in the bucket array and read the value from `data.bin`.
-    ///
-    /// With 32-bit truncated fingerprints, multiple keys can share the same
-    /// bucket fingerprint. The reader uses SIMD `probe_group` to find
-    /// candidates, then verifies each via the 64-bit value header fingerprint.
-    fn get(&self, key: &[u8], fp: u64, verify_seed: u64) -> Result<Option<Vec<u8>>> {
-        let table: &[Bucket] = bytemuck::cast_slice(&self.buckets);
-        let n = table.len();
+    /// Look up `key` and return its value, or `None` if not present.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let fp  = fingerprint(key);
+        let idx = self.layout.partition_of(fp);
+        let ps  = &self.partitions[idx];
+
+        let n = ps.n_buckets;
         if n == 0 {
             return Ok(None);
         }
 
+        let bucket_bytes = &self.index_mmap[ps.bucket_offset..ps.bucket_offset + n * 8];
+        let table: &[Bucket] = bytemuck::cast_slice(bucket_bytes);
+
         let cfp = compact_fingerprint(fp);
-        let expected_vfp = verify_fingerprint(key, verify_seed);
+        let expected_vfp = verify_fingerprint(key, self.verify_seed);
         let mut pos   = home_position(fp, n);
         let mut steps = 0usize;
 
@@ -86,12 +106,10 @@ impl PartitionReader {
                 if result.offsets[i] == NO_MATCH {
                     continue;
                 }
-                // Candidate — read the value header and verify.
                 let byte_offset = result.offsets[i] as u64 * VALUE_ALIGNMENT;
-                if let Some(value) = self.read_and_verify(byte_offset, expected_vfp)? {
+                if let Some(value) = read_and_verify(&ps.data, byte_offset, expected_vfp)? {
                     return Ok(Some(value));
                 }
-                // Verify mismatch — 32-bit collision, try next candidate.
             }
 
             if result.done {
@@ -106,79 +124,31 @@ impl PartitionReader {
     }
 }
 
-impl PartitionReader {
-    /// Read the value at `byte_offset`, check the verify fingerprint, and
-    /// return the value bytes (without the header) on match.
-    fn read_and_verify(&self, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
-        let first_block = pread(&self.data, byte_offset, VALUE_ALIGNMENT as u32)?;
-        if first_block.len() < VALUE_HEADER_SIZE {
-            return Ok(None);
-        }
-
-        let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
-        if stored_vfp != expected_vfp {
-            return Ok(None);
-        }
-
-        let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
-        let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
-
-        if on_disk_size <= VALUE_ALIGNMENT as usize {
-            Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
-        } else {
-            let total = match u32::try_from(on_disk_size) {
-                Ok(s)  => index::aligned_size(s) as u32,
-                Err(_) => return Ok(None),
-            };
-            let raw = pread(&self.data, byte_offset, total)?;
-            Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SnapshotReader
-// ---------------------------------------------------------------------------
-
-/// Read-only handle to a complete snapshot directory.
-///
-/// ```text
-/// let r = SnapshotReader::open("/snapshots/v42")?;
-/// if let Some(val) = r.get(b"my-key")? {
-///     // use val
-/// }
-/// ```
-pub struct SnapshotReader {
-    layout:      Layout,
-    verify_seed: u64,
-    partitions:  Vec<PartitionReader>,
-}
-
-impl SnapshotReader {
-    /// Open a snapshot directory.  Reads `meta.json`, validates the format,
-    /// then opens every partition.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref();
-
-        let json   = fs::read_to_string(root.join("meta.json"))?;
-        let meta: Meta = serde_json::from_str(&json)?;
-        let layout = meta.layout()?;
-
-        let partitions = (0..layout.n_partitions as usize)
-            .map(|i| {
-                let dir = crate::meta::partition_dir(root, layout.n_partitions, i);
-                PartitionReader::open(&dir)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(Self { layout, verify_seed: meta.verify_seed, partitions })
+/// Read the value at `byte_offset`, check the verify fingerprint, and
+/// return the value bytes (without the header) on match.
+fn read_and_verify(data: &File, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
+    let first_block = pread(data, byte_offset, VALUE_ALIGNMENT as u32)?;
+    if first_block.len() < VALUE_HEADER_SIZE {
+        return Ok(None);
     }
 
-    /// Look up `key` and return its value, or `None` if not present.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let fp  = fingerprint(key);
-        let idx = self.layout.partition_of(fp);
-        self.partitions[idx].get(key, fp, self.verify_seed)
+    let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
+    if stored_vfp != expected_vfp {
+        return Ok(None);
+    }
+
+    let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
+    let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
+
+    if on_disk_size <= VALUE_ALIGNMENT as usize {
+        Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+    } else {
+        let total = match u32::try_from(on_disk_size) {
+            Ok(s)  => index::aligned_size(s) as u32,
+            Err(_) => return Ok(None),
+        };
+        let raw = pread(data, byte_offset, total)?;
+        Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
     }
 }
 
@@ -285,20 +255,16 @@ mod tests {
         use crate::index::{compact_fingerprint, fingerprint};
         use std::collections::HashMap;
 
-        // Brute-force: collect keys by compact fingerprint until a collision.
-        // Birthday bound: ~65K keys for 50% chance of a u32 collision.
         let mut seen: HashMap<u32, String> = HashMap::new();
         for i in 0u64..200_000 {
             let k = format!("collision-{i}");
             let fp = fingerprint(k.as_bytes());
             let cfp = compact_fingerprint(fp);
             if let Some(prev) = seen.get(&cfp) {
-                // Found a collision: prev and k share the same cfp.
                 let pairs: &[(&[u8], &[u8])] = &[
                     (prev.as_bytes(), b"value-a"),
                     (k.as_bytes(),    b"value-b"),
                 ];
-                // Use 1 partition so both keys land in the same partition.
                 let dir = build_snapshot(pairs, 1);
                 let r   = SnapshotReader::open(dir.path()).unwrap();
 

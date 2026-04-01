@@ -1,12 +1,13 @@
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::Utc;
 
 use crate::{
     data::AlignedWriter,
-    index::{self, IndexHeader, RawEntry, fingerprint},
-    meta::{DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM, Layout, Meta, partition_dir},
+    index::{self, Bucket, RawEntry, fingerprint},
+    meta::{DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM,
+           Layout, Meta, index_path, partition_dir},
     Result,
 };
 
@@ -14,57 +15,38 @@ use crate::{
 // PartitionWriter
 // ---------------------------------------------------------------------------
 
-/// Writes one partition's `data.bin` and `index.idx`.
+/// Writes one partition's `data.bin` and accumulates index entries.
 ///
 /// Phase 1 (`write`): stream key-value pairs → `data.bin`.
-/// Phase 2 (`finish`): build Robin Hood index → `index.idx`.
-pub struct PartitionWriter {
-    dir:     PathBuf,
+/// Phase 2 (`build_index`): flush data, build Robin Hood table in memory.
+struct PartitionWriter {
     data:    AlignedWriter<File>,
     entries: Vec<RawEntry>,
 }
 
 impl PartitionWriter {
-    fn new(dir: PathBuf, verify_seed: u64) -> Result<Self> {
-        fs::create_dir_all(&dir)?;
+    fn new(dir: &Path, verify_seed: u64) -> Result<Self> {
+        fs::create_dir_all(dir)?;
         let data_file = File::create(dir.join("data.bin"))?;
         Ok(Self {
-            dir,
             data: AlignedWriter::new(data_file, verify_seed),
             entries: Vec::new(),
         })
     }
 
     /// Record one key-value pair into this partition.
-    ///
-    /// The caller must have already verified that this key belongs to this
-    /// partition (i.e. `fingerprint & (N-1) == partition_index`).
-    pub fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
+    fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
         let (aligned_offset, _on_disk_size) = self.data.write_value(key, value)?;
         self.entries.push(RawEntry::new(fp, aligned_offset)?);
         Ok(())
     }
 
-    /// Build the Robin Hood index and write `index.idx`.
-    pub fn finish(self) -> Result<u64> {
+    /// Flush `data.bin` and build the Robin Hood index in memory.
+    fn build_index(self) -> Result<(Vec<Bucket>, u64)> {
         self.data.finish()?;
-
-        let n_keys        = self.entries.len() as u64;
-        let (table, _)    = index::build(&self.entries)?;
-        let n_buckets     = table.len() as u64;
-
-        let header = IndexHeader { n_buckets, n_keys };
-        let mut idx = File::create(self.dir.join("index.idx"))?;
-
-        use std::io::Write;
-        idx.write_all(&header.to_bytes())?;
-
-        // SAFETY: Bucket is Pod (bytemuck) so the slice can be viewed as bytes.
-        let bytes = bytemuck::cast_slice::<_, u8>(&table);
-        idx.write_all(bytes)?;
-        idx.flush()?;
-
-        Ok(n_keys)
+        let n_keys     = self.entries.len() as u64;
+        let (table, _) = index::build(&self.entries)?;
+        Ok((table, n_keys))
     }
 }
 
@@ -97,7 +79,7 @@ impl SnapshotWriter {
         fs::create_dir_all(root)?;
 
         let partitions = (0..n_partitions as usize)
-            .map(|i| PartitionWriter::new(partition_dir(root, n_partitions, i), verify_seed))
+            .map(|i| PartitionWriter::new(&partition_dir(root, n_partitions, i), verify_seed))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self { layout, verify_seed, partitions })
@@ -110,25 +92,34 @@ impl SnapshotWriter {
         self.partitions[idx].write(key, fp, value)
     }
 
-    /// Finish all partitions, then write `meta.json` as the completion signal.
+    /// Build all partition indexes, write `index.all`, then write `meta.json`.
     pub fn finish(self, root: impl AsRef<Path>) -> Result<()> {
         let root = root.as_ref();
         let n_partitions = self.layout.n_partitions;
 
+        // Build all partition tables in memory.
+        let mut tables       = Vec::with_capacity(n_partitions as usize);
         let mut n_keys_total = 0u64;
         for pw in self.partitions {
-            n_keys_total += pw.finish()?;
+            let (table, n_keys) = pw.build_index()?;
+            n_keys_total += n_keys;
+            tables.push(table);
         }
 
+        // Write unified index.all with 2MB-aligned partitions.
+        let info = index::write_unified_index(&index_path(root), &tables)?;
+
         let meta = Meta {
-            format_version: FORMAT_VERSION,
+            format_version:  FORMAT_VERSION,
             n_partitions,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys:         n_keys_total,
-            verify_seed:    self.verify_seed,
-            created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            scatter:        None,
-            index:          None,
+            hash_algorithm:  HASH_ALGORITHM.to_string(),
+            n_keys:          n_keys_total,
+            verify_seed:     self.verify_seed,
+            created_at:      Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            index_offsets:   info.offsets,
+            index_n_buckets: info.n_buckets,
+            scatter:         None,
+            index:           None,
         };
 
         let json = serde_json::to_string_pretty(&meta)?;
@@ -191,10 +182,10 @@ mod tests {
         w.finish(dir.path()).unwrap();
 
         assert!(dir.path().join("meta.json").exists());
+        assert!(index_path(dir.path()).exists(), "index.all missing");
         for i in 0..4 {
             let p = partition_dir(dir.path(), 4, i);
-            assert!(p.join("data.bin").exists(),  "data.bin missing for part-{i}");
-            assert!(p.join("index.idx").exists(), "index.idx missing for part-{i}");
+            assert!(p.join("data.bin").exists(), "data.bin missing for part-{i}");
         }
     }
 
@@ -210,6 +201,8 @@ mod tests {
         assert_eq!(meta.n_partitions,   4);
         assert_eq!(meta.n_keys,         1);
         assert_eq!(meta.verify_seed,    DEFAULT_VERIFY_SEED);
+        assert_eq!(meta.index_offsets.len(),   4);
+        assert_eq!(meta.index_n_buckets.len(), 4);
     }
 
     #[test]
@@ -229,9 +222,6 @@ mod tests {
 
     #[test]
     fn index_bucket_count_respects_fill_rate() {
-        use crate::index::IndexHeader;
-        use std::io::Read;
-
         let (dir, mut w) = temp_snapshot(1);
         let n = 100usize;
         for i in 0..n {
@@ -239,14 +229,10 @@ mod tests {
         }
         w.finish(dir.path()).unwrap();
 
-        let idx_path = partition_dir(dir.path(), 1, 0).join("index.idx");
-        let mut f    = File::open(&idx_path).unwrap();
-        let mut hdr  = [0u8; 64];
-        f.read_exact(&mut hdr).unwrap();
-        let header   = IndexHeader::from_bytes(&hdr).unwrap();
+        let raw  = fs::read_to_string(dir.path().join("meta.json")).unwrap();
+        let meta: Meta = serde_json::from_str(&raw).unwrap();
 
         let expected = ((n as f64) / FILL_RATE).ceil() as u64;
-        assert_eq!(header.n_buckets, expected);
-        assert_eq!(header.n_keys,    n as u64);
+        assert_eq!(meta.index_n_buckets[0], expected);
     }
 }

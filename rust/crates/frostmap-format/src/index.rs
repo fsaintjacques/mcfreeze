@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh64::xxh64;
 
 use crate::{
-    meta::{FILL_RATE, VALUE_ALIGNMENT},
+    meta::{FILL_RATE, INDEX_ALIGNMENT, VALUE_ALIGNMENT},
     Error, Result,
 };
 
@@ -14,9 +14,6 @@ use crate::{
 /// `NO_MATCH` (u32::MAX) is used as a sentinel in `ProbeResult::offsets`.
 const MAX_OFFSET: u32 = u32::MAX - 1;
 const MAX_PSL:    u8  = u8::MAX;
-
-pub const INDEX_MAGIC: [u8; 8] = *b"KVFXIDX\n";
-pub const INDEX_HEADER_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Fingerprinting
@@ -78,47 +75,6 @@ impl Bucket {
     #[inline]
     pub fn byte_offset(self) -> u64 {
         self.offset as u64 * VALUE_ALIGNMENT
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Index header (64 bytes, one cache line)
-// ---------------------------------------------------------------------------
-
-/// Written at the start of every `index.idx` file.
-pub struct IndexHeader {
-    pub n_buckets: u64,
-    pub n_keys:    u64,
-}
-
-impl IndexHeader {
-    /// Serialize to the 64-byte on-disk representation.
-    pub fn to_bytes(&self) -> [u8; INDEX_HEADER_SIZE] {
-        let mut buf = [0u8; INDEX_HEADER_SIZE];
-        buf[0..8].copy_from_slice(&INDEX_MAGIC);
-        buf[8..10].copy_from_slice(&(crate::meta::FORMAT_VERSION as u16).to_le_bytes());
-        // bytes [10..16]: pad (zero)
-        buf[16..24].copy_from_slice(&self.n_buckets.to_le_bytes());
-        buf[24..32].copy_from_slice(&self.n_keys.to_le_bytes());
-        // bytes [32..64]: reserved (zero)
-        buf
-    }
-
-    /// Deserialize from a 64-byte buffer.
-    pub fn from_bytes(buf: &[u8; INDEX_HEADER_SIZE]) -> Result<Self> {
-        if buf[0..8] != INDEX_MAGIC {
-            return Err(Error::InvalidMagic);
-        }
-        let version = u16::from_le_bytes(buf[8..10].try_into().unwrap()) as u32;
-        if version != crate::meta::FORMAT_VERSION {
-            return Err(Error::VersionMismatch {
-                expected: crate::meta::FORMAT_VERSION,
-                got:      version,
-            });
-        }
-        let n_buckets = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-        let n_keys    = u64::from_le_bytes(buf[24..32].try_into().unwrap());
-        Ok(Self { n_buckets, n_keys })
     }
 }
 
@@ -408,6 +364,54 @@ unsafe fn vgetq_lane_u32_dyn(v: std::arch::aarch64::uint32x4_t, i: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Unified index file
+// ---------------------------------------------------------------------------
+
+/// Result of writing the unified `index.all` file.
+pub struct UnifiedIndexInfo {
+    /// Byte offset of each partition's bucket array within `index.all`.
+    pub offsets:   Vec<u64>,
+    /// Number of logical buckets per partition.
+    pub n_buckets: Vec<u64>,
+}
+
+/// Write all partition bucket tables into a single `index.all` file.
+///
+/// Each partition is padded to `INDEX_ALIGNMENT` (2 MiB) boundaries except
+/// the last. Returns the offsets and bucket counts for `meta.json`.
+pub fn write_unified_index(
+    path: &std::path::Path,
+    tables: &[Vec<Bucket>],
+) -> Result<UnifiedIndexInfo> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut file = std::fs::File::create(path)?;
+    let mut offsets   = Vec::with_capacity(tables.len());
+    let mut n_buckets = Vec::with_capacity(tables.len());
+    let mut file_offset: u64 = 0;
+
+    for (i, table) in tables.iter().enumerate() {
+        offsets.push(file_offset);
+        n_buckets.push(table.len() as u64);
+
+        let bytes = bytemuck::cast_slice::<Bucket, u8>(table);
+        file.write_all(bytes)?;
+        file_offset += bytes.len() as u64;
+
+        // Pad to next 2 MiB boundary (skip for last partition).
+        if i + 1 < tables.len() && file_offset % INDEX_ALIGNMENT != 0 {
+            let aligned = (file_offset + INDEX_ALIGNMENT - 1) & !(INDEX_ALIGNMENT - 1);
+            file.set_len(aligned)?;
+            file.seek(SeekFrom::Start(aligned))?;
+            file_offset = aligned;
+        }
+    }
+    file.flush()?;
+
+    Ok(UnifiedIndexInfo { offsets, n_buckets })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -557,22 +561,6 @@ mod tests {
                 e.fingerprint
             );
         }
-    }
-
-    #[test]
-    fn header_roundtrip() {
-        let hdr = IndexHeader { n_buckets: 12345, n_keys: 9999 };
-        let bytes = hdr.to_bytes();
-        let decoded = IndexHeader::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.n_buckets, 12345);
-        assert_eq!(decoded.n_keys,    9999);
-    }
-
-    #[test]
-    fn header_wrong_magic() {
-        let mut bytes = IndexHeader { n_buckets: 1, n_keys: 1 }.to_bytes();
-        bytes[0] = 0xFF;
-        assert!(IndexHeader::from_bytes(&bytes).is_err());
     }
 
     // --- probe_group correctness ---

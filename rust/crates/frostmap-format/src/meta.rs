@@ -21,6 +21,10 @@ pub const VALUE_ALIGNMENT: u64 = 64;
 /// on PSL overflow, so the fill rate only affects the common-case table size.
 pub const FILL_RATE: f64 = 0.95;
 
+/// Alignment of each partition's bucket array within `index.all` (2 MiB).
+/// Matches the huge page size on x86-64 Linux for `MADV_HUGEPAGE`.
+pub const INDEX_ALIGNMENT: u64 = 2 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
@@ -69,6 +73,11 @@ pub fn data_dir(root: &std::path::Path) -> std::path::PathBuf {
     root.join("data")
 }
 
+/// Path to the unified index file: `<root>/index.all`.
+pub fn index_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("index.all")
+}
+
 /// Zero-padded partition directory path (e.g. `<root>/data/part-07` for N=64, i=7).
 pub fn partition_dir(root: &std::path::Path, n_partitions: u32, i: usize) -> std::path::PathBuf {
     let width = format!("{}", n_partitions - 1).len();
@@ -93,6 +102,11 @@ pub struct Meta {
     /// Must be non-zero in V3 snapshots.
     pub verify_seed:     u64,
     pub created_at:      String,
+    /// Byte offset of each partition's bucket array within `index.all`.
+    /// Each offset is 2 MiB-aligned for huge page backing.
+    pub index_offsets:   Vec<u64>,
+    /// Number of logical buckets per partition.
+    pub index_n_buckets: Vec<u64>,
     /// Embedded contents of `scatter.done` (opaque to kv-format).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scatter:         Option<serde_json::Value>,
@@ -108,6 +122,14 @@ impl Meta {
             return Err(Error::VersionMismatch {
                 expected: FORMAT_VERSION,
                 got:      self.format_version,
+            });
+        }
+        let n = self.n_partitions as usize;
+        if self.index_offsets.len() != n || self.index_n_buckets.len() != n {
+            return Err(Error::InvalidIndexMetadata {
+                expected: n,
+                got_offsets:  self.index_offsets.len(),
+                got_buckets: self.index_n_buckets.len(),
             });
         }
         Layout::new(self.n_partitions)
@@ -155,14 +177,16 @@ mod tests {
     #[test]
     fn meta_layout_roundtrip() {
         let meta = Meta {
-            format_version: FORMAT_VERSION,
-            n_partitions:   64,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys:         0,
-            verify_seed:    DEFAULT_VERIFY_SEED,
-            created_at:     "2026-03-27T00:00:00Z".to_string(),
-            scatter:        None,
-            index:          None,
+            format_version:  FORMAT_VERSION,
+            n_partitions:    64,
+            hash_algorithm:  HASH_ALGORITHM.to_string(),
+            n_keys:          0,
+            verify_seed:     DEFAULT_VERIFY_SEED,
+            created_at:      "2026-03-27T00:00:00Z".to_string(),
+            index_offsets:   vec![0; 64],
+            index_n_buckets: vec![0; 64],
+            scatter:         None,
+            index:           None,
         };
         let layout = meta.layout().unwrap();
         assert_eq!(layout.n_partitions, 64);
@@ -171,14 +195,33 @@ mod tests {
     #[test]
     fn meta_rejects_old_format_version() {
         let meta = Meta {
-            format_version: 2, // old
-            n_partitions:   64,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys:         0,
-            verify_seed:    DEFAULT_VERIFY_SEED,
-            created_at:     "2026-03-27T00:00:00Z".to_string(),
-            scatter:        None,
-            index:          None,
+            format_version:  2,
+            n_partitions:    64,
+            hash_algorithm:  HASH_ALGORITHM.to_string(),
+            n_keys:          0,
+            verify_seed:     DEFAULT_VERIFY_SEED,
+            created_at:      "2026-03-27T00:00:00Z".to_string(),
+            index_offsets:   vec![0; 64],
+            index_n_buckets: vec![0; 64],
+            scatter:         None,
+            index:           None,
+        };
+        assert!(meta.layout().is_err());
+    }
+
+    #[test]
+    fn meta_rejects_mismatched_index_metadata() {
+        let meta = Meta {
+            format_version:  FORMAT_VERSION,
+            n_partitions:    4,
+            hash_algorithm:  HASH_ALGORITHM.to_string(),
+            n_keys:          0,
+            verify_seed:     DEFAULT_VERIFY_SEED,
+            created_at:      "2026-03-27T00:00:00Z".to_string(),
+            index_offsets:   vec![0; 4],
+            index_n_buckets: vec![0; 3], // wrong length
+            scatter:         None,
+            index:           None,
         };
         assert!(meta.layout().is_err());
     }

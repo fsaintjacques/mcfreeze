@@ -83,7 +83,10 @@ impl SpillReader {
         file.read_exact(&mut hdr)?;
 
         if hdr[..8] != SPILL_MAGIC {
-            return Err(frostmap_format::Error::InvalidMagic.into());
+            return Err(LoaderError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid magic bytes in spill header",
+            )));
         }
         let count = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
         Ok(Self { file, count })

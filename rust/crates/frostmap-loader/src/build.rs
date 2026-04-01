@@ -1,18 +1,14 @@
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bytemuck::cast_slice;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use rayon::prelude::*;
 
 use frostmap_format::{
-    index::{Bucket, IndexHeader, RawEntry, INDEX_HEADER_SIZE},
-    meta::Layout,
+    index::{self, Bucket, RawEntry},
+    meta::{index_path, Layout},
 };
 
 use crate::{
@@ -26,11 +22,10 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PartitionIndexDone {
-    pub n_keys:      u64,
-    pub n_buckets:   u64,
-    pub fill_rate:   f64,
-    pub retries:     u64,
-    pub index_bytes: u64,
+    pub n_keys:    u64,
+    pub n_buckets: u64,
+    pub fill_rate: f64,
+    pub retries:   u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +41,8 @@ pub struct IndexDone {
     pub wall_secs:              Option<f64>,
     pub partitions_per_sec:     Option<f64>,
     pub partitions:             Vec<PartitionIndexDone>,
+    pub index_offsets:          Vec<u64>,
+    pub index_n_buckets:        Vec<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +71,7 @@ impl IndexBuildPhase {
         }
     }
 
-    /// Build all partition indexes in parallel.
+    /// Build all partition indexes in parallel, write unified `index.all`.
     ///
     /// Idempotent at the phase level: if `index.done` already exists the phase
     /// is skipped entirely and its stats are returned from the file.
@@ -97,30 +94,50 @@ impl IndexBuildPhase {
             .num_threads(self.parallelism)
             .build()?;
 
-        let results: Vec<Result<PartitionIndexDone, LoaderError>> = pool.install(|| {
+        // Build all partition tables in parallel.
+        let results: Vec<Result<(Vec<Bucket>, PartitionIndexDone), LoaderError>> = pool.install(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
                     let dir = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i);
-                    let part   = build_partition(&dir)?;
+                    let result = build_partition_table(&dir)?;
                     if let Some(ref f) = cb {
                         f(1, 0);
                     }
-                    Ok(part)
+                    Ok(result)
                 })
                 .collect()
         });
 
-        let partitions: Vec<PartitionIndexDone> = results.into_iter().collect::<Result<_, _>>()?;
+        let mut tables     = Vec::with_capacity(n);
+        let mut partitions = Vec::with_capacity(n);
+        for r in results {
+            let (table, part) = r?;
+            tables.push(table);
+            partitions.push(part);
+        }
+
+        // Write unified index.all.
+        let info = index::write_unified_index(&index_path(root), &tables)?;
+
+        // Remove spill files now that index.all is written.
+        for i in 0..n {
+            let spill = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i)
+                .join("spill.bin");
+            if spill.exists() {
+                std::fs::remove_file(&spill)?;
+            }
+        }
 
         let wall_secs = start.elapsed().as_secs_f64();
 
         // Aggregate stats.
         let n_keys                = partitions.iter().map(|p| p.n_keys).sum();
         let n_buckets             = partitions.iter().map(|p| p.n_buckets).sum();
-        let index_bytes           = partitions.iter().map(|p| p.index_bytes).sum();
         let total_retries         = partitions.iter().map(|p| p.retries).sum();
         let n_overflow_partitions = partitions.iter().filter(|p| p.retries > 0).count() as u64;
+        let index_bytes           = std::fs::metadata(index_path(root))
+            .map(|m| m.len()).unwrap_or(0);
 
         let fill_rates: Vec<f64> = partitions.iter().map(|p| p.fill_rate).collect();
         let fill_rate_min  = fill_rates.iter().cloned().fold(f64::INFINITY,  f64::min);
@@ -146,6 +163,8 @@ impl IndexBuildPhase {
             wall_secs:             Some(wall_secs),
             partitions_per_sec,
             partitions,
+            index_offsets:   info.offsets,
+            index_n_buckets: info.n_buckets,
         };
 
         let json = serde_json::to_string_pretty(&done)
@@ -157,43 +176,20 @@ impl IndexBuildPhase {
 }
 
 // ---------------------------------------------------------------------------
-// Per-partition index build
+// Per-partition table build (no I/O except reading spill.bin)
 // ---------------------------------------------------------------------------
 
-/// Load `spill.bin`, build Robin Hood table, write `index.idx`.
+/// Read `spill.bin` and build the Robin Hood table in memory.
 ///
-/// Idempotent: if `index.idx` already exists (and `spill.bin` is absent) the
-/// partition was successfully indexed in a previous run — skip it and return
-/// the key count from the header.
-///
-/// To avoid leaving a partial index visible on failure, the file is written to
-/// `index.idx.tmp` and renamed to `index.idx` only after a successful flush.
-/// `spill.bin` is removed only after the rename succeeds.
-fn build_partition(dir: &Path) -> Result<PartitionIndexDone, LoaderError> {
-    let idx_path   = dir.join("index.idx");
+/// Returns the bucket table and per-partition stats.
+fn build_partition_table(dir: &Path) -> Result<(Vec<Bucket>, PartitionIndexDone), LoaderError> {
     let spill_path = dir.join("spill.bin");
 
-    // --- Skip if already indexed ---
-    if idx_path.exists() && !spill_path.exists() {
-        use std::io::Read;
-        let mut f   = File::open(&idx_path)?;
-        let mut buf = [0u8; INDEX_HEADER_SIZE];
-        f.read_exact(&mut buf)?;
-        let hdr         = IndexHeader::from_bytes(&buf)?;
-        let index_bytes = INDEX_HEADER_SIZE as u64
-            + hdr.n_buckets * size_of::<Bucket>() as u64;
-        let fill_rate   = if hdr.n_buckets > 0 {
-            hdr.n_keys as f64 / hdr.n_buckets as f64
-        } else {
-            0.0
-        };
-        return Ok(PartitionIndexDone {
-            n_keys:      hdr.n_keys,
-            n_buckets:   hdr.n_buckets,
-            fill_rate,
-            retries:     0,
-            index_bytes,
-        });
+    if !spill_path.exists() {
+        // Empty partition (no keys routed here).
+        return Ok((Vec::new(), PartitionIndexDone {
+            n_keys: 0, n_buckets: 0, fill_rate: 0.0, retries: 0,
+        }));
     }
 
     let spill = SpillReader::open(&spill_path)?;
@@ -208,7 +204,6 @@ fn build_partition(dir: &Path) -> Result<PartitionIndexDone, LoaderError> {
 
     let (table, retries) = frostmap_format::index::build(&entries)?;
     let n_buckets        = table.len() as u64;
-    let index_bytes      = INDEX_HEADER_SIZE as u64 + n_buckets * size_of::<Bucket>() as u64;
     let fill_rate        = if n_buckets > 0 { n as f64 / n_buckets as f64 } else { 0.0 };
 
     if retries > 0 {
@@ -221,21 +216,9 @@ fn build_partition(dir: &Path) -> Result<PartitionIndexDone, LoaderError> {
         );
     }
 
-    // Write to a tmp file, then atomically rename.
-    let tmp_path = dir.join("index.idx.tmp");
-    {
-        let mut f = BufWriter::new(File::create(&tmp_path)?);
-        let header = IndexHeader { n_buckets, n_keys: n as u64 };
-        f.write_all(&header.to_bytes())?;
-        f.write_all(cast_slice::<Bucket, u8>(&table))?;
-        f.flush()?;
-    }
-    std::fs::rename(&tmp_path, &idx_path)?;
-
-    // Remove spill only after the index is durably in place.
-    std::fs::remove_file(&spill_path)?;
-
-    Ok(PartitionIndexDone { n_keys: n as u64, n_buckets, fill_rate, retries: retries as u64, index_bytes })
+    Ok((table, PartitionIndexDone {
+        n_keys: n as u64, n_buckets, fill_rate, retries: retries as u64,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -247,14 +230,9 @@ mod tests {
     use super::*;
     use crate::scatter::ScatterPhase;
     use crate::source::VecBatch;
-    use frostmap_format::index::IndexHeader;
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
-
-    fn part_dir(root: &std::path::Path, n: u32, i: usize) -> std::path::PathBuf {
-        frostmap_format::meta::partition_dir(root, n, i)
-    }
 
     async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
         let dir   = TempDir::new().unwrap();
@@ -268,19 +246,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_produces_index_files() {
+    async fn build_produces_index_all() {
         let dir = scatter_and_build(&[(b"k", b"v")], 4).await;
-        for i in 0..4 {
-            let idx = part_dir(dir.path(), 4, i).join("index.idx");
-            assert!(idx.exists(), "{idx:?}");
-        }
+        assert!(index_path(dir.path()).exists(), "index.all should exist");
     }
 
     #[tokio::test]
     async fn spill_files_removed_after_build() {
         let dir = scatter_and_build(&[(b"k", b"v")], 4).await;
         for i in 0..4 {
-            let spill = part_dir(dir.path(), 4, i).join("spill.bin");
+            let spill = frostmap_format::meta::partition_dir(dir.path(), 4, i).join("spill.bin");
             assert!(!spill.exists(), "spill.bin should be removed: {spill:?}");
         }
     }
@@ -290,24 +265,15 @@ mod tests {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")];
         let dir = scatter_and_build(pairs, 1).await;
 
-        let hdr_bytes = {
-            use std::io::Read;
-            let mut f   = File::open(part_dir(dir.path(), 1, 0).join("index.idx")).unwrap();
-            let mut buf = [0u8; 64];
-            f.read_exact(&mut buf).unwrap();
-            buf
-        };
-        let hdr = IndexHeader::from_bytes(&hdr_bytes).unwrap();
-        assert_eq!(hdr.n_keys, 3);
+        let done_json = std::fs::read_to_string(dir.path().join("index.done")).unwrap();
+        let done: IndexDone = serde_json::from_str(&done_json).unwrap();
+        assert_eq!(done.n_keys, 3);
     }
 
     #[tokio::test]
     async fn empty_partition_builds_ok() {
         let dir = scatter_and_build(&[], 4).await;
-        for i in 0..4 {
-            let idx = part_dir(dir.path(), 4, i).join("index.idx");
-            assert!(idx.exists());
-        }
+        assert!(index_path(dir.path()).exists());
     }
 
     #[tokio::test]
@@ -315,21 +281,12 @@ mod tests {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2")];
         let dir = scatter_and_build(pairs, 1).await;
 
-        let idx      = part_dir(dir.path(), 1, 0).join("index.idx");
-        let tmp      = part_dir(dir.path(), 1, 0).join("index.idx.tmp");
+        let idx      = index_path(dir.path());
         let snapshot = std::fs::read(&idx).unwrap();
 
-        // Second run: spill.bin is gone, index.idx exists → skip.
+        // Second run: index.done exists → skip.
         let done = IndexBuildPhase::new(dir.path(), layout(1), 1, None).run().unwrap();
         assert_eq!(done.n_keys, 2, "key count must be preserved on skip");
-        assert_eq!(std::fs::read(&idx).unwrap(), snapshot, "index.idx must be unchanged");
-        assert!(!tmp.exists(), "skip path must not leave a tmp file");
-    }
-
-    #[tokio::test]
-    async fn tmp_file_removed_on_success() {
-        let dir = scatter_and_build(&[(b"k", b"v")], 1).await;
-        let tmp = part_dir(dir.path(), 1, 0).join("index.idx.tmp");
-        assert!(!tmp.exists(), "index.idx.tmp should be gone after successful build");
+        assert_eq!(std::fs::read(&idx).unwrap(), snapshot, "index.all must be unchanged");
     }
 }
