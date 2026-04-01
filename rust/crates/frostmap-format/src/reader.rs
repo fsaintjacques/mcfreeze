@@ -5,8 +5,8 @@ use memmap2::MmapOptions;
 
 use crate::{
     data::pread,
-    index::{self, Bucket, IndexHeader, fingerprint, INDEX_HEADER_SIZE},
-    meta::{Layout, Meta},
+    index::{self, Bucket, IndexHeader, fingerprint, verify_fingerprint, INDEX_HEADER_SIZE},
+    meta::{Layout, Meta, VALUE_HEADER_SIZE},
     Result,
 };
 
@@ -62,11 +62,30 @@ impl PartitionReader {
     }
 
     /// Look up `fp` in the bucket array and read the value from `data.bin`.
-    fn get(&self, fp: u64) -> Result<Option<Vec<u8>>> {
+    /// Checks the 12-byte value header (verify fingerprint + byte length)
+    /// and strips it before returning. A verification mismatch is treated
+    /// as a miss (index fingerprint collision).
+    fn get(&self, key: &[u8], fp: u64, verify_seed: u64) -> Result<Option<Vec<u8>>> {
         let table: &[Bucket] = bytemuck::cast_slice(&self.buckets);
         match index::probe(table, fp) {
             None              => Ok(None),
-            Some((off, size)) => Ok(Some(pread(&self.data, off, size)?)),
+            Some((off, size)) => {
+                let raw = pread(&self.data, off, size)?;
+                if raw.len() < VALUE_HEADER_SIZE {
+                    return Ok(None); // corrupt entry
+                }
+                let stored_vfp = u64::from_le_bytes(raw[..8].try_into().unwrap());
+                let expected_vfp = verify_fingerprint(key, verify_seed);
+                if stored_vfp != expected_vfp {
+                    return Ok(None); // fingerprint collision — treat as miss
+                }
+                let byte_len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+                let end = VALUE_HEADER_SIZE + byte_len;
+                if end > raw.len() {
+                    return Ok(None); // corrupt entry
+                }
+                Ok(Some(raw[VALUE_HEADER_SIZE..end].to_vec()))
+            }
         }
     }
 }
@@ -84,8 +103,9 @@ impl PartitionReader {
 /// }
 /// ```
 pub struct SnapshotReader {
-    layout:     Layout,
-    partitions: Vec<PartitionReader>,
+    layout:      Layout,
+    verify_seed: u64,
+    partitions:  Vec<PartitionReader>,
 }
 
 impl SnapshotReader {
@@ -105,14 +125,14 @@ impl SnapshotReader {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Self { layout, partitions })
+        Ok(Self { layout, verify_seed: meta.verify_seed, partitions })
     }
 
     /// Look up `key` and return its value, or `None` if not present.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let fp  = fingerprint(key);
         let idx = self.layout.partition_of(fp);
-        self.partitions[idx].get(fp)
+        self.partitions[idx].get(key, fp, self.verify_seed)
     }
 }
 

@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use frostmap_format::{
     data::AlignedWriter,
     index::fingerprint,
-    meta::Layout,
+    meta::{DEFAULT_VERIFY_SEED, Layout},
 };
 
 use crate::{
@@ -24,8 +24,8 @@ use crate::{
 // Types
 // ---------------------------------------------------------------------------
 
-/// A sub-batch routed to one partition: `(fingerprint, owned_value)`.
-type PartitionBatch = Vec<(u64, Vec<u8>)>;
+/// A sub-batch routed to one partition: `(owned_key, fingerprint, owned_value)`.
+type PartitionBatch = Vec<(Vec<u8>, u64, Vec<u8>)>;
 
 pub struct ScatterStats {
     pub n_keys:     u64,
@@ -164,7 +164,7 @@ impl Fanout {
         for (key, value) in batch.iter() {
             let fp  = fingerprint(key);
             let idx = self.layout.partition_of(fp);
-            self.sub_batches[idx].push((fp, value.to_vec()));
+            self.sub_batches[idx].push((key.to_vec(), fp, value.to_vec()));
             self.n_keys    += 1;
             self.data_bytes += value.len() as u64;
         }
@@ -323,23 +323,23 @@ fn partition_writer(
     let mut data  = AlignedWriter::new(BufWriter::with_capacity(
         data_buf_bytes,
         File::create(dir.join("data.bin"))?,
-    ));
+    ), DEFAULT_VERIFY_SEED);
     let mut spill     = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
     let mut histogram = new_size_histogram();
     let mut sum_bytes = 0u64;
     let mut n_keys    = 0u64;
 
     while let Some(batch) = rx.blocking_recv() {
-        for (fp, value) in batch {
+        for (key, fp, value) in batch {
             let size = value.len() as u64;
             // record(0) is invalid; empty values map to 1 for histogram purposes.
             histogram.record(size.max(1)).unwrap_or_default();
             sum_bytes += size;
-            let aligned_offset = data.write_value(&value)?;
+            let (aligned_offset, on_disk_size) = data.write_value(&key, &value)?;
             spill.push(SpillRecord {
                 fingerprint:    fp,
                 aligned_offset,
-                size:           value.len() as u32,
+                size:           on_disk_size,
                 _pad:           0,
             })?;
             n_keys += 1;
@@ -360,7 +360,7 @@ mod tests {
     use super::*;
     use crate::source::VecBatch;
     use crate::spill::SpillReader;
-    use frostmap_format::{data::pread, meta::VALUE_ALIGNMENT};
+    use frostmap_format::{data::pread, meta::{VALUE_ALIGNMENT, VALUE_HEADER_SIZE}};
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout { Layout::new(n).unwrap() }
@@ -396,7 +396,9 @@ mod tests {
         let data_file = File::open(frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin")).unwrap();
         for rec in reader.records() {
             let rec = rec.unwrap();
-            let val = pread(&data_file, rec.aligned_offset * VALUE_ALIGNMENT, rec.size).unwrap();
+            let raw = pread(&data_file, rec.aligned_offset * VALUE_ALIGNMENT, rec.size).unwrap();
+            // Raw data includes 12-byte header; strip it to get the value.
+            let val = &raw[VALUE_HEADER_SIZE..];
             assert!(val == b"world" || val == b"bar", "unexpected value: {val:?}");
         }
     }
@@ -406,6 +408,7 @@ mod tests {
         let (dir, _) = scatter(&[(b"k", b"v")], 1).await;
         let meta = std::fs::metadata(frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin")).unwrap();
         assert_eq!(meta.len() % VALUE_ALIGNMENT, 0);
+        // 12-byte header + 1-byte value = 13 → padded to 64.
         assert_eq!(meta.len(), 64);
     }
 

@@ -6,7 +6,7 @@ use chrono::Utc;
 use crate::{
     data::AlignedWriter,
     index::{self, IndexHeader, RawEntry, fingerprint},
-    meta::{FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta, partition_dir},
+    meta::{DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta, partition_dir},
     Result,
 };
 
@@ -25,12 +25,12 @@ pub struct PartitionWriter {
 }
 
 impl PartitionWriter {
-    fn new(dir: PathBuf) -> Result<Self> {
+    fn new(dir: PathBuf, verify_seed: u64) -> Result<Self> {
         fs::create_dir_all(&dir)?;
         let data_file = File::create(dir.join("data.bin"))?;
         Ok(Self {
             dir,
-            data: AlignedWriter::new(data_file),
+            data: AlignedWriter::new(data_file, verify_seed),
             entries: Vec::new(),
         })
     }
@@ -39,9 +39,9 @@ impl PartitionWriter {
     ///
     /// The caller must have already verified that this key belongs to this
     /// partition (i.e. `fingerprint & (N-1) == partition_index`).
-    pub fn write(&mut self, fp: u64, value: &[u8]) -> Result<()> {
-        let aligned_offset = self.data.write_value(value)?;
-        self.entries.push(RawEntry::new(fp, aligned_offset, value.len() as u32)?);
+    pub fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
+        let (aligned_offset, on_disk_size) = self.data.write_value(key, value)?;
+        self.entries.push(RawEntry::new(fp, aligned_offset, on_disk_size)?);
         Ok(())
     }
 
@@ -82,30 +82,32 @@ impl PartitionWriter {
 /// w.finish()?;
 /// ```
 pub struct SnapshotWriter {
-    layout:     Layout,
-    partitions: Vec<PartitionWriter>,
+    layout:      Layout,
+    verify_seed: u64,
+    partitions:  Vec<PartitionWriter>,
 }
 
 impl SnapshotWriter {
     /// Create the snapshot directory tree and open all partition writers.
     pub fn new(root: impl AsRef<Path>, n_partitions: u32) -> Result<Self> {
-        let root   = root.as_ref();
-        let layout = Layout::new(n_partitions)?;
+        let root        = root.as_ref();
+        let layout      = Layout::new(n_partitions)?;
+        let verify_seed = DEFAULT_VERIFY_SEED;
 
         fs::create_dir_all(root)?;
 
         let partitions = (0..n_partitions as usize)
-            .map(|i| PartitionWriter::new(partition_dir(root, n_partitions, i)))
+            .map(|i| PartitionWriter::new(partition_dir(root, n_partitions, i), verify_seed))
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Self { layout, partitions })
+        Ok(Self { layout, verify_seed, partitions })
     }
 
     /// Route a key-value pair to the correct partition and write it.
     pub fn write(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let fp  = fingerprint(key);
         let idx = self.layout.partition_of(fp);
-        self.partitions[idx].write(fp, value)
+        self.partitions[idx].write(key, fp, value)
     }
 
     /// Finish all partitions, then write `meta.json` as the completion signal.
@@ -125,6 +127,7 @@ impl SnapshotWriter {
             offset_bits:    OFFSET_BITS,
             size_bits:      SIZE_BITS,
             n_keys:         n_keys_total,
+            verify_seed:    self.verify_seed,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             scatter:        None,
             index:          None,

@@ -23,7 +23,7 @@ pub const INDEX_HEADER_SIZE: usize = 64;
 // Fingerprinting
 // ---------------------------------------------------------------------------
 
-/// Compute the xxhash64 fingerprint of a key.
+/// Compute the xxhash64 fingerprint of a key (seed 0).
 ///
 /// A result of `0` is biased to `1` to preserve the zero-fingerprint
 /// sentinel that marks empty buckets.
@@ -31,6 +31,14 @@ pub const INDEX_HEADER_SIZE: usize = 64;
 pub fn fingerprint(key: &[u8]) -> u64 {
     let h = xxh64(key, 0);
     if h == 0 { 1 } else { h }
+}
+
+/// Compute the verification fingerprint for the value header.
+/// Uses a different seed than the index fingerprint so a collision
+/// in one does not imply a collision in the other.
+#[inline]
+pub fn verify_fingerprint(key: &[u8], seed: u64) -> u64 {
+    xxh64(key, seed)
 }
 
 // ---------------------------------------------------------------------------

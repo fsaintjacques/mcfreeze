@@ -156,7 +156,7 @@ async fn meta_json_written_last_and_valid() {
         &std::fs::read_to_string(snap_dir.path().join("meta.json")).unwrap()
     ).unwrap();
 
-    assert_eq!(raw["format_version"], 2);
+    assert_eq!(raw["format_version"], 3);
     assert_eq!(raw["n_partitions"],   4);
     assert_eq!(raw["n_keys"],         10);
     assert_eq!(raw["hash_algorithm"], "xxhash64");

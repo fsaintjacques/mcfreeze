@@ -6,7 +6,11 @@ use crate::{Error, Result};
 // Format-wide constants
 // ---------------------------------------------------------------------------
 
-pub const FORMAT_VERSION: u32   = 2;
+pub const FORMAT_VERSION: u32   = 3;
+
+/// Default seed for the value-header verification fingerprint.
+/// Must be != 0 so it is independent of the index fingerprint (seed 0).
+pub const DEFAULT_VERIFY_SEED: u64 = 0x517cc1b727220a95; // xxhash64("frostmap-verify")
 pub const HASH_ALGORITHM: &str  = "xxhash64";
 
 /// Bits allocated to the aligned offset in the `loc` field.
@@ -89,6 +93,9 @@ pub fn partition_dir(root: &std::path::Path, n_partitions: u32, i: usize) -> std
 // Meta
 // ---------------------------------------------------------------------------
 
+/// Size of the value header: 8-byte verify fingerprint + 4-byte length.
+pub const VALUE_HEADER_SIZE: usize = 12;
+
 /// Contents of `meta.json`, written last as the snapshot completion signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
@@ -98,6 +105,10 @@ pub struct Meta {
     pub offset_bits:     u8,
     pub size_bits:       u8,
     pub n_keys:          u64,
+    /// Seed for the verification fingerprint stored in each value header.
+    /// If absent or 0, no verification is performed (V2 compatibility).
+    #[serde(default)]
+    pub verify_seed:     u64,
     pub created_at:      String,
     /// Embedded contents of `scatter.done` (opaque to kv-format).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -180,6 +191,7 @@ mod tests {
             offset_bits:    OFFSET_BITS,
             size_bits:      SIZE_BITS,
             n_keys:         0,
+            verify_seed:    DEFAULT_VERIFY_SEED,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
             scatter:        None,
             index:          None,
@@ -197,6 +209,7 @@ mod tests {
             offset_bits:    OFFSET_BITS + 1, // wrong
             size_bits:      SIZE_BITS,
             n_keys:         0,
+            verify_seed:    DEFAULT_VERIFY_SEED,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
             scatter:        None,
             index:          None,

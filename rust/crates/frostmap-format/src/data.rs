@@ -5,8 +5,8 @@ use std::io::Write;
 use std::os::unix::fs::FileExt;
 
 use crate::{
-    index::aligned_size,
-    meta::VALUE_ALIGNMENT,
+    index::{aligned_size, verify_fingerprint},
+    meta::{VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     Result,
 };
 
@@ -27,13 +27,15 @@ const PAD: [u8; VALUE_ALIGNMENT as usize] = [0u8; VALUE_ALIGNMENT as usize];
 /// Callers that need large write buffers (e.g. 8 MiB per partition) should
 /// wrap the file in `BufWriter::with_capacity(...)` before constructing.
 pub struct AlignedWriter<W: Write> {
-    inner:       W,
-    byte_offset: u64,
+    inner:        W,
+    byte_offset:  u64,
+    verify_seed:  u64,
 }
 
 impl<W: Write> AlignedWriter<W> {
-    pub fn new(inner: W) -> Self {
-        Self { inner, byte_offset: 0 }
+    pub fn new(inner: W, verify_seed: u64) -> Self {
+        assert!(verify_seed != 0, "verify_seed must be non-zero");
+        Self { inner, byte_offset: 0, verify_seed }
     }
 
     /// Current byte position in the file (always a multiple of `VALUE_ALIGNMENT`).
@@ -41,12 +43,14 @@ impl<W: Write> AlignedWriter<W> {
         self.byte_offset
     }
 
-    /// Write `value`, pad to `VALUE_ALIGNMENT`, and return the `aligned_offset`
-    /// (i.e. `byte_offset / VALUE_ALIGNMENT` _before_ the write).
+    /// Write a value with its 12-byte header, pad to `VALUE_ALIGNMENT`, and
+    /// return `(aligned_offset, on_disk_size)`.
     ///
-    /// The returned value is what should be stored in the `loc` field of the
-    /// corresponding index bucket.
-    pub fn write_value(&mut self, value: &[u8]) -> Result<u64> {
+    /// On-disk layout: `[8B verify_fp][4B byte_length][value bytes][padding to 64B]`
+    ///
+    /// `on_disk_size` includes the header and is what should be stored in the
+    /// `loc` field of the index bucket.
+    pub fn write_value(&mut self, key: &[u8], value: &[u8]) -> Result<(u64, u32)> {
         debug_assert_eq!(
             self.byte_offset % VALUE_ALIGNMENT,
             0,
@@ -54,16 +58,22 @@ impl<W: Write> AlignedWriter<W> {
         );
 
         let aligned_offset = self.byte_offset / VALUE_ALIGNMENT;
-        let padded          = aligned_size(value.len() as u32);
-        let pad_len         = (padded - value.len() as u64) as usize;
 
+        // 12-byte header: 8B verify fingerprint + 4B value length.
+        let vfp = verify_fingerprint(key, self.verify_seed);
+        self.inner.write_all(&vfp.to_le_bytes())?;
+        self.inner.write_all(&(value.len() as u32).to_le_bytes())?;
         self.inner.write_all(value)?;
+        let on_disk_size = VALUE_HEADER_SIZE as u32 + value.len() as u32;
+
+        let padded  = aligned_size(on_disk_size);
+        let pad_len = (padded - on_disk_size as u64) as usize;
         if pad_len > 0 {
             self.inner.write_all(&PAD[..pad_len])?;
         }
 
         self.byte_offset += padded;
-        Ok(aligned_offset)
+        Ok((aligned_offset, on_disk_size))
     }
 
     /// Flush and return the inner writer.
@@ -98,12 +108,14 @@ mod tests {
     use std::io::BufWriter;
     use tempfile::tempfile;
 
+    const TEST_SEED: u64 = 42;
+
     fn writer() -> AlignedWriter<File> {
-        AlignedWriter::new(tempfile().unwrap())
+        AlignedWriter::new(tempfile().unwrap(), TEST_SEED)
     }
 
     fn buffered_writer() -> AlignedWriter<BufWriter<File>> {
-        AlignedWriter::new(BufWriter::new(tempfile().unwrap()))
+        AlignedWriter::new(BufWriter::new(tempfile().unwrap()), TEST_SEED)
     }
 
     // --- AlignedWriter<File> ---
@@ -111,10 +123,11 @@ mod tests {
     #[test]
     fn write_single_value_aligned() {
         let mut w = writer();
-        // Exactly 64 bytes: no padding needed.
-        let data = vec![0xAAu8; 64];
-        let off = w.write_value(&data).unwrap();
+        // 52 bytes value + 12 byte header = 64 bytes: no padding needed.
+        let data = vec![0xAAu8; 52];
+        let (off, size) = w.write_value(b"key", &data).unwrap();
         assert_eq!(off, 0);
+        assert_eq!(size, 12 + 52);
         assert_eq!(w.byte_offset(), 64);
     }
 
@@ -122,9 +135,10 @@ mod tests {
     fn write_single_value_needs_padding() {
         let mut w = writer();
         let data = vec![0xBBu8; 1];
-        let off = w.write_value(&data).unwrap();
+        // 1 byte value + 12 byte header = 13 → padded to 64.
+        let (off, size) = w.write_value(b"key", &data).unwrap();
         assert_eq!(off, 0);
-        // Padded to 64 bytes.
+        assert_eq!(size, 13);
         assert_eq!(w.byte_offset(), 64);
     }
 
@@ -132,9 +146,12 @@ mod tests {
     fn write_multiple_values_offsets() {
         let mut w = writer();
 
-        let off0 = w.write_value(&vec![1u8; 1]).unwrap();   // 1 byte → 64 on disk
-        let off1 = w.write_value(&vec![2u8; 64]).unwrap();  // 64 bytes → 64 on disk
-        let off2 = w.write_value(&vec![3u8; 65]).unwrap();  // 65 bytes → 128 on disk
+        // value 1B + header 12B = 13B → padded to 64B
+        let (off0, _) = w.write_value(b"k1", &vec![1u8; 1]).unwrap();
+        // value 52B + header 12B = 64B → no padding
+        let (off1, _) = w.write_value(b"k2", &vec![2u8; 52]).unwrap();
+        // value 53B + header 12B = 65B → padded to 128B
+        let (off2, _) = w.write_value(b"k3", &vec![3u8; 53]).unwrap();
 
         assert_eq!(off0, 0);   // byte 0  / 64 = 0
         assert_eq!(off1, 1);   // byte 64 / 64 = 1
@@ -146,10 +163,11 @@ mod tests {
     #[test]
     fn write_empty_value() {
         let mut w = writer();
-        let off = w.write_value(&[]).unwrap();
+        // 0 byte value + 12 byte header = 12 → padded to 64.
+        let (off, size) = w.write_value(b"key", &[]).unwrap();
         assert_eq!(off, 0);
-        // Zero bytes, no padding needed.
-        assert_eq!(w.byte_offset(), 0);
+        assert_eq!(size, 12);
+        assert_eq!(w.byte_offset(), 64);
     }
 
     // --- AlignedWriter<BufWriter<File>> ---
@@ -157,25 +175,28 @@ mod tests {
     #[test]
     fn buffered_writer_offsets() {
         let mut w = buffered_writer();
-        let off0 = w.write_value(b"hello").unwrap();
-        let off1 = w.write_value(b"world").unwrap();
+        let (off0, _) = w.write_value(b"k1", b"hello").unwrap();
+        let (off1, _) = w.write_value(b"k2", b"world").unwrap();
         assert_eq!(off0, 0);
         assert_eq!(off1, 1);
+        // Each: 12 header + 5 value = 17 → padded to 64. Total: 128.
         assert_eq!(w.byte_offset(), 128);
     }
 
-    // --- pread roundtrip ---
+    // --- pread roundtrip (reads raw on-disk bytes including header) ---
 
     #[cfg(unix)]
     #[test]
     fn pread_roundtrip_single() {
         let mut w = writer();
         let payload = b"hello, world";
-        let aligned_offset = w.write_value(payload).unwrap();
+        let (aligned_offset, on_disk_size) = w.write_value(b"key", payload).unwrap();
         let file = w.finish().unwrap();
 
-        let got = pread(&file, aligned_offset * VALUE_ALIGNMENT, payload.len() as u32).unwrap();
-        assert_eq!(got, payload);
+        let got = pread(&file, aligned_offset * VALUE_ALIGNMENT, on_disk_size).unwrap();
+        // Raw bytes include the 12-byte header.
+        assert_eq!(got.len(), VALUE_HEADER_SIZE + payload.len());
+        assert_eq!(&got[VALUE_HEADER_SIZE..], payload);
     }
 
     #[cfg(unix)]
@@ -183,16 +204,17 @@ mod tests {
     fn pread_roundtrip_multiple() {
         let mut w = writer();
 
+        let keys: &[&[u8]] = &[b"k1", b"k2", b"k3"];
         let values: &[&[u8]] = &[b"alpha", b"beta", b"gamma gamma gamma"];
-        let mut offsets = Vec::new();
-        for v in values {
-            offsets.push(w.write_value(v).unwrap());
+        let mut entries = Vec::new();
+        for (&k, &v) in keys.iter().zip(values.iter()) {
+            entries.push(w.write_value(k, v).unwrap());
         }
         let file = w.finish().unwrap();
 
-        for (&v, &off) in values.iter().zip(offsets.iter()) {
-            let got = pread(&file, off * VALUE_ALIGNMENT, v.len() as u32).unwrap();
-            assert_eq!(got.as_slice(), v);
+        for ((&v, &(off, size))) in values.iter().zip(entries.iter()) {
+            let got = pread(&file, off * VALUE_ALIGNMENT, size).unwrap();
+            assert_eq!(&got[VALUE_HEADER_SIZE..], v);
         }
     }
 
@@ -201,27 +223,29 @@ mod tests {
     fn pread_roundtrip_buffered() {
         let mut w = buffered_writer();
         let payload = b"via bufwriter";
-        let aligned_offset = w.write_value(payload).unwrap();
+        let (aligned_offset, on_disk_size) = w.write_value(b"key", payload).unwrap();
         let buf_writer = w.finish().unwrap();
         let file = buf_writer.into_inner().unwrap();
 
-        let got = pread(&file, aligned_offset * VALUE_ALIGNMENT, payload.len() as u32).unwrap();
-        assert_eq!(got, payload);
+        let got = pread(&file, aligned_offset * VALUE_ALIGNMENT, on_disk_size).unwrap();
+        assert_eq!(&got[VALUE_HEADER_SIZE..], payload);
     }
 
     #[cfg(unix)]
     #[test]
     fn padding_bytes_do_not_corrupt_neighbours() {
         let mut w = writer();
-        // Write a 1-byte value; the remaining 63 bytes in that slot are pad.
-        // The next value must start cleanly at offset 64.
-        let off0 = w.write_value(b"X").unwrap();
-        let off1 = w.write_value(b"Y").unwrap();
+        // Write two 1-byte values; each with 12-byte header = 13 bytes, padded to 64.
+        let (off0, _) = w.write_value(b"k1", b"X").unwrap();
+        let (off1, _) = w.write_value(b"k2", b"Y").unwrap();
         assert_eq!(off0, 0);
         assert_eq!(off1, 1);
 
         let file = w.finish().unwrap();
-        assert_eq!(pread(&file, 0,  1).unwrap(), b"X");
-        assert_eq!(pread(&file, 64, 1).unwrap(), b"Y");
+        // Read raw on-disk: header(12) + value(1) = 13 bytes.
+        let raw0 = pread(&file, 0,  13).unwrap();
+        let raw1 = pread(&file, 64, 13).unwrap();
+        assert_eq!(&raw0[VALUE_HEADER_SIZE..], b"X");
+        assert_eq!(&raw1[VALUE_HEADER_SIZE..], b"Y");
     }
 }

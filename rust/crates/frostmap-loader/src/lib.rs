@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use frostmap_format::meta::{
-    FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta,
+    DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta,
 };
 
 use build::IndexBuildPhase;
@@ -284,6 +284,7 @@ impl SnapshotLoader {
             offset_bits:    OFFSET_BITS,
             size_bits:      SIZE_BITS,
             n_keys:         index_done.n_keys,
+            verify_seed:    DEFAULT_VERIFY_SEED,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             scatter:        scatter_val,
             index:          index_val,
