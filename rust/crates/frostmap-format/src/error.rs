@@ -3,19 +3,7 @@ pub enum Error {
     #[error("n_partitions must be a non-zero power of two, got {0}")]
     InvalidPartitionCount(u32),
 
-    #[error(
-        "meta.json bit layout ({offset_bits}+{size_bits}) \
-         does not match compiled constants"
-    )]
-    LayoutMismatch {
-        offset_bits: u8,
-        size_bits:   u8,
-    },
-
-    #[error("value too large: {size} bytes exceeds maximum")]
-    ValueTooLarge { size: usize },
-
-    #[error("aligned offset {0} overflows the offset bit field")]
+    #[error("aligned offset {0} overflows u32 (256 GB per partition limit)")]
     OffsetOverflow(u64),
 
     #[error("invalid magic bytes in index header")]

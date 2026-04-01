@@ -6,7 +6,7 @@ use memmap2::MmapOptions;
 use crate::{
     data::pread,
     index::{self, Bucket, IndexHeader, fingerprint, verify_fingerprint, INDEX_HEADER_SIZE},
-    meta::{Layout, Meta, VALUE_HEADER_SIZE},
+    meta::{Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     Result,
 };
 
@@ -62,30 +62,53 @@ impl PartitionReader {
     }
 
     /// Look up `fp` in the bucket array and read the value from `data.bin`.
-    /// Checks the 12-byte value header (verify fingerprint + byte length)
-    /// and strips it before returning. A verification mismatch is treated
-    /// as a miss (index fingerprint collision).
+    ///
+    /// With 32-bit truncated fingerprints, multiple keys can share the same
+    /// bucket fingerprint. The reader probes all candidates and uses the
+    /// 64-bit verify fingerprint in the value header to find the correct one.
     fn get(&self, key: &[u8], fp: u64, verify_seed: u64) -> Result<Option<Vec<u8>>> {
         let table: &[Bucket] = bytemuck::cast_slice(&self.buckets);
-        match index::probe(table, fp) {
-            None              => Ok(None),
-            Some((off, size)) => {
-                let raw = pread(&self.data, off, size)?;
-                if raw.len() < VALUE_HEADER_SIZE {
-                    return Ok(None); // corrupt entry
-                }
-                let stored_vfp = u64::from_le_bytes(raw[..8].try_into().unwrap());
-                let expected_vfp = verify_fingerprint(key, verify_seed);
-                if stored_vfp != expected_vfp {
-                    return Ok(None); // fingerprint collision — treat as miss
-                }
-                let byte_len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
-                let end = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
-                if end > raw.len() {
-                    return Ok(None); // corrupt entry
-                }
-                Ok(Some(raw[VALUE_HEADER_SIZE..end].to_vec()))
+        let cfp = index::compact_fingerprint(fp);
+        let expected_vfp = verify_fingerprint(key, verify_seed);
+        let n = table.len();
+        if n == 0 {
+            return Ok(None);
+        }
+
+        let mut pos   = cfp as usize % n;
+        let mut steps = 0usize;
+
+        loop {
+            if steps >= n {
+                return Ok(None);
             }
+            let bucket = table[pos];
+            if bucket.is_empty() {
+                return Ok(None);
+            }
+            if bucket.fingerprint == cfp {
+                // Candidate match — verify via the value header.
+                let byte_offset = bucket.byte_offset();
+                let first_block = pread(&self.data, byte_offset, VALUE_ALIGNMENT as u32)?;
+                if first_block.len() >= VALUE_HEADER_SIZE {
+                    let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
+                    if stored_vfp == expected_vfp {
+                        let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
+                        let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
+
+                        return if on_disk_size <= VALUE_ALIGNMENT as usize {
+                            Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+                        } else {
+                            let total = index::aligned_size(on_disk_size as u32) as u32;
+                            let raw = pread(&self.data, byte_offset, total)?;
+                            Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+                        };
+                    }
+                    // Verify mismatch — 32-bit collision, continue probing.
+                }
+            }
+            pos    = (pos + 1) % n;
+            steps += 1;
         }
     }
 }

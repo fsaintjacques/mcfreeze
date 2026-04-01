@@ -13,16 +13,6 @@ pub const FORMAT_VERSION: u32   = 3;
 pub const DEFAULT_VERIFY_SEED: u64 = 0x517cc1b727220a95; // xxhash64("frostmap-verify")
 pub const HASH_ALGORITHM: &str  = "xxhash64";
 
-/// Bits allocated to the aligned offset in the `loc` field.
-/// Max per-partition addressable space: 2^37 × 64 bytes = 8 TiB.
-pub const OFFSET_BITS: u8 = 37;
-
-/// Bits allocated to value size. Max value: 2^27 - 1 = 128 MiB - 1 bytes.
-pub const SIZE_BITS: u8 = 27;
-
-// Sanity check: the two fields must exactly fill a u64.
-const _: () = assert!(OFFSET_BITS as u32 + SIZE_BITS as u32 == 64);
-
 /// Value alignment in bytes. Every value in `data.bin` starts at a multiple of this.
 pub const VALUE_ALIGNMENT: u64 = 64;
 
@@ -37,7 +27,7 @@ pub const FILL_RATE: f64 = 0.95;
 
 /// Partition-count-dependent parameters derived from `n_partitions`.
 ///
-/// The bit widths in `loc` are fixed ([`OFFSET_BITS`], [`SIZE_BITS`]).
+/// Each partition uses compact 8-byte buckets (u32 fingerprint + u32 offset).
 /// `Layout` provides the derived masks and the routing helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout {
@@ -50,14 +40,10 @@ impl Layout {
     /// Construct a `Layout` for the given partition count.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidPartitionCount`] when `n_partitions` is zero,
-    /// not a power of two, or so large that `log2(n) > OFFSET_BITS` (the
-    /// per-partition address space would underflow).
+    /// Returns [`Error::InvalidPartitionCount`] when `n_partitions` is zero
+    /// or not a power of two.
     pub fn new(n_partitions: u32) -> Result<Self> {
-        if n_partitions == 0
-            || !n_partitions.is_power_of_two()
-            || n_partitions.trailing_zeros() as u8 > OFFSET_BITS
-        {
+        if n_partitions == 0 || !n_partitions.is_power_of_two() {
             return Err(Error::InvalidPartitionCount(n_partitions));
         }
         Ok(Self {
@@ -102,8 +88,6 @@ pub struct Meta {
     pub format_version:  u32,
     pub n_partitions:    u32,
     pub hash_algorithm:  String,
-    pub offset_bits:     u8,
-    pub size_bits:       u8,
     pub n_keys:          u64,
     /// Seed for the verification fingerprint stored in each value header.
     /// Must be non-zero in V3 snapshots.
@@ -118,18 +102,12 @@ pub struct Meta {
 }
 
 impl Meta {
-    /// Validate the format version and bit widths, then return the derived [`Layout`].
+    /// Validate the format version and return the derived [`Layout`].
     pub fn layout(&self) -> Result<Layout> {
         if self.format_version != FORMAT_VERSION {
             return Err(Error::VersionMismatch {
                 expected: FORMAT_VERSION,
                 got:      self.format_version,
-            });
-        }
-        if self.offset_bits != OFFSET_BITS || self.size_bits != SIZE_BITS {
-            return Err(Error::LayoutMismatch {
-                offset_bits: self.offset_bits,
-                size_bits:   self.size_bits,
             });
         }
         Layout::new(self.n_partitions)
@@ -145,13 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bit_fields_sum_to_64() {
-        assert_eq!(OFFSET_BITS as u32 + SIZE_BITS as u32, 64);
-    }
-
-    #[test]
     fn layout_ok() {
-        // Any power of two that fits in u32 is valid (n_partitions: u32 caps at 2^31).
         for log2 in 0u32..=31 {
             Layout::new(1 << log2).unwrap();
         }
@@ -160,7 +132,6 @@ mod tests {
     #[test]
     fn layout_n1_partition_routing() {
         let l = Layout::new(1).unwrap();
-        // Every fingerprint routes to partition 0.
         assert_eq!(l.partition_of(0), 0);
         assert_eq!(l.partition_of(u64::MAX), 0);
     }
@@ -179,11 +150,6 @@ mod tests {
         assert!(Layout::new(0).is_err());
         assert!(Layout::new(3).is_err());
         assert!(Layout::new(7).is_err());
-        // 2^(OFFSET_BITS+1) overflows the per-partition address space.
-        let overflow = 1u64 << (OFFSET_BITS as u32 + 1);
-        if overflow <= u32::MAX as u64 {
-            assert!(Layout::new(overflow as u32).is_err());
-        }
     }
 
     #[test]
@@ -192,8 +158,6 @@ mod tests {
             format_version: FORMAT_VERSION,
             n_partitions:   64,
             hash_algorithm: HASH_ALGORITHM.to_string(),
-            offset_bits:    OFFSET_BITS,
-            size_bits:      SIZE_BITS,
             n_keys:         0,
             verify_seed:    DEFAULT_VERIFY_SEED,
             created_at:     "2026-03-27T00:00:00Z".to_string(),
@@ -205,13 +169,11 @@ mod tests {
     }
 
     #[test]
-    fn meta_layout_mismatch() {
+    fn meta_rejects_old_format_version() {
         let meta = Meta {
-            format_version: FORMAT_VERSION,
+            format_version: 2, // old
             n_partitions:   64,
             hash_algorithm: HASH_ALGORITHM.to_string(),
-            offset_bits:    OFFSET_BITS + 1, // wrong
-            size_bits:      SIZE_BITS,
             n_keys:         0,
             verify_seed:    DEFAULT_VERIFY_SEED,
             created_at:     "2026-03-27T00:00:00Z".to_string(),

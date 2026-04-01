@@ -202,7 +202,7 @@ fn build_partition(dir: &Path) -> Result<PartitionIndexDone, LoaderError> {
     let entries: Vec<RawEntry> = spill.records()
         .map(|r| -> Result<RawEntry, LoaderError> {
             let r = r?;
-            Ok(RawEntry::new(r.fingerprint, r.aligned_offset, r.size)?)
+            Ok(RawEntry::new(r.fingerprint, r.aligned_offset)?)
         })
         .collect::<Result<_, _>>()?;
 

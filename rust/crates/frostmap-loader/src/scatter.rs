@@ -335,11 +335,11 @@ fn partition_writer(
             // record(0) is invalid; empty values map to 1 for histogram purposes.
             histogram.record(size.max(1)).unwrap_or_default();
             sum_bytes += size;
-            let (aligned_offset, on_disk_size) = data.write_value(&key, &value)?;
+            let (aligned_offset, _on_disk_size) = data.write_value(&key, &value)?;
             spill.push(SpillRecord {
                 fingerprint:    fp,
                 aligned_offset,
-                size:           on_disk_size,
+                size:           0, // unused in V3 (size is in value header)
                 _pad:           0,
             })?;
             n_keys += 1;
@@ -396,9 +396,11 @@ mod tests {
         let data_file = File::open(frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin")).unwrap();
         for rec in reader.records() {
             let rec = rec.unwrap();
-            let raw = pread(&data_file, rec.aligned_offset * VALUE_ALIGNMENT, rec.size).unwrap();
-            // Raw data includes 12-byte header; strip it to get the value.
-            let val = &raw[VALUE_HEADER_SIZE..];
+            // Read one aligned block to get the value header.
+            let raw = pread(&data_file, rec.aligned_offset * VALUE_ALIGNMENT, VALUE_ALIGNMENT as u32).unwrap();
+            // Parse the 12-byte header: 8B verify_fp + 4B byte_length.
+            let byte_len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+            let val = &raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len];
             assert!(val == b"world" || val == b"bar", "unexpected value: {val:?}");
         }
     }

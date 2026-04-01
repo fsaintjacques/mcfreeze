@@ -6,7 +6,7 @@ use chrono::Utc;
 use crate::{
     data::AlignedWriter,
     index::{self, IndexHeader, RawEntry, fingerprint},
-    meta::{DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM, OFFSET_BITS, SIZE_BITS, Layout, Meta, partition_dir},
+    meta::{DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM, Layout, Meta, partition_dir},
     Result,
 };
 
@@ -40,8 +40,8 @@ impl PartitionWriter {
     /// The caller must have already verified that this key belongs to this
     /// partition (i.e. `fingerprint & (N-1) == partition_index`).
     pub fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
-        let (aligned_offset, on_disk_size) = self.data.write_value(key, value)?;
-        self.entries.push(RawEntry::new(fp, aligned_offset, on_disk_size)?);
+        let (aligned_offset, _on_disk_size) = self.data.write_value(key, value)?;
+        self.entries.push(RawEntry::new(fp, aligned_offset)?);
         Ok(())
     }
 
@@ -124,8 +124,6 @@ impl SnapshotWriter {
             format_version: FORMAT_VERSION,
             n_partitions,
             hash_algorithm: HASH_ALGORITHM.to_string(),
-            offset_bits:    OFFSET_BITS,
-            size_bits:      SIZE_BITS,
             n_keys:         n_keys_total,
             verify_seed:    self.verify_seed,
             created_at:     Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
@@ -147,7 +145,7 @@ impl SnapshotWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::FILL_RATE;
+    use crate::meta::{DEFAULT_VERIFY_SEED, FILL_RATE};
     use tempfile::TempDir;
 
     fn temp_snapshot(n_partitions: u32) -> (TempDir, SnapshotWriter) {
@@ -211,8 +209,7 @@ mod tests {
         assert_eq!(meta.format_version, FORMAT_VERSION);
         assert_eq!(meta.n_partitions,   4);
         assert_eq!(meta.n_keys,         1);
-        assert_eq!(meta.offset_bits,    OFFSET_BITS);
-        assert_eq!(meta.size_bits,      SIZE_BITS);
+        assert_eq!(meta.verify_seed,    DEFAULT_VERIFY_SEED);
     }
 
     #[test]
