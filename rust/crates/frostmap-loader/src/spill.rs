@@ -23,6 +23,8 @@ pub const SPILL_RECORD_SIZE: usize   = 24;
 pub struct SpillRecord {
     pub fingerprint:    u64,  //  8
     pub aligned_offset: u64,  //  8
+    /// Unused in V3 (value size is in the value header). Written as 0.
+    /// Retained for struct layout compatibility (24-byte Pod record).
     pub size:           u32,  //  4
     pub _pad:           u32,  //  4  → total 24
 }

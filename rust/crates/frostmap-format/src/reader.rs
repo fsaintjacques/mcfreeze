@@ -99,7 +99,10 @@ impl PartitionReader {
                         return if on_disk_size <= VALUE_ALIGNMENT as usize {
                             Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
                         } else {
-                            let total = index::aligned_size(on_disk_size as u32) as u32;
+                            let total = match u32::try_from(on_disk_size) {
+                                Ok(s)  => index::aligned_size(s) as u32,
+                                Err(_) => return Ok(None), // corrupt: byte_len overflows u32
+                            };
                             let raw = pread(&self.data, byte_offset, total)?;
                             Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
                         };
@@ -250,5 +253,49 @@ mod tests {
         for &(k, v) in pairs {
             assert_eq!(r.get(k).unwrap().as_deref(), Some(v));
         }
+    }
+
+    // --- 32-bit fingerprint collision ---
+
+    /// Find two keys that produce the same compact_fingerprint and land in the
+    /// same partition. Both must be retrievable (the reader continues probing
+    /// on verify-fingerprint mismatch).
+    #[test]
+    fn compact_fingerprint_collision_both_retrievable() {
+        use crate::index::{compact_fingerprint, fingerprint};
+        use std::collections::HashMap;
+
+        // Brute-force: collect keys by compact fingerprint until a collision.
+        // Birthday bound: ~65K keys for 50% chance of a u32 collision.
+        let mut seen: HashMap<u32, String> = HashMap::new();
+        for i in 0u64..200_000 {
+            let k = format!("collision-{i}");
+            let fp = fingerprint(k.as_bytes());
+            let cfp = compact_fingerprint(fp);
+            if let Some(prev) = seen.get(&cfp) {
+                // Found a collision: prev and k share the same cfp.
+                let pairs: &[(&[u8], &[u8])] = &[
+                    (prev.as_bytes(), b"value-a"),
+                    (k.as_bytes(),    b"value-b"),
+                ];
+                // Use 1 partition so both keys land in the same partition.
+                let dir = build_snapshot(pairs, 1);
+                let r   = SnapshotReader::open(dir.path()).unwrap();
+
+                assert_eq!(
+                    r.get(prev.as_bytes()).unwrap().as_deref(),
+                    Some(b"value-a".as_slice()),
+                    "key_a should be retrievable despite collision"
+                );
+                assert_eq!(
+                    r.get(k.as_bytes()).unwrap().as_deref(),
+                    Some(b"value-b".as_slice()),
+                    "key_b should be retrievable despite collision"
+                );
+                return;
+            }
+            seen.insert(cfp, k);
+        }
+        panic!("failed to find a 32-bit fingerprint collision in 200K keys");
     }
 }

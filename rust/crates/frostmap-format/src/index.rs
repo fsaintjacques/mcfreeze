@@ -240,13 +240,14 @@ fn n_occupied(table: &[Bucket]) -> usize {
 
 /// Look up `fingerprint` in an immutable bucket table.
 ///
-/// Returns `byte_offset` on a hit, or `None` on a miss.
+/// Returns `byte_offset` of the **first** bucket whose 32-bit fingerprint
+/// matches. With compact fingerprints, collisions are possible — callers
+/// must verify the result (e.g. via the value header's verify fingerprint).
 ///
-/// The fingerprint is truncated to 32 bits for the bucket comparison.
-///
-/// Dispatches to the best available SIMD implementation at runtime:
-/// AVX-512F → AVX2 → NEON → scalar.
-pub fn probe(table: &[Bucket], fingerprint: u64) -> Option<u64> {
+/// The reader (`PartitionReader::get`) implements its own probe loop with
+/// verify-fingerprint checking to handle collisions. This function is
+/// exposed for index-level tests only.
+pub(crate) fn probe(table: &[Bucket], fingerprint: u64) -> Option<u64> {
     let n = table.len();
     if n == 0 {
         return None;
