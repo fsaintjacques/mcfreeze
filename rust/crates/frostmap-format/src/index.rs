@@ -10,8 +10,9 @@ use crate::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum aligned offset that fits in a u32 (256 GB per partition at 64B alignment).
-const MAX_OFFSET: u32 = u32::MAX;
+/// Maximum aligned offset that fits in a u32. Reserved below `u32::MAX` because
+/// `NO_MATCH` (u32::MAX) is used as a sentinel in `ProbeResult::offsets`.
+const MAX_OFFSET: u32 = u32::MAX - 1;
 const MAX_PSL:    u8  = u8::MAX;
 
 pub const INDEX_MAGIC: [u8; 8] = *b"KVFXIDX\n";
@@ -496,6 +497,14 @@ mod tests {
         assert_eq!(aligned_size(100), 128);
     }
 
+    #[test]
+    fn raw_entry_rejects_max_offset() {
+        let fp = fingerprint(b"key");
+        assert!(RawEntry::new(fp, u32::MAX as u64).is_err());
+        // One below the sentinel is still valid.
+        assert!(RawEntry::new(fp, (u32::MAX - 1) as u64).is_ok());
+    }
+
     // --- build / probe ---
 
     fn make_entry(key: &[u8], byte_offset: u64) -> RawEntry {
@@ -610,6 +619,11 @@ mod tests {
 
     #[test]
     fn probe_last_group_boundary() {
+        // Note: these hand-built tests pass small integers as fingerprints
+        // directly. This works because compact_fingerprint(x) == x for
+        // small non-zero x. The build/probe tests above exercise the real
+        // fingerprint pipeline.
+        //
         // Table: [∅ ∅ ∅ ∅ 4 5 6 7], home(4)=4. Group starting at 4
         // should find offset 4 at the first slot.
         let n = 8usize;
