@@ -80,7 +80,7 @@ impl PartitionReader {
                     return Ok(None); // fingerprint collision — treat as miss
                 }
                 let byte_len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
-                let end = VALUE_HEADER_SIZE + byte_len;
+                let end = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
                 if end > raw.len() {
                     return Ok(None); // corrupt entry
                 }

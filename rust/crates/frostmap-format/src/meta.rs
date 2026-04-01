@@ -106,8 +106,7 @@ pub struct Meta {
     pub size_bits:       u8,
     pub n_keys:          u64,
     /// Seed for the verification fingerprint stored in each value header.
-    /// If absent or 0, no verification is performed (V2 compatibility).
-    #[serde(default)]
+    /// Must be non-zero in V3 snapshots.
     pub verify_seed:     u64,
     pub created_at:      String,
     /// Embedded contents of `scatter.done` (opaque to kv-format).
@@ -119,9 +118,14 @@ pub struct Meta {
 }
 
 impl Meta {
-    /// Validate the stored bit widths against the compiled-in constants and
-    /// return the derived [`Layout`].
+    /// Validate the format version and bit widths, then return the derived [`Layout`].
     pub fn layout(&self) -> Result<Layout> {
+        if self.format_version != FORMAT_VERSION {
+            return Err(Error::VersionMismatch {
+                expected: FORMAT_VERSION,
+                got:      self.format_version,
+            });
+        }
         if self.offset_bits != OFFSET_BITS || self.size_bits != SIZE_BITS {
             return Err(Error::LayoutMismatch {
                 offset_bits: self.offset_bits,
