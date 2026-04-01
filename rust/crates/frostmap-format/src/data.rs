@@ -212,7 +212,7 @@ mod tests {
         }
         let file = w.finish().unwrap();
 
-        for ((&v, &(off, size))) in values.iter().zip(entries.iter()) {
+        for (&v, &(off, size)) in values.iter().zip(entries.iter()) {
             let got = pread(&file, off * VALUE_ALIGNMENT, size).unwrap();
             assert_eq!(&got[VALUE_HEADER_SIZE..], v);
         }

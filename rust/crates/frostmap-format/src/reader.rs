@@ -5,7 +5,8 @@ use memmap2::MmapOptions;
 
 use crate::{
     data::pread,
-    index::{self, Bucket, IndexHeader, fingerprint, verify_fingerprint, INDEX_HEADER_SIZE},
+    index::{self, Bucket, IndexHeader, fingerprint, verify_fingerprint, compact_fingerprint,
+            home_position, probe_group, GROUP_SIZE, NO_MATCH, INDEX_HEADER_SIZE},
     meta::{Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     Result,
 };
@@ -64,54 +65,73 @@ impl PartitionReader {
     /// Look up `fp` in the bucket array and read the value from `data.bin`.
     ///
     /// With 32-bit truncated fingerprints, multiple keys can share the same
-    /// bucket fingerprint. The reader probes all candidates and uses the
-    /// 64-bit verify fingerprint in the value header to find the correct one.
+    /// bucket fingerprint. The reader uses SIMD `probe_group` to find
+    /// candidates, then verifies each via the 64-bit value header fingerprint.
     fn get(&self, key: &[u8], fp: u64, verify_seed: u64) -> Result<Option<Vec<u8>>> {
         let table: &[Bucket] = bytemuck::cast_slice(&self.buckets);
-        let cfp = index::compact_fingerprint(fp);
-        let expected_vfp = verify_fingerprint(key, verify_seed);
         let n = table.len();
         if n == 0 {
             return Ok(None);
         }
 
-        let mut pos   = cfp as usize % n;
+        let cfp = compact_fingerprint(fp);
+        let expected_vfp = verify_fingerprint(key, verify_seed);
+        let mut pos   = home_position(fp, n);
         let mut steps = 0usize;
 
-        loop {
-            if steps >= n {
-                return Ok(None);
-            }
-            let bucket = table[pos];
-            if bucket.is_empty() {
-                return Ok(None);
-            }
-            if bucket.fingerprint == cfp {
-                // Candidate match — verify via the value header.
-                let byte_offset = bucket.byte_offset();
-                let first_block = pread(&self.data, byte_offset, VALUE_ALIGNMENT as u32)?;
-                if first_block.len() >= VALUE_HEADER_SIZE {
-                    let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
-                    if stored_vfp == expected_vfp {
-                        let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
-                        let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
+        while steps < n {
+            let result = probe_group(table, cfp, pos);
 
-                        return if on_disk_size <= VALUE_ALIGNMENT as usize {
-                            Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
-                        } else {
-                            let total = match u32::try_from(on_disk_size) {
-                                Ok(s)  => index::aligned_size(s) as u32,
-                                Err(_) => return Ok(None), // corrupt: byte_len overflows u32
-                            };
-                            let raw = pread(&self.data, byte_offset, total)?;
-                            Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
-                        };
-                    }
-                    // Verify mismatch — 32-bit collision, continue probing.
+            for i in 0..GROUP_SIZE {
+                if result.offsets[i] == NO_MATCH {
+                    continue;
                 }
+                // Candidate — read the value header and verify.
+                let byte_offset = result.offsets[i] as u64 * VALUE_ALIGNMENT;
+                if let Some(value) = self.read_and_verify(byte_offset, expected_vfp)? {
+                    return Ok(Some(value));
+                }
+                // Verify mismatch — 32-bit collision, try next candidate.
             }
-            pos    = (pos + 1) % n;
-            steps += 1;
+
+            if result.done {
+                return Ok(None);
+            }
+
+            pos    = (pos + GROUP_SIZE) % n;
+            steps += GROUP_SIZE;
+        }
+
+        Ok(None)
+    }
+}
+
+impl PartitionReader {
+    /// Read the value at `byte_offset`, check the verify fingerprint, and
+    /// return the value bytes (without the header) on match.
+    fn read_and_verify(&self, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
+        let first_block = pread(&self.data, byte_offset, VALUE_ALIGNMENT as u32)?;
+        if first_block.len() < VALUE_HEADER_SIZE {
+            return Ok(None);
+        }
+
+        let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
+        if stored_vfp != expected_vfp {
+            return Ok(None);
+        }
+
+        let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
+        let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
+
+        if on_disk_size <= VALUE_ALIGNMENT as usize {
+            Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+        } else {
+            let total = match u32::try_from(on_disk_size) {
+                Ok(s)  => index::aligned_size(s) as u32,
+                Err(_) => return Ok(None),
+            };
+            let raw = pread(&self.data, byte_offset, total)?;
+            Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
         }
     }
 }

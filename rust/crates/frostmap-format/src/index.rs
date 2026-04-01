@@ -238,171 +238,172 @@ fn n_occupied(table: &[Bucket]) -> usize {
 // Probe
 // ---------------------------------------------------------------------------
 
-/// Look up `fingerprint` in an immutable bucket table.
-///
-/// Returns `byte_offset` of the **first** bucket whose 32-bit fingerprint
-/// matches. With compact fingerprints, collisions are possible — callers
-/// must verify the result (e.g. via the value header's verify fingerprint).
-///
-/// The reader (`PartitionReader::get`) implements its own probe loop with
-/// verify-fingerprint checking to handle collisions. This function is
-/// exposed for index-level tests only.
-pub(crate) fn probe(table: &[Bucket], fingerprint: u64) -> Option<u64> {
-    let n = table.len();
-    if n == 0 {
-        return None;
-    }
+/// Sentinel value in `ProbeResult::offsets` meaning "no match at this slot".
+pub const NO_MATCH: u32 = u32::MAX;
 
-    let cfp = compact_fingerprint(fingerprint);
+/// Number of buckets examined per `probe_group` call (one cache line).
+pub const GROUP_SIZE: usize = 8;
+
+/// Result of probing one group of 8 buckets.
+///
+/// `offsets[i]` is the bucket's `offset` field if `fingerprint` matched,
+/// or [`NO_MATCH`] otherwise. `done` is true if an empty bucket was found
+/// in the group (the caller should stop probing after checking all matches
+/// in this group).
+pub struct ProbeResult {
+    pub offsets: [u32; GROUP_SIZE],
+    pub done:    bool,
+}
+
+/// Compute the home position for a fingerprint in a table of `n` buckets.
+#[inline]
+pub fn home_position(fingerprint: u64, n: usize) -> usize {
+    compact_fingerprint(fingerprint) as usize % n
+}
+
+/// Probe one group of 8 buckets starting at `pos`.
+///
+/// If `pos + 8 > table.len()`, falls back to scalar to handle wrap-around.
+///
+/// Dispatches to the best available SIMD implementation at runtime.
+pub fn probe_group(table: &[Bucket], cfp: u32, pos: usize) -> ProbeResult {
+    let n = table.len();
 
     #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx2") {
-        return unsafe { probe_avx2(table, cfp) };
+    if pos + GROUP_SIZE <= n && is_x86_feature_detected!("avx2") {
+        return unsafe { probe_group_avx2(table, cfp, pos) };
     }
     #[cfg(target_arch = "aarch64")]
-    return unsafe { probe_neon(table, cfp) };
+    if pos + GROUP_SIZE <= n {
+        return unsafe { probe_group_neon(table, cfp, pos) };
+    }
 
-    #[allow(unreachable_code)]
-    probe_scalar(table, cfp)
+    probe_group_scalar(table, cfp, pos)
 }
 
-/// Scalar probe starting from the home slot.
-fn probe_scalar(table: &[Bucket], cfp: u32) -> Option<u64> {
-    let n   = table.len();
-    let pos = cfp as usize % n;
-    probe_scalar_from(table, cfp, pos, 0, n)
-}
+/// Scalar group probe — handles wrap-around and groups smaller than 8.
+fn probe_group_scalar(table: &[Bucket], cfp: u32, start: usize) -> ProbeResult {
+    let n = table.len();
+    let mut result = ProbeResult {
+        offsets: [NO_MATCH; GROUP_SIZE],
+        done:    false,
+    };
 
-/// Scalar probe resuming from an arbitrary position.
-#[inline]
-fn probe_scalar_from(
-    table:   &[Bucket],
-    cfp:     u32,
-    mut pos: usize,
-    mut steps: usize,
-    n:       usize,
-) -> Option<u64> {
-    loop {
-        debug_assert!(steps < n, "probe scanned all {n} buckets without finding an empty slot");
+    for i in 0..GROUP_SIZE {
+        let pos = (start + i) % n;
         let bucket = table[pos];
         if bucket.is_empty() {
-            return None;
+            result.done = true;
+            break;
         }
         if bucket.fingerprint == cfp {
-            return Some(bucket.byte_offset());
+            result.offsets[i] = bucket.offset;
         }
-        pos    = (pos + 1) % n;
-        steps += 1;
     }
+
+    result
 }
 
-/// AVX2 probe: compare 8 fingerprints per iteration (one 64-byte cache line).
-///
-/// Each Bucket is 8 bytes (u32 fp + u32 offset). 8 buckets = 64 bytes = one cache line.
-/// Load two 256-bit registers, shuffle to extract all 8 fingerprints into one
-/// 256-bit register of u32 lanes, then vpcmpeqd.
+/// AVX2 group probe: compare 8 fingerprints in one cache line.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn probe_avx2(table: &[Bucket], cfp: u32) -> Option<u64> {
+unsafe fn probe_group_avx2(table: &[Bucket], cfp: u32, pos: usize) -> ProbeResult {
     use std::arch::x86_64::*;
 
-    const LANES: usize = 8;
-    let n         = table.len();
-    let mut pos   = cfp as usize % n;
-    let mut steps = 0usize;
+    let mut result = ProbeResult {
+        offsets: [NO_MATCH; GROUP_SIZE],
+        done:    false,
+    };
 
     let target = _mm256_set1_epi32(cfp as i32);
     let zero   = _mm256_setzero_si256();
+    let shuf   = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
 
-    // Shuffle mask to extract fingerprints (even u32s) from interleaved [fp,off,fp,off,...].
-    // For each 128-bit lane: bytes [0..3] → pos 0, bytes [8..11] → pos 1, etc.
-    let shuf = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
+    let ptr = table.as_ptr().add(pos) as *const i32;
+    let lo  = _mm256_loadu_si256(ptr as *const __m256i);
+    let hi  = _mm256_loadu_si256(ptr.add(8) as *const __m256i);
 
-    while steps + LANES <= n {
-        if pos + LANES > n {
+    let fps_lo = _mm256_permutevar8x32_epi32(lo, shuf);
+    let fps_hi = _mm256_permutevar8x32_epi32(hi, shuf);
+    let fps    = _mm256_permute2x128_si256(fps_lo, fps_hi, 0x20);
+
+    let match_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi32(fps, target)) as u32;
+    let empty_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi32(fps, zero))   as u32;
+
+    // Each u32 lane → 4 bits in movemask. Check each lane.
+    for lane in 0..8u32 {
+        let lane_bits = 0xF << (lane * 4);
+        if empty_mask & lane_bits != 0 {
+            result.done = true;
             break;
         }
-
-        // Two 256-bit loads cover 64 bytes = 8 buckets.
-        let ptr = table.as_ptr().add(pos) as *const i32;
-        let lo  = _mm256_loadu_si256(ptr as *const __m256i);           // buckets 0-3
-        let hi  = _mm256_loadu_si256(ptr.add(8) as *const __m256i);    // buckets 4-7
-
-        // permutevar8x32 extracts even u32s (fingerprints) from each half.
-        let fps_lo = _mm256_permutevar8x32_epi32(lo, shuf); // [fp0,fp1,fp2,fp3, fp0,fp1,fp2,fp3]
-        let fps_hi = _mm256_permutevar8x32_epi32(hi, shuf); // [fp4,fp5,fp6,fp7, fp4,fp5,fp6,fp7]
-        // Blend low 128 bits of fps_lo with high 128 bits of fps_hi.
-        let fps = _mm256_permute2x128_si256(fps_lo, fps_hi, 0x20); // [fp0..fp3, fp4..fp7]
-
-        let match_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi32(fps, target)) as u32;
-        let empty_mask = _mm256_movemask_epi8(_mm256_cmpeq_epi32(fps, zero))   as u32;
-
-        if (match_mask | empty_mask) != 0 {
-            // Each u32 lane produces 4 set bits in movemask; trailing_zeros / 4 → lane index.
-            let match_lane = match_mask.trailing_zeros() / 4;
-            let empty_lane = empty_mask.trailing_zeros() / 4;
-
-            if match_mask != 0 && (empty_mask == 0 || match_lane < empty_lane) {
-                let b = table[pos + match_lane as usize];
-                return Some(b.byte_offset());
-            }
-            return None;
+        if match_mask & lane_bits != 0 {
+            result.offsets[lane as usize] = table[pos + lane as usize].offset;
         }
-
-        pos    += LANES;
-        if pos >= n { pos -= n; }
-        steps  += LANES;
     }
 
-    probe_scalar_from(table, cfp, pos, steps, n)
+    result
 }
 
-/// NEON probe: compare 4 fingerprints per iteration (32 bytes = 4 buckets).
-///
-/// `vld2q_u32` deinterleaves on load: fingerprints land in `pair.0`,
-/// offsets in `pair.1` — no shuffle needed.
+/// NEON group probe: compare 8 fingerprints in two loads of 4.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn probe_neon(table: &[Bucket], cfp: u32) -> Option<u64> {
+unsafe fn probe_group_neon(table: &[Bucket], cfp: u32, pos: usize) -> ProbeResult {
     use std::arch::aarch64::*;
 
-    const LANES: usize = 4;
-    let n         = table.len();
-    let mut pos   = cfp as usize % n;
-    let mut steps = 0usize;
+    let mut result = ProbeResult {
+        offsets: [NO_MATCH; GROUP_SIZE],
+        done:    false,
+    };
 
     let target = vdupq_n_u32(cfp);
     let zero   = vdupq_n_u32(0);
 
-    while steps + LANES <= n {
-        if pos + LANES > n {
-            break;
+    // First 4 buckets.
+    let pair0 = vld2q_u32(table.as_ptr().add(pos) as *const u32);
+    let match0 = vceqq_u32(pair0.0, target);
+    let empty0 = vceqq_u32(pair0.0, zero);
+
+    for i in 0..4u32 {
+        if vgetq_lane_u32_dyn(empty0, i) != 0 {
+            result.done = true;
+            return result;
         }
-
-        // vld2q_u32 loads 8 u32s and deinterleaves:
-        //   pair.0 = [fp0, fp1, fp2, fp3]  pair.1 = [off0, off1, off2, off3]
-        let pair = vld2q_u32(table.as_ptr().add(pos) as *const u32);
-        let fps  = pair.0;
-
-        let match_v = vceqq_u32(fps, target);
-        let empty_v = vceqq_u32(fps, zero);
-
-        // Process in probe order.
-        if vgetq_lane_u32::<0>(empty_v) != 0 { return None; }
-        if vgetq_lane_u32::<0>(match_v) != 0 { return Some(table[pos].byte_offset()); }
-        if vgetq_lane_u32::<1>(empty_v) != 0 { return None; }
-        if vgetq_lane_u32::<1>(match_v) != 0 { return Some(table[pos + 1].byte_offset()); }
-        if vgetq_lane_u32::<2>(empty_v) != 0 { return None; }
-        if vgetq_lane_u32::<2>(match_v) != 0 { return Some(table[pos + 2].byte_offset()); }
-        if vgetq_lane_u32::<3>(empty_v) != 0 { return None; }
-        if vgetq_lane_u32::<3>(match_v) != 0 { return Some(table[pos + 3].byte_offset()); }
-
-        pos    += LANES;
-        if pos >= n { pos -= n; }
-        steps  += LANES;
+        if vgetq_lane_u32_dyn(match0, i) != 0 {
+            result.offsets[i as usize] = table[pos + i as usize].offset;
+        }
     }
 
-    probe_scalar_from(table, cfp, pos, steps, n)
+    // Second 4 buckets.
+    let pair1 = vld2q_u32(table.as_ptr().add(pos + 4) as *const u32);
+    let match1 = vceqq_u32(pair1.0, target);
+    let empty1 = vceqq_u32(pair1.0, zero);
+
+    for i in 0..4u32 {
+        if vgetq_lane_u32_dyn(empty1, i) != 0 {
+            result.done = true;
+            return result;
+        }
+        if vgetq_lane_u32_dyn(match1, i) != 0 {
+            result.offsets[4 + i as usize] = table[pos + 4 + i as usize].offset;
+        }
+    }
+
+    result
+}
+
+/// Helper: extract lane `i` from a uint32x4_t at runtime.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn vgetq_lane_u32_dyn(v: std::arch::aarch64::uint32x4_t, i: u32) -> u32 {
+    use std::arch::aarch64::*;
+    match i {
+        0 => vgetq_lane_u32::<0>(v),
+        1 => vgetq_lane_u32::<1>(v),
+        2 => vgetq_lane_u32::<2>(v),
+        3 => vgetq_lane_u32::<3>(v),
+        _ => unreachable!(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +425,32 @@ pub fn aligned_size(size: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test helper: probe the entire table for the first match.
+    fn probe(table: &[Bucket], fingerprint: u64) -> Option<u64> {
+        let n = table.len();
+        if n == 0 {
+            return None;
+        }
+        let cfp = compact_fingerprint(fingerprint);
+        let mut pos = cfp as usize % n;
+        let mut steps = 0usize;
+
+        while steps < n {
+            let result = probe_group(table, cfp, pos);
+            for i in 0..GROUP_SIZE {
+                if result.offsets[i] != NO_MATCH {
+                    return Some(result.offsets[i] as u64 * VALUE_ALIGNMENT);
+                }
+            }
+            if result.done {
+                return None;
+            }
+            pos    = (pos + GROUP_SIZE) % n;
+            steps += GROUP_SIZE;
+        }
+        None
+    }
 
     // --- Bucket ---
 
@@ -539,7 +566,7 @@ mod tests {
         assert!(IndexHeader::from_bytes(&bytes).is_err());
     }
 
-    // --- SIMD probe correctness ---
+    // --- probe_group correctness ---
 
     fn simd_test_table() -> (Vec<Bucket>, Vec<RawEntry>) {
         let n = 1_000usize;
@@ -550,78 +577,109 @@ mod tests {
         (table, entries)
     }
 
+    /// Verify that probe_group (which dispatches to SIMD) agrees with
+    /// probe_group_scalar for every entry in a 1000-key table.
     #[test]
-    #[cfg(target_arch = "x86_64")]
-    fn probe_avx2_matches_scalar() {
-        if !is_x86_feature_detected!("avx2") { return; }
+    fn probe_group_matches_scalar() {
         let (table, entries) = simd_test_table();
         for e in &entries {
-            let cfp      = compact_fingerprint(e.fingerprint);
-            let expected = probe_scalar(&table, cfp);
-            let got      = unsafe { probe_avx2(&table, cfp) };
-            assert_eq!(got, expected, "avx2 mismatch for fp={}", e.fingerprint);
+            let cfp = compact_fingerprint(e.fingerprint);
+            let pos = cfp as usize % table.len();
+
+            let expected = probe_group_scalar(&table, cfp, pos);
+            let got      = probe_group(&table, cfp, pos);
+
+            assert_eq!(got.offsets, expected.offsets, "offsets mismatch for fp={}", e.fingerprint);
+            assert_eq!(got.done,    expected.done,    "done mismatch for fp={}", e.fingerprint);
         }
-        assert_eq!(unsafe { probe_avx2(&table, compact_fingerprint(fingerprint(b"absent"))) }, None);
     }
 
+    /// The convenience probe() function should find every inserted key.
     #[test]
-    #[cfg(target_arch = "aarch64")]
-    fn probe_neon_matches_scalar() {
+    fn probe_finds_all_keys() {
         let (table, entries) = simd_test_table();
         for e in &entries {
-            let cfp      = compact_fingerprint(e.fingerprint);
-            let expected = probe_scalar(&table, cfp);
-            let got      = unsafe { probe_neon(&table, cfp) };
-            assert_eq!(got, expected, "neon mismatch for fp={}", e.fingerprint);
+            let result = probe(&table, e.fingerprint);
+            assert!(result.is_some(), "miss for fingerprint {}", e.fingerprint);
+            assert_eq!(result.unwrap(), e.aligned_offset as u64 * VALUE_ALIGNMENT);
         }
-        assert_eq!(unsafe { probe_neon(&table, compact_fingerprint(fingerprint(b"absent"))) }, None);
+        assert_eq!(probe(&table, fingerprint(b"absent")), None);
     }
 
     // --- last-group boundary ---
 
     #[test]
     fn probe_last_group_boundary() {
-        let n         = 8usize;
-        let target_fp = 4u32;
-
+        // Table: [∅ ∅ ∅ ∅ 4 5 6 7], home(4)=4. Group starting at 4
+        // should find offset 4 at the first slot.
+        let n = 8usize;
         let mut table = vec![Bucket::default(); n];
         for i in 4..8usize {
             table[i] = Bucket { fingerprint: i as u32, offset: i as u32 };
         }
-        let expected = Some(4u64 * 64);
 
-        assert_eq!(probe_scalar(&table, target_fp), expected, "scalar");
+        let result = probe_group(&table, 4, 4);
+        assert_eq!(result.offsets[0], 4);
 
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            assert_eq!(unsafe { probe_avx2(&table, target_fp) }, expected, "avx2");
+        // Convenience probe should also find it.
+        assert_eq!(probe(&table, 4), Some(4u64 * 64));
+    }
+
+    // --- long PSL chain (multiple group iterations) ---
+
+    #[test]
+    fn probe_long_psl_chain() {
+        // 32 buckets, fill positions 4..21 (18 consecutive occupied slots)
+        // with distinct fingerprints, then place target cfp=99 at position 21.
+        // home(99) = 99 % 32 = 3, but position 3 is empty so that won't work.
+        // Instead: home = 4 (use cfp that homes to 4), fill 4..20 with
+        // blockers, target at 20. That's PSL=16, spanning 3 group iterations.
+        let n = 32usize;
+        let mut table = vec![Bucket::default(); n];
+
+        // Target: cfp = 4, so home = 4 % 32 = 4.
+        let target_cfp = 4u32;
+        // Fill positions 4..20 with blockers (different fingerprints).
+        for i in 4..20usize {
+            table[i] = Bucket { fingerprint: 100 + i as u32, offset: i as u32 };
         }
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(unsafe { probe_neon(&table, target_fp) }, expected, "neon");
+        // Place the actual target at position 20 (PSL = 16).
+        table[20] = Bucket { fingerprint: target_cfp, offset: 42 };
+
+        // probe must iterate: group at 4 (no match), group at 12 (no match),
+        // group at 20 (match at slot 0).
+        assert_eq!(probe(&table, target_cfp as u64), Some(42u64 * 64));
+    }
+
+    #[test]
+    fn probe_long_psl_chain_miss() {
+        // Same layout as above but target cfp is absent.
+        // home(4) = 4, positions 4..20 are occupied blockers, 21 is empty.
+        // Probe must scan 3 groups before hitting the empty slot and returning None.
+        let n = 32usize;
+        let mut table = vec![Bucket::default(); n];
+        for i in 4..21usize {
+            table[i] = Bucket { fingerprint: 100 + i as u32, offset: i as u32 };
+        }
+        // cfp=4 homes to 4, scans groups at 4, 12, 20 — position 21 is empty → None.
+        assert_eq!(probe(&table, 4), None);
     }
 
     // --- wrap-around ---
 
     #[test]
     fn probe_wrap_around() {
-        let n          = 9usize;
-        let target_fp  = 6u32;
-        let expected   = Some(42u64 * 64);
-
+        let n = 9usize;
         let mut table = vec![Bucket::default(); n];
         table[6] = Bucket { fingerprint: 33, offset: 10 };
         table[7] = Bucket { fingerprint: 44, offset: 11 };
         table[8] = Bucket { fingerprint: 55, offset: 12 };
         table[0] = Bucket { fingerprint: 99, offset: 13 };
-        table[1] = Bucket { fingerprint: target_fp, offset: 42 };
+        table[1] = Bucket { fingerprint: 6,  offset: 42 };
 
-        assert_eq!(probe_scalar(&table, target_fp), expected, "scalar");
-
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            assert_eq!(unsafe { probe_avx2(&table, target_fp) }, expected, "avx2");
-        }
-        #[cfg(target_arch = "aarch64")]
-        assert_eq!(unsafe { probe_neon(&table, target_fp) }, expected, "neon");
+        // cfp=6, home=6. First group wraps — scalar fallback.
+        // Should eventually find offset 42 at position 1.
+        let expected = Some(42u64 * 64);
+        assert_eq!(probe(&table, 6), expected);
     }
 }
