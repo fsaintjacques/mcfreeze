@@ -6,7 +6,7 @@ use crate::{Error, Result};
 // Format-wide constants
 // ---------------------------------------------------------------------------
 
-pub const FORMAT_VERSION: u32   = 3;
+pub const FORMAT_VERSION: u32   = 4;
 
 /// Default seed for the value-header verification fingerprint.
 /// Must be != 0 so it is independent of the index fingerprint (seed 0).

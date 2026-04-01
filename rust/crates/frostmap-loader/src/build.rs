@@ -120,15 +120,6 @@ impl IndexBuildPhase {
         // Write unified index.all.
         let info = index::write_unified_index(&index_path(root), &tables)?;
 
-        // Remove spill files now that index.all is written.
-        for i in 0..n {
-            let spill = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i)
-                .join("spill.bin");
-            if spill.exists() {
-                std::fs::remove_file(&spill)?;
-            }
-        }
-
         let wall_secs = start.elapsed().as_secs_f64();
 
         // Aggregate stats.
@@ -170,6 +161,16 @@ impl IndexBuildPhase {
         let json = serde_json::to_string_pretty(&done)
             .map_err(|e| LoaderError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         std::fs::write(&sentinel, json)?;
+
+        // Remove spill files only after index.done is durably written.
+        // A crash before this point leaves spills intact for a full retry.
+        for i in 0..n {
+            let spill = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i)
+                .join("spill.bin");
+            if spill.exists() {
+                std::fs::remove_file(&spill)?;
+            }
+        }
 
         Ok(done)
     }

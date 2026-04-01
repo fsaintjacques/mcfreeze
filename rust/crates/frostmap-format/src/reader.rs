@@ -62,9 +62,10 @@ impl SnapshotReader {
         let idx_file  = File::open(index_path(root))?;
         let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
 
-        // Advise huge pages on Linux for TLB efficiency.
+        // Advise huge pages on Linux for TLB efficiency (best-effort;
+        // MADV_HUGEPAGE returns EINVAL on older kernels / some filesystems).
         #[cfg(target_os = "linux")]
-        index_mmap.advise(memmap2::Advice::HugePage)?;
+        let _ = index_mmap.advise(memmap2::Advice::HugePage);
 
         let n = layout.n_partitions as usize;
         let mut partitions = Vec::with_capacity(n);
@@ -91,7 +92,7 @@ impl SnapshotReader {
             return Ok(None);
         }
 
-        let bucket_bytes = &self.index_mmap[ps.bucket_offset..ps.bucket_offset + n * 8];
+        let bucket_bytes = &self.index_mmap[ps.bucket_offset..ps.bucket_offset + n * std::mem::size_of::<Bucket>()];
         let table: &[Bucket] = bytemuck::cast_slice(bucket_bytes);
 
         let cfp = compact_fingerprint(fp);
