@@ -128,3 +128,99 @@ func TestServer_LongPoll(t *testing.T) {
 		t.Fatal("long-poll did not return after assignment change")
 	}
 }
+
+func TestServer_AdminRollout(t *testing.T) {
+	srv, store := startTestServer(t)
+
+	// Register nodes and create an active version.
+	store.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	store.RegisterNode("node-1")
+	store.RegisterNode("node-2")
+	store.CreateVersion("ds", "v1")
+	store.MarkReady("ds", "v1", "/snap/v1", "pv-1")
+	store.Promote("ds", "v1")
+
+	store.SetAssignments("node-1", []api.NodeAssignment{{
+		Dataset: "ds", KeyPrefix: "ds",
+		Version: api.VersionRecord{ID: "v1", PVName: "pv-1"},
+	}})
+	store.SetAssignments("node-2", []api.NodeAssignment{{
+		Dataset: "ds", KeyPrefix: "ds",
+		Version: api.VersionRecord{ID: "v1", PVName: "pv-1"},
+	}})
+
+	// node-1 reports active, node-2 has not reported yet.
+	store.ReportState("node-1", api.NodeState{
+		Node:       "node-1",
+		Datasets:   []api.DatasetState{{Dataset: "ds", VersionID: "v1", Phase: api.PhaseActive}},
+		ReportedAt: time.Now(),
+	})
+
+	resp, err := http.Get("http://" + srv.Addr() + "/admin/dataset/ds/rollout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var status RolloutStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if status.Dataset != "ds" {
+		t.Fatalf("dataset = %q", status.Dataset)
+	}
+	if len(status.ConvergedNodes) != 1 || status.ConvergedNodes[0] != "node-1" {
+		t.Fatalf("converged = %v, want [node-1]", status.ConvergedNodes)
+	}
+	if len(status.PendingNodes) != 1 || status.PendingNodes[0] != "node-2" {
+		t.Fatalf("pending = %v, want [node-2]", status.PendingNodes)
+	}
+}
+
+func TestServer_AdminRetired(t *testing.T) {
+	srv, store := startTestServer(t)
+
+	// Build v1, mark ready, promote (active), then build v2, mark ready, promote
+	// (v1 becomes retired, v2 becomes active).
+	store.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	store.RegisterNode("node-1")
+	store.CreateVersion("ds", "v1")
+	store.MarkReady("ds", "v1", "/snap/v1", "pv-1")
+	store.Promote("ds", "v1")
+	store.CreateVersion("ds", "v2")
+	store.MarkReady("ds", "v2", "/snap/v2", "pv-2")
+	store.Promote("ds", "v2")
+
+	// Node reports active on v2 (so v1 is eligible for retirement).
+	store.SetAssignments("node-1", []api.NodeAssignment{{
+		Dataset: "ds", KeyPrefix: "ds",
+		Version: api.VersionRecord{ID: "v2", PVName: "pv-2"},
+	}})
+	store.ReportState("node-1", api.NodeState{
+		Node:       "node-1",
+		Datasets:   []api.DatasetState{{Dataset: "ds", VersionID: "v2", Phase: api.PhaseActive}},
+		ReportedAt: time.Now(),
+	})
+
+	resp, err := http.Get("http://" + srv.Addr() + "/admin/dataset/ds/retired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var eligible []VersionEntry
+	if err := json.NewDecoder(resp.Body).Decode(&eligible); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(eligible) != 1 || eligible[0].ID != "v1" {
+		t.Fatalf("eligible = %+v, want [v1]", eligible)
+	}
+}
