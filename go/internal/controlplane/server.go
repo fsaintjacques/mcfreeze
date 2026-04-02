@@ -30,6 +30,8 @@ func NewServer(store *Store, addr string) (*Server, error) {
 	s.mux.HandleFunc("GET /api/v1/node/{node}/assignments", s.handleGetAssignments)
 	s.mux.HandleFunc("POST /api/v1/node/{node}/state", s.handlePostState)
 	s.mux.HandleFunc("POST /admin/node/{node}/assignments", s.handleAdminSetAssignments)
+	s.mux.HandleFunc("GET /admin/dataset/{name}/rollout", s.handleAdminRollout)
+	s.mux.HandleFunc("GET /admin/dataset/{name}/retired", s.handleAdminRetired)
 	return s, nil
 }
 
@@ -118,4 +120,18 @@ func (s *Server) handleAdminSetAssignments(w http.ResponseWriter, r *http.Reques
 
 	s.store.SetAssignments(node, assignments)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	status := s.store.RolloutStatus(name)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleAdminRetired(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	eligible := s.store.CheckRetirement(name)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(eligible)
 }
