@@ -1,6 +1,11 @@
+use std::future::Future;
 use std::io::Read;
+use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_csv::reader::Format;
+use arrow_csv::ReaderBuilder;
+use arrow_schema::SchemaRef;
 
 use crate::error::LoaderError;
 
@@ -27,8 +32,8 @@ pub struct SourceMetadata {
 
 /// A batch of key-value pairs yielded by a [`KvSource`].
 ///
-/// Implementations may back this with a `Vec` allocation (CSV) or an Arrow
-/// `RecordBatch` (ADBC / BigQuery Storage, zero-copy into Arrow buffers).
+/// Implementations may back this with a `Vec` allocation or an Arrow
+/// `RecordBatch` (zero-copy into Arrow buffers).
 pub trait KvBatch {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
@@ -53,15 +58,6 @@ pub trait KvBatch {
 ///
 /// `next_batch` returns `Ok(Some(_))` while data is available,
 /// `Ok(None)` when exhausted, or `Err(_)` on failure.
-///
-/// Implementations that do only sync I/O (e.g. [`CsvSource`]) return
-/// immediately from `next_batch` without any actual awaiting.  Sources
-/// backed by async I/O (e.g. BigQuery gRPC streams) can `await` freely.
-///
-/// Individual batch writes in the scatter loop are fast (BufWriter memcpy),
-/// so blocking the async executor per-batch is acceptable for a loader
-/// workload.  Callers that need stricter executor hygiene should wrap sync
-/// sources with `tokio::task::spawn_blocking`.
 pub trait KvSource {
     /// `Send + Sync` required so batches can be held across `.await` points
     /// inside `tokio::spawn` tasks (parallel source path).
@@ -80,25 +76,22 @@ pub trait KvSource {
     }
 }
 
-use std::future::Future;
-
 // ---------------------------------------------------------------------------
-// RecordBatchSource — async Arrow RecordBatch iterator (requires "arrow" feature)
+// RecordBatchSource — async Arrow RecordBatch iterator
 // ---------------------------------------------------------------------------
 
 /// Async batch iterator yielding Arrow `RecordBatch`es.
 ///
 /// This is the Arrow-level counterpart of [`KvSource`]: sources that produce
-/// full record batches (BigQuery Storage, Arrow Flight, Parquet, …) implement
+/// full record batches (BigQuery Storage, Arrow Flight, CSV, …) implement
 /// this trait.  Downstream adapters (e.g. protobuf encoding) consume it and
 /// produce a [`KvSource`].
-#[cfg(feature = "arrow")]
 pub trait RecordBatchSource: Send {
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn next_batch(
         &mut self,
-    ) -> impl Future<Output = Result<Option<arrow_array::RecordBatch>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send;
 
     fn metadata(&self) -> SourceMetadata {
         SourceMetadata::default()
@@ -106,7 +99,7 @@ pub trait RecordBatchSource: Send {
 }
 
 // ---------------------------------------------------------------------------
-// VecBatch — simple owned batch used by CsvSource
+// VecBatch — simple owned batch
 // ---------------------------------------------------------------------------
 
 pub struct VecBatch(pub Vec<(Vec<u8>, Vec<u8>)>);
@@ -122,88 +115,222 @@ impl KvBatch for VecBatch {
 }
 
 // ---------------------------------------------------------------------------
-// CsvSource
+// ArrowKvBatch — zero-copy KvBatch backed by two Arrow byte columns
 // ---------------------------------------------------------------------------
 
-/// Reads a two-column CSV (`key,value`) where both columns are
-/// base64-encoded byte strings.
+/// A batch of key-value pairs backed by two Arrow byte columns.
 ///
-/// Rows are accumulated into batches of `batch_size` before being returned
-/// to the scatter loop, amortising per-row overhead.
+/// Both columns are borrowed from Arrow buffers — no per-row allocation.
+/// Supports Binary, LargeBinary, Utf8, and LargeUtf8 column types.
+#[derive(Debug)]
+pub struct ArrowKvBatch {
+    keys: ArrayRef,
+    values: ArrayRef,
+}
+
+impl ArrowKvBatch {
+    /// Build from a `RecordBatch` by extracting two columns by index.
+    pub fn from_record_batch(
+        batch: &RecordBatch,
+        key_col_idx: usize,
+        val_col_idx: usize,
+    ) -> Result<Self, LoaderError> {
+        let keys = batch.column(key_col_idx).clone();
+        let values = batch.column(val_col_idx).clone();
+        validate_byte_column(&keys, batch.schema().field(key_col_idx).name())?;
+        validate_byte_column(&values, batch.schema().field(val_col_idx).name())?;
+        Ok(Self { keys, values })
+    }
+}
+
+impl KvBatch for ArrowKvBatch {
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        (0..self.keys.len()).map(|i| {
+            (
+                byte_value(self.keys.as_ref(), i),
+                byte_value(self.values.as_ref(), i),
+            )
+        })
+    }
+
+    fn total_bytes(&self) -> u64 {
+        byte_column_size(&self.keys) + byte_column_size(&self.values)
+    }
+}
+
+/// Validate that a column is a supported byte type.
+fn validate_byte_column(col: &ArrayRef, name: &str) -> Result<(), LoaderError> {
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary | DataType::LargeBinary | DataType::Utf8 | DataType::LargeUtf8 => Ok(()),
+        dt => Err(LoaderError::Arrow(arrow_schema::ArrowError::SchemaError(
+            format!(
+                "column {name:?} has type {dt}; expected Binary, LargeBinary, Utf8, or LargeUtf8"
+            ),
+        ))),
+    }
+}
+
+/// Zero-copy byte access at row `i`. Caller must validate type first.
+fn byte_value(col: &dyn arrow_array::Array, i: usize) -> &[u8] {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{BinaryType, LargeBinaryType};
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary => col.as_bytes::<BinaryType>().value(i),
+        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().value(i),
+        DataType::Utf8 => col.as_string::<i32>().value(i).as_bytes(),
+        DataType::LargeUtf8 => col.as_string::<i64>().value(i).as_bytes(),
+        _ => unreachable!("column type validated in ArrowKvBatch construction"),
+    }
+}
+
+/// O(1) total byte size of a byte column via the values buffer.
+fn byte_column_size(col: &ArrayRef) -> u64 {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{BinaryType, LargeBinaryType};
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
+        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
+        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
+        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
+        _ => unreachable!("column type validated in ArrowKvBatch construction"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RawEncodingSource — extracts key+value columns from RecordBatches
+// ---------------------------------------------------------------------------
+
+/// Wraps a [`RecordBatchSource`] and extracts key and value columns as a
+/// [`KvSource`]. This is the raw (no transcoding) counterpart to
+/// `ProtobufEncodingSource`.
+pub struct RawEncodingSource<S> {
+    inner: S,
+    key_col_idx: usize,
+    val_col_idx: usize,
+}
+
+impl<S> RawEncodingSource<S> {
+    pub fn new(inner: S, key_col_idx: usize, val_col_idx: usize) -> Self {
+        Self {
+            inner,
+            key_col_idx,
+            val_col_idx,
+        }
+    }
+}
+
+impl<S> KvSource for RawEncodingSource<S>
+where
+    S: RecordBatchSource,
+{
+    type Batch = ArrowKvBatch;
+    type Error = LoaderError;
+
+    async fn next_batch(&mut self) -> Result<Option<ArrowKvBatch>, LoaderError> {
+        let batch = match self.inner.next_batch().await {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(LoaderError::Source(Box::new(e))),
+        };
+
+        ArrowKvBatch::from_record_batch(&batch, self.key_col_idx, self.val_col_idx).map(Some)
+    }
+
+    fn metadata(&self) -> SourceMetadata {
+        self.inner.metadata()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CsvSource — Arrow-based CSV reader implementing RecordBatchSource
+// ---------------------------------------------------------------------------
+
+/// Reads a CSV file into Arrow `RecordBatch`es.
+///
+/// The schema is inferred from the file header and first rows. The source
+/// implements [`RecordBatchSource`] so it feeds into the same pipeline as
+/// BigQuery and other Arrow sources.
 pub struct CsvSource<R: Read> {
-    reader: csv::Reader<R>,
-    batch_size: usize,
-    record_idx: u64,
-    metadata: SourceMetadata,
+    reader: arrow_csv::reader::BufReader<std::io::BufReader<R>>,
+    schema: SchemaRef,
 }
 
 impl CsvSource<std::fs::File> {
+    /// Open a CSV file with headers and infer the schema.
     pub fn from_path(
         path: impl AsRef<std::path::Path>,
         batch_size: usize,
     ) -> Result<Self, LoaderError> {
-        let file = std::fs::File::open(path)?;
-        Ok(Self::new(file, batch_size))
+        use std::io::Seek;
+        let mut file = std::fs::File::open(path.as_ref())?;
+        let (schema, _) = Format::default()
+            .with_header(true)
+            .infer_schema(&mut file, Some(100))
+            .map_err(LoaderError::Arrow)?;
+        file.rewind()?;
+        Self::with_schema(file, Arc::new(schema), batch_size)
+    }
+}
+
+impl CsvSource<std::io::Cursor<Vec<u8>>> {
+    /// Read all data from a reader, infer the schema, and build a CSV source.
+    ///
+    /// Useful for non-seekable inputs like stdin.
+    pub fn from_reader(mut reader: impl Read, batch_size: usize) -> Result<Self, LoaderError> {
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        let (schema, _) = Format::default()
+            .with_header(true)
+            .infer_schema(std::io::Cursor::new(&buf), Some(100))
+            .map_err(LoaderError::Arrow)?;
+        Self::with_schema(std::io::Cursor::new(buf), Arc::new(schema), batch_size)
     }
 }
 
 impl<R: Read> CsvSource<R> {
-    pub fn new(reader: R, batch_size: usize) -> Self {
-        Self {
-            reader: csv::ReaderBuilder::new()
-                .has_headers(false)
-                .from_reader(reader),
-            batch_size: batch_size.max(1),
-            record_idx: 0,
-            metadata: SourceMetadata::default(),
-        }
+    /// Create a CSV source with an explicit schema.
+    pub fn with_schema(
+        reader: R,
+        schema: SchemaRef,
+        batch_size: usize,
+    ) -> Result<Self, LoaderError> {
+        let csv_schema = schema.clone();
+        let reader = ReaderBuilder::new(schema)
+            .with_header(true)
+            .with_batch_size(batch_size)
+            .build(reader)
+            .map_err(LoaderError::Arrow)?;
+        Ok(Self {
+            reader,
+            schema: csv_schema,
+        })
     }
 
-    fn next_batch_sync(&mut self) -> Result<Option<VecBatch>, LoaderError> {
-        let mut batch = Vec::with_capacity(self.batch_size);
-        let mut record = csv::StringRecord::new();
-
-        while batch.len() < self.batch_size {
-            if !self.reader.read_record(&mut record)? {
-                break;
-            }
-            let key_b64 = record.get(0).unwrap_or("");
-            let value_b64 = record.get(1).unwrap_or("");
-
-            let key = B64.decode(key_b64).map_err(|e| LoaderError::Base64Decode {
-                record: self.record_idx,
-                source: e,
-            })?;
-            let value = B64
-                .decode(value_b64)
-                .map_err(|e| LoaderError::Base64Decode {
-                    record: self.record_idx,
-                    source: e,
-                })?;
-
-            batch.push((key, value));
-            self.record_idx += 1;
-        }
-
-        if batch.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(VecBatch(batch)))
-        }
+    /// Returns the Arrow schema of the CSV data.
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
-impl<R: Read + Send> KvSource for CsvSource<R> {
-    type Batch = VecBatch;
+impl<R: Read + Send> RecordBatchSource for CsvSource<R> {
     type Error = LoaderError;
 
-    fn next_batch(&mut self) -> impl Future<Output = Result<Option<VecBatch>, LoaderError>> + Send {
-        // CsvSource does only sync I/O; the future completes without yielding.
-        std::future::ready(self.next_batch_sync())
-    }
-
-    fn metadata(&self) -> SourceMetadata {
-        self.metadata.clone()
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<RecordBatch>, LoaderError>> + Send {
+        let result = match self.reader.next() {
+            Some(Ok(batch)) => Ok(Some(batch)),
+            Some(Err(e)) => Err(LoaderError::Arrow(e)),
+            None => Ok(None),
+        };
+        std::future::ready(result)
     }
 }
 
@@ -214,74 +341,63 @@ impl<R: Read + Send> KvSource for CsvSource<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    use arrow_array::cast::AsArray;
+    use arrow_schema::{DataType, Field, Schema};
 
-    fn make_csv(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for (k, v) in pairs {
-            out.extend_from_slice(B64.encode(k).as_bytes());
-            out.push(b',');
-            out.extend_from_slice(B64.encode(v).as_bytes());
-            out.push(b'\n');
-        }
-        out
+    #[test]
+    fn csv_source_with_schema() {
+        let csv = b"name,age,score\nalice,30,95.5\nbob,25,87.3\n";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+            Field::new("score", DataType::Float64, false),
+        ]));
+
+        let mut src = CsvSource::with_schema(csv.as_slice(), schema, 1024).unwrap();
+
+        let batch = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(src.next_batch())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 3);
+
+        let names = batch.column(0).as_string::<i32>();
+        assert_eq!(names.value(0), "alice");
+        assert_eq!(names.value(1), "bob");
     }
 
-    async fn collect_all<S: KvSource<Batch = VecBatch, Error = LoaderError>>(
-        src: &mut S,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let mut all = Vec::new();
-        while let Some(batch) = src.next_batch().await.unwrap() {
-            for (k, v) in batch.iter() {
-                all.push((k.to_vec(), v.to_vec()));
-            }
-        }
-        all
+    #[test]
+    fn csv_source_exhausted() {
+        let csv = b"x\n1\n";
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+
+        let mut src = CsvSource::with_schema(csv.as_slice(), schema, 1024).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let b1 = rt.block_on(src.next_batch()).unwrap();
+        assert!(b1.is_some());
+        let b2 = rt.block_on(src.next_batch()).unwrap();
+        assert!(b2.is_none());
     }
 
-    #[tokio::test]
-    async fn csv_roundtrip() {
-        let pairs: &[(&[u8], &[u8])] = &[
-            (b"hello", b"world"),
-            (b"foo", b"bar baz"),
-            (b"\x00\x01\x02", b"\xff\xfe"),
-        ];
-        let csv = make_csv(pairs);
-        let mut src = CsvSource::new(csv.as_slice(), 10);
-        let got = collect_all(&mut src).await;
-        assert_eq!(got.len(), pairs.len());
-        for (i, (k, v)) in got.iter().enumerate() {
-            assert_eq!(k.as_slice(), pairs[i].0);
-            assert_eq!(v.as_slice(), pairs[i].1);
-        }
-    }
+    #[test]
+    fn csv_source_batch_boundaries() {
+        let csv = b"x\n1\n2\n3\n4\n5\n";
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
 
-    #[tokio::test]
-    async fn csv_batch_boundaries() {
-        // 5 rows, batch_size=2 → batches of [2, 2, 1]
-        let pairs: Vec<(&[u8], &[u8])> = (0u8..5)
-            .map(|i| {
-                let k: &'static [u8] = Box::leak(vec![i].into_boxed_slice());
-                let v: &'static [u8] = Box::leak(vec![i + 10].into_boxed_slice());
-                (k, v)
-            })
-            .collect();
-        let csv = make_csv(&pairs);
-        let mut src = CsvSource::new(csv.as_slice(), 2);
+        let mut src = CsvSource::with_schema(csv.as_slice(), schema, 2).unwrap();
 
-        let b1 = src.next_batch().await.unwrap().unwrap();
-        assert_eq!(b1.len(), 2);
-        let b2 = src.next_batch().await.unwrap().unwrap();
-        assert_eq!(b2.len(), 2);
-        let b3 = src.next_batch().await.unwrap().unwrap();
-        assert_eq!(b3.len(), 1);
-        assert!(src.next_batch().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn csv_empty() {
-        let mut src = CsvSource::new(b"".as_slice(), 10);
-        assert!(src.next_batch().await.unwrap().is_none());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let b1 = rt.block_on(src.next_batch()).unwrap().unwrap();
+        assert_eq!(b1.num_rows(), 2);
+        let b2 = rt.block_on(src.next_batch()).unwrap().unwrap();
+        assert_eq!(b2.num_rows(), 2);
+        let b3 = rt.block_on(src.next_batch()).unwrap().unwrap();
+        assert_eq!(b3.num_rows(), 1);
+        assert!(rt.block_on(src.next_batch()).unwrap().is_none());
     }
 
     #[test]
@@ -294,9 +410,108 @@ mod tests {
 
     #[test]
     fn source_metadata_default() {
-        let src = CsvSource::new(b"".as_slice(), 10);
-        let m = src.metadata();
+        let m = SourceMetadata::default();
         assert!(m.estimated_rows.is_none());
         assert!(m.estimated_bytes.is_none());
+    }
+
+    #[test]
+    fn csv_source_empty_no_data_rows() {
+        let csv = b"key,value\n";
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let mut src = CsvSource::with_schema(csv.as_slice(), schema, 1024).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(src.next_batch()).unwrap().is_none());
+    }
+
+    #[test]
+    fn arrow_kv_batch_utf8_columns() {
+        use arrow_array::StringArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("v", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["alice", "bob"])),
+                Arc::new(StringArray::from(vec!["val_a", "val_b"])),
+            ],
+        )
+        .unwrap();
+
+        let kv = ArrowKvBatch::from_record_batch(&batch, 0, 1).unwrap();
+        assert_eq!(kv.len(), 2);
+        let pairs: Vec<_> = kv.iter().collect();
+        assert_eq!(pairs[0].0, b"alice");
+        assert_eq!(pairs[0].1, b"val_a");
+        assert_eq!(pairs[1].0, b"bob");
+        assert_eq!(pairs[1].1, b"val_b");
+        assert!(kv.total_bytes() > 0);
+    }
+
+    #[test]
+    fn arrow_kv_batch_rejects_non_byte_column() {
+        use arrow_array::Int32Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("v", DataType::Int32, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow_array::StringArray::from(vec!["a"])),
+                Arc::new(Int32Array::from(vec![42])),
+            ],
+        )
+        .unwrap();
+
+        let result = ArrowKvBatch::from_record_batch(&batch, 0, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Int32"));
+    }
+
+    #[test]
+    fn raw_encoding_source_maps_batches() {
+        use arrow_array::StringArray;
+
+        struct OneBatch(Option<RecordBatch>);
+        impl RecordBatchSource for OneBatch {
+            type Error = arrow_schema::ArrowError;
+            fn next_batch(
+                &mut self,
+            ) -> impl std::future::Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send
+            {
+                std::future::ready(Ok(self.0.take()))
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["k1"])),
+                Arc::new(StringArray::from(vec!["v1"])),
+            ],
+        )
+        .unwrap();
+
+        let mut src = RawEncodingSource::new(OneBatch(Some(batch)), 0, 1);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let kv = rt.block_on(src.next_batch()).unwrap().unwrap();
+        let pairs: Vec<_> = kv.iter().collect();
+        assert_eq!(pairs[0].0, b"k1");
+        assert_eq!(pairs[0].1, b"v1");
+
+        assert!(rt.block_on(src.next_batch()).unwrap().is_none());
     }
 }

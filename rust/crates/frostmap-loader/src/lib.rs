@@ -6,9 +6,10 @@ mod scatter;
 mod spill;
 
 pub use error::LoaderError;
-#[cfg(feature = "arrow")]
-pub use source::RecordBatchSource;
-pub use source::{KvBatch, KvSource, SourceMetadata, VecBatch};
+pub use source::{
+    ArrowKvBatch, CsvSource, KvBatch, KvSource, RawEncodingSource, RecordBatchSource,
+    SourceMetadata, VecBatch,
+};
 
 use std::path::Path;
 use std::sync::Arc;

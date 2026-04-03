@@ -9,8 +9,9 @@ use tracing::info;
 
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_encode::config::WorkerConfig;
-use frostmap_loader::source::CsvSource;
-use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
+use frostmap_loader::{
+    CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource, SnapshotLoader,
+};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -81,12 +82,19 @@ pub enum Source {
         #[arg(long)]
         download_benchmark: bool,
     },
-    /// Load from a two-column CSV (base64-encoded key, base64-encoded value).
-    /// Reads from stdin if --file is not provided.
+    /// Load from a CSV file with headers. Reads from stdin if --file is omitted or "-".
     Csv {
-        /// Path to the CSV file. Reads from stdin when omitted.
+        /// Path to the CSV file. Omit or pass "-" to read from stdin.
         #[arg(long)]
         file: Option<PathBuf>,
+
+        /// Column name to use as the KV key
+        #[arg(long, default_value = "key")]
+        key_column: String,
+
+        /// Column name to use as the KV value
+        #[arg(long, default_value = "value")]
+        value_column: String,
 
         /// Number of rows per internal batch
         #[arg(long, default_value = "1024")]
@@ -155,9 +163,36 @@ pub async fn run(args: LoadArgs) -> Result<()> {
             )
             .await
         }
-        Source::Csv { file, batch_size } => {
-            // Validate the source is readable even on dry-run.
-            let source = open_csv_source(file, batch_size)?;
+        Source::Csv {
+            file,
+            key_column,
+            value_column,
+            batch_size,
+        } => {
+            let use_stdin = file.as_ref().is_none_or(|p| p.as_os_str() == "-");
+
+            let csv_source = if use_stdin {
+                info!(key_column, value_column, "loading CSV from stdin");
+                CsvSource::from_reader(std::io::stdin().lock(), batch_size)
+                    .context("failed to read CSV from stdin")?
+            } else {
+                let path = file.as_ref().unwrap();
+                info!(file = %path.display(), key_column, value_column, "loading CSV from file");
+                CsvSource::from_reader(
+                    std::fs::File::open(path)
+                        .with_context(|| format!("failed to open {}", path.display()))?,
+                    batch_size,
+                )
+                .context("failed to read CSV")?
+            };
+
+            let schema = csv_source.schema();
+            let key_col_idx = schema
+                .index_of(&key_column)
+                .with_context(|| format!("key column {key_column:?} not found in CSV"))?;
+            let val_col_idx = schema
+                .index_of(&value_column)
+                .with_context(|| format!("value column {value_column:?} not found in CSV"))?;
 
             if args.dry_run {
                 info!("dry-run: source validated, no data written");
@@ -165,6 +200,7 @@ pub async fn run(args: LoadArgs) -> Result<()> {
             }
 
             let output = args.output.context("--output is required")?;
+            let source = RawEncodingSource::new(csv_source, key_col_idx, val_col_idx);
             load_sources(
                 &output,
                 args.partitions,
@@ -425,30 +461,6 @@ async fn open_bq_session(
     );
 
     Ok(session)
-}
-
-fn open_csv_source(
-    file: Option<PathBuf>,
-    batch_size: usize,
-) -> Result<CsvSource<Box<dyn std::io::Read + Send>>> {
-    match &file {
-        Some(path) => {
-            info!(file = %path.display(), "loading CSV from file");
-            let f = std::fs::File::open(path)
-                .with_context(|| format!("failed to open {}", path.display()))?;
-            Ok(CsvSource::new(Box::new(f), batch_size))
-        }
-        None => {
-            info!("loading CSV from stdin");
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)
-                .context("failed to read stdin")?;
-            Ok(CsvSource::new(
-                Box::new(std::io::Cursor::new(buf)),
-                batch_size,
-            ))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

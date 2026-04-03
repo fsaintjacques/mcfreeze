@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-frostmap-loader = { path = "../frostmap-loader", features = ["arrow"] }
+frostmap-loader = { path = "../frostmap-loader" }
 apb-core        = { path = "../../../../../../../apb/crates/apb-core" }
 arrow-array     = "58"
 arrow-schema    = "58"
