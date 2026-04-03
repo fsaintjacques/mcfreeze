@@ -120,25 +120,25 @@ impl KvSource for BqStreamSource {
 /// the caller receives the complete batch for downstream processing
 /// (e.g. protobuf encoding via apb).
 pub struct BqRecordBatchSource {
-    client:       BqApi,
-    stream_name:  String,
-    decoder:      StreamDecoder,
-    state:        ReadState,
+    client: BqApi,
+    stream_name: String,
+    decoder: StreamDecoder,
+    state: ReadState,
 }
 
 unsafe impl Send for BqRecordBatchSource {}
 
 impl BqRecordBatchSource {
     pub(crate) fn new(
-        client:       BqApi,
-        stream_name:  String,
+        client: BqApi,
+        stream_name: String,
         schema_bytes: Bytes,
     ) -> Result<Self, BqError> {
         Ok(Self {
             client,
             stream_name,
             decoder: prime_decoder(&schema_bytes)?,
-            state:   ReadState::NotStarted,
+            state: ReadState::NotStarted,
         })
     }
 

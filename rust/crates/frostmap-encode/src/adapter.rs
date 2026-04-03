@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use arrow_array::{Array, BinaryArray, RecordBatch};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{BinaryType, LargeBinaryType};
+use arrow_array::{Array, BinaryArray, RecordBatch};
 use arrow_schema::DataType;
 
 use apb_core::transcode::Transcoder;
@@ -22,9 +22,13 @@ use crate::error::EncodeError;
 pub trait RecordBatchSource: Send {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn next_batch(&mut self) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send;
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send;
 
-    fn metadata(&self) -> SourceMetadata { SourceMetadata::default() }
+    fn metadata(&self) -> SourceMetadata {
+        SourceMetadata::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -34,7 +38,9 @@ pub trait RecordBatchSource: Send {
 impl RecordBatchSource for frostmap_bq::BqRecordBatchSource {
     type Error = frostmap_bq::BqError;
 
-    fn next_batch(&mut self) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send {
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send {
         self.next_batch()
     }
 }
@@ -63,10 +69,13 @@ impl<S> ProtobufEncodingSource<S> {
     /// - `transcoder`: pre-built apb `Transcoder`, shared via `Arc` (it is `Sync`)
     ///
     /// `value_col_indices` is auto-computed as all columns except the key.
-    pub fn new(inner: S, key_col_idx: usize, n_columns: usize, transcoder: Arc<Transcoder>) -> Self {
-        let value_col_indices: Vec<usize> = (0..n_columns)
-            .filter(|&i| i != key_col_idx)
-            .collect();
+    pub fn new(
+        inner: S,
+        key_col_idx: usize,
+        n_columns: usize,
+        transcoder: Arc<Transcoder>,
+    ) -> Self {
+        let value_col_indices: Vec<usize> = (0..n_columns).filter(|&i| i != key_col_idx).collect();
         Self {
             inner,
             key_col_idx,
@@ -83,34 +92,33 @@ where
     type Batch = VecBatch;
     type Error = EncodeError;
 
-    fn next_batch(&mut self) -> impl Future<Output = Result<Option<VecBatch>, EncodeError>> + Send {
-        async move {
-            let batch = match self.inner.next_batch().await {
-                Ok(Some(b)) => b,
-                Ok(None) => return Ok(None),
-                Err(e) => return Err(EncodeError::Source(Box::new(e))),
-            };
+    async fn next_batch(&mut self) -> Result<Option<VecBatch>, EncodeError> {
+        let batch = match self.inner.next_batch().await {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(EncodeError::Source(Box::new(e))),
+        };
 
-            let num_rows = batch.num_rows();
-            let key_col = batch.column(self.key_col_idx);
+        let num_rows = batch.num_rows();
+        let key_col = batch.column(self.key_col_idx);
 
-            // Project value columns for transcoding.
-            let value_batch = batch.project(&self.value_col_indices)
-                .map_err(|e| EncodeError::Arrow(e))?;
+        // Project value columns for transcoding.
+        let value_batch = batch
+            .project(&self.value_col_indices)
+            .map_err(EncodeError::Arrow)?;
 
-            // Transcode value columns → protobuf BinaryArray.
-            let proto_values: BinaryArray = self.transcoder.transcode_arrow(&value_batch)?;
+        // Transcode value columns → protobuf BinaryArray.
+        let proto_values: BinaryArray = self.transcoder.transcode_arrow(&value_batch)?;
 
-            // Build (key, value) pairs.
-            let mut pairs = Vec::with_capacity(num_rows);
-            for i in 0..num_rows {
-                let key = extract_key_bytes(key_col.as_ref(), i)?;
-                let value = proto_values.value(i);
-                pairs.push((key.to_vec(), value.to_vec()));
-            }
-
-            Ok(Some(VecBatch(pairs)))
+        // Build (key, value) pairs.
+        let mut pairs = Vec::with_capacity(num_rows);
+        for i in 0..num_rows {
+            let key = extract_key_bytes(key_col.as_ref(), i)?;
+            let value = proto_values.value(i);
+            pairs.push((key.to_vec(), value.to_vec()));
         }
+
+        Ok(Some(VecBatch(pairs)))
     }
 
     fn metadata(&self) -> SourceMetadata {
@@ -121,7 +129,9 @@ where
 /// Extract key bytes from an Arrow column at the given row index.
 fn extract_key_bytes(col: &dyn Array, row: usize) -> Result<&[u8], EncodeError> {
     if col.is_null(row) {
-        return Err(EncodeError::Config(format!("key column is null at row {row}")));
+        return Err(EncodeError::Config(format!(
+            "key column is null at row {row}"
+        )));
     }
     match col.data_type() {
         DataType::Binary => Ok(col.as_bytes::<BinaryType>().value(row)),
@@ -139,12 +149,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use arrow_array::{Int32Array, StringArray, Float64Array};
+    use arrow_array::{Float64Array, Int32Array, StringArray};
     use arrow_schema::{Field, Schema};
 
-    use apb_core::generate::generate_file_descriptor;
     use apb_core::descriptor::ProtoSchema;
-    use apb_core::mapping::{InferOptions, infer_mapping};
+    use apb_core::generate::generate_file_descriptor;
+    use apb_core::mapping::{infer_mapping, InferOptions};
     use prost_reflect::prost::Message;
     use prost_reflect::prost_types::FileDescriptorSet;
 
@@ -163,15 +173,13 @@ mod tests {
     impl RecordBatchSource for VecRecordBatchSource {
         type Error = arrow_schema::ArrowError;
 
-        fn next_batch(&mut self) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send {
-            async move {
-                if self.idx < self.batches.len() {
-                    let batch = self.batches[self.idx].clone();
-                    self.idx += 1;
-                    Ok(Some(batch))
-                } else {
-                    Ok(None)
-                }
+        async fn next_batch(&mut self) -> Result<Option<RecordBatch>, Self::Error> {
+            if self.idx < self.batches.len() {
+                let batch = self.batches[self.idx].clone();
+                self.idx += 1;
+                Ok(Some(batch))
+            } else {
+                Ok(None)
             }
         }
     }
@@ -192,7 +200,8 @@ mod tests {
                 Arc::new(Int32Array::from(vec![30, 25])),
                 Arc::new(Float64Array::from(vec![95.5, 87.3])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Build transcoder from value schema (columns 1, 2 — everything except key)
         let value_schema = Schema::new(vec![
@@ -228,8 +237,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_transcoder_auto_generate() {
-        use crate::config::ProtobufEncoding;
         use crate::builder::build_transcoder;
+        use crate::config::ProtobufEncoding;
 
         let value_schema = Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
@@ -252,7 +261,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["hello"])),
                 Arc::new(Int32Array::from(vec![42])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = transcoder.transcode_arrow(&batch).unwrap();
         assert_eq!(result.len(), 1);
@@ -261,8 +271,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_transcoder_inline_descriptor() {
-        use crate::config::ProtobufEncoding;
         use crate::builder::build_transcoder;
+        use crate::config::ProtobufEncoding;
         use prost_reflect::prost::Message;
         use prost_reflect::prost_types::FileDescriptorSet;
 
@@ -275,7 +285,8 @@ mod tests {
         let fd = apb_core::generate::generate_file_descriptor(&value_schema, "pkg", "Msg").unwrap();
         let fds = FileDescriptorSet { file: vec![fd] };
         let desc_bytes = fds.encode_to_vec();
-        let desc_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &desc_bytes);
+        let desc_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &desc_bytes);
 
         let config = ProtobufEncoding {
             descriptor: Some(desc_b64),
@@ -292,7 +303,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["hello"])),
                 Arc::new(Int32Array::from(vec![42])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = transcoder.transcode_arrow(&batch).unwrap();
         assert_eq!(result.len(), 1);
@@ -301,12 +313,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_transcoder_mutual_exclusion_error() {
-        use crate::config::ProtobufEncoding;
         use crate::builder::build_transcoder;
+        use crate::config::ProtobufEncoding;
 
-        let value_schema = Schema::new(vec![
-            Field::new("x", DataType::Int32, false),
-        ]);
+        let value_schema = Schema::new(vec![Field::new("x", DataType::Int32, false)]);
 
         let config = ProtobufEncoding {
             descriptor: Some("abc".into()),
@@ -317,17 +327,19 @@ mod tests {
 
         let result = build_transcoder(&config, &value_schema);
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("mutually exclusive"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("mutually exclusive"));
     }
 
     #[tokio::test]
     async fn test_build_transcoder_missing_package_error() {
-        use crate::config::ProtobufEncoding;
         use crate::builder::build_transcoder;
+        use crate::config::ProtobufEncoding;
 
-        let value_schema = Schema::new(vec![
-            Field::new("x", DataType::Int32, false),
-        ]);
+        let value_schema = Schema::new(vec![Field::new("x", DataType::Int32, false)]);
 
         let config = ProtobufEncoding {
             descriptor: None,
@@ -338,6 +350,10 @@ mod tests {
 
         let result = build_transcoder(&config, &value_schema);
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("package is required"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("package is required"));
     }
 }

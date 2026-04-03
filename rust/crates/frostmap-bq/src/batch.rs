@@ -30,6 +30,10 @@ impl BinaryCol {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Total byte size of all values in the column — O(1) via the Arrow values buffer.
     pub fn total_bytes(&self) -> usize {
         let arr = self.0.as_ref();

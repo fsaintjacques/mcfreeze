@@ -246,21 +246,20 @@ fn log_stats(stats: &frostmap_loader::LoadStats) {
 // Config-driven load
 // ---------------------------------------------------------------------------
 
-async fn run_from_config(
-    config_path: &Path,
-    dry_run:      bool,
-    progress_secs: u64,
-) -> Result<()> {
+async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) -> Result<()> {
     let config_bytes = std::fs::read(config_path)
         .with_context(|| format!("failed to read config file {}", config_path.display()))?;
     let config: WorkerConfig = serde_json::from_slice(&config_bytes)
         .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
 
-    let bq = config.source.bigquery
+    let bq = config
+        .source
+        .bigquery
         .as_ref()
         .context("only bigquery source is currently supported in config mode")?;
 
-    let has_protobuf_encoding = config.encoding
+    let has_protobuf_encoding = config
+        .encoding
         .as_ref()
         .and_then(|e| e.protobuf.as_ref())
         .is_some();
@@ -282,7 +281,8 @@ async fn run_from_config(
             disable_compression: bq.no_compression,
         };
 
-        let session = BqReadSession::open(bq_config).await
+        let session = BqReadSession::open(bq_config)
+            .await
             .context("failed to open BigQuery read session")?;
 
         if dry_run {
@@ -296,7 +296,9 @@ async fn run_from_config(
         let estimated_rows = session.metadata().estimated_rows;
 
         // Build value schema (all columns except key).
-        let value_fields: Vec<_> = schema.fields().iter()
+        let value_fields: Vec<_> = schema
+            .fields()
+            .iter()
             .enumerate()
             .filter(|&(i, _)| i != key_col_idx)
             .map(|(_, f)| f.clone())
@@ -307,33 +309,56 @@ async fn run_from_config(
         let transcoder = frostmap_encode::build_transcoder(proto_config, &value_schema)
             .context("failed to build protobuf transcoder")?;
 
-        info!(message_fields = value_schema.fields().len(), "protobuf transcoder ready");
+        info!(
+            message_fields = value_schema.fields().len(),
+            "protobuf transcoder ready"
+        );
 
-        let rb_sources = session.into_record_batch_sources()
+        let rb_sources = session
+            .into_record_batch_sources()
             .context("failed to create record batch sources")?;
 
         // Transcoder is Sync but not Clone — share via Arc.
         let transcoder = Arc::new(transcoder);
 
-        let sources: Vec<_> = rb_sources.into_iter()
-            .map(|s| frostmap_encode::ProtobufEncodingSource::new(
-                s, key_col_idx, n_columns, transcoder.clone(),
-            ))
+        let sources: Vec<_> = rb_sources
+            .into_iter()
+            .map(|s| {
+                frostmap_encode::ProtobufEncodingSource::new(
+                    s,
+                    key_col_idx,
+                    n_columns,
+                    transcoder.clone(),
+                )
+            })
             .collect();
 
         load_sources(
-            &config.output, config.partitions, config.index_parallelism,
-            progress_secs, estimated_rows, sources,
-        ).await
+            &config.output,
+            config.partitions,
+            config.index_parallelism,
+            progress_secs,
+            estimated_rows,
+            sources,
+        )
+        .await
     } else {
         // Raw encoding: use existing key/value column path.
-        let value_column = bq.value_column.as_deref()
+        let value_column = bq
+            .value_column
+            .as_deref()
             .context("value_column is required when encoding is raw (no encoding spec)")?;
 
         let session = open_bq_session(
-            Some(bq.project.clone()), &bq.table, &bq.key_column, value_column,
-            bq.streams, bq.row_restriction.as_deref(), bq.no_compression,
-        ).await?;
+            Some(bq.project.clone()),
+            &bq.table,
+            &bq.key_column,
+            value_column,
+            bq.streams,
+            bq.row_restriction.as_deref(),
+            bq.no_compression,
+        )
+        .await?;
 
         if dry_run {
             info!("dry-run: source validated, no data written");
@@ -341,13 +366,19 @@ async fn run_from_config(
         }
 
         let estimated_rows = session.metadata().estimated_rows;
-        let sources = session.into_sources()
+        let sources = session
+            .into_sources()
             .context("failed to split session into sources")?;
 
         load_sources(
-            &config.output, config.partitions, config.index_parallelism,
-            progress_secs, estimated_rows, sources,
-        ).await
+            &config.output,
+            config.partitions,
+            config.index_parallelism,
+            progress_secs,
+            estimated_rows,
+            sources,
+        )
+        .await
     }
 }
 

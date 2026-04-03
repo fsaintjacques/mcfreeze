@@ -17,8 +17,12 @@ pub struct WorkerConfig {
     pub index_parallelism: usize,
 }
 
-fn default_partitions() -> u32 { 64 }
-fn default_index_parallelism() -> usize { 2 }
+fn default_partitions() -> u32 {
+    64
+}
+fn default_index_parallelism() -> usize {
+    2
+}
 
 /// Discriminated union: exactly one field is set.
 #[derive(Debug, Deserialize)]
@@ -46,7 +50,9 @@ pub struct BigQuerySource {
     pub no_compression: bool,
 }
 
-fn default_streams() -> i32 { 8 }
+fn default_streams() -> i32 {
+    8
+}
 
 /// Discriminated union for value encoding.
 /// When absent, values are taken raw from a single column.

@@ -83,12 +83,16 @@ func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 		return "", fmt.Errorf("fork builder: mkdir %s: %w", dir, err)
 	}
 
+	bq := spec.Source.BigQuery
+	if bq == nil {
+		return "", fmt.Errorf("fork builder: only bigquery source is supported")
+	}
 	cmd := exec.CommandContext(ctx, b.fmBinary(), "load",
 		"-o", dir,
 		"--partitions", fmt.Sprintf("%d", spec.ShardCount),
 		"bq",
-		"--project", spec.Source.Project,
-		"--table", spec.Source.Table,
+		"--project", bq.Project,
+		"--table", bq.Table,
 	)
 	// Detach from parent process group so the child survives if the
 	// control-plane exits.

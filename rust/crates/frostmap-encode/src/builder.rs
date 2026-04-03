@@ -1,11 +1,11 @@
 use arrow_schema::Schema;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use prost_reflect::prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 
 use apb_core::descriptor::ProtoSchema;
 use apb_core::generate::generate_file_descriptor;
-use apb_core::mapping::{InferOptions, infer_mapping};
+use apb_core::mapping::{infer_mapping, InferOptions};
 use apb_core::transcode::Transcoder;
 
 use crate::config::ProtobufEncoding;
@@ -45,14 +45,10 @@ fn resolve_descriptor(
     value_schema: &Schema,
 ) -> Result<Vec<u8>, EncodeError> {
     match (&config.descriptor, &config.descriptor_uri) {
-        (Some(_), Some(_)) => {
-            Err(EncodeError::Config(
-                "descriptor and descriptor_uri are mutually exclusive".into(),
-            ))
-        }
-        (Some(desc_b64), None) => {
-            Ok(STANDARD.decode(desc_b64)?)
-        }
+        (Some(_), Some(_)) => Err(EncodeError::Config(
+            "descriptor and descriptor_uri are mutually exclusive".into(),
+        )),
+        (Some(desc_b64), None) => Ok(STANDARD.decode(desc_b64)?),
         (None, Some(_uri)) => {
             // TODO: download from GCS
             Err(EncodeError::Config(

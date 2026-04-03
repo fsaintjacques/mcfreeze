@@ -207,7 +207,9 @@ impl BqReadSession {
     /// Pass the returned `Vec` directly to [`SnapshotLoader::load_parallel`].
     pub fn into_sources(self) -> Result<Vec<BqStreamSource>, BqError> {
         let val_col_idx = self.val_col_idx.ok_or_else(|| {
-            BqError::Schema("into_sources() requires value_column to be set in BqSourceConfig".into())
+            BqError::Schema(
+                "into_sources() requires value_column to be set in BqSourceConfig".into(),
+            )
         })?;
         self.streams
             .into_iter()
@@ -231,11 +233,7 @@ impl BqReadSession {
         self.streams
             .into_iter()
             .map(|name| {
-                BqRecordBatchSource::new(
-                    self.client.clone(),
-                    name,
-                    self.schema_bytes.clone(),
-                )
+                BqRecordBatchSource::new(self.client.clone(), name, self.schema_bytes.clone())
             })
             .collect()
     }

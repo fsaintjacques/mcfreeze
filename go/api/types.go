@@ -27,9 +27,9 @@ type BigQuerySource struct {
 	Project        string   `json:"project"`
 	Table          string   `json:"table"`
 	KeyColumn      string   `json:"key_column"`
-	ValueColumn    string   `json:"value_column,omitempty"`     // required when encoding is raw
-	SelectedFields []string `json:"selected_fields,omitempty"`  // column projection; empty = all columns
-	RowRestriction string   `json:"row_restriction,omitempty"`  // SQL WHERE predicate pushed down to BQ
+	ValueColumn    string   `json:"value_column,omitempty"`    // required when encoding is raw
+	SelectedFields []string `json:"selected_fields,omitempty"` // column projection; empty = all columns
+	RowRestriction string   `json:"row_restriction,omitempty"` // SQL WHERE predicate pushed down to BQ
 }
 
 // EncodingSpec is a discriminated union for value encoding.
