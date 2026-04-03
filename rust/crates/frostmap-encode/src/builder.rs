@@ -22,8 +22,15 @@ pub fn build_transcoder(
     config: &ProtobufEncoding,
     value_schema: &Schema,
 ) -> Result<Transcoder, EncodeError> {
+    let auto_generated = config.descriptor.is_none() && config.descriptor_uri.is_none();
     let descriptor_bytes = resolve_descriptor(config, value_schema)?;
-    let fqn = fully_qualified_name(config);
+    let fqn = if auto_generated {
+        // Auto-generated: FQN is package.message_name
+        fully_qualified_name(config)
+    } else {
+        // Explicit descriptor: message_name is already the FQN
+        config.message_name.clone()
+    };
 
     let schema = ProtoSchema::from_bytes(&descriptor_bytes)?;
     let msg = schema.message(&fqn)?;

@@ -48,10 +48,13 @@ type ProtobufEncoding struct {
 	// (e.g. "gs://bucket/schema.desc"). Mutually exclusive with Descriptor.
 	DescriptorURI string `json:"descriptor_uri,omitempty"`
 	// Package is the protobuf package name (e.g. "mypackage").
-	// Required when auto-generating; ignored when a descriptor is provided.
+	// Required when auto-generating (no descriptor); ignored otherwise.
 	Package string `json:"package,omitempty"`
-	// MessageName is the protobuf message name (e.g. "MyMessage").
-	// Required always.
+	// MessageName is the protobuf message name.
+	// When auto-generating: bare name (e.g. "MyMessage") — combined with
+	// Package to form the FQN.
+	// When a descriptor is provided: fully-qualified name
+	// (e.g. "mypackage.MyMessage").
 	MessageName string `json:"message_name"`
 }
 

@@ -258,4 +258,86 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(!result.value(0).is_empty());
     }
+
+    #[tokio::test]
+    async fn test_build_transcoder_inline_descriptor() {
+        use crate::config::ProtobufEncoding;
+        use crate::builder::build_transcoder;
+        use prost_reflect::prost::Message;
+        use prost_reflect::prost_types::FileDescriptorSet;
+
+        let value_schema = Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("count", DataType::Int32, false),
+        ]);
+
+        // Generate a descriptor, then base64-encode it to simulate inline.
+        let fd = apb_core::generate::generate_file_descriptor(&value_schema, "pkg", "Msg").unwrap();
+        let fds = FileDescriptorSet { file: vec![fd] };
+        let desc_bytes = fds.encode_to_vec();
+        let desc_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &desc_bytes);
+
+        let config = ProtobufEncoding {
+            descriptor: Some(desc_b64),
+            descriptor_uri: None,
+            package: None,
+            message_name: "pkg.Msg".into(), // FQN when descriptor is provided
+        };
+
+        let transcoder = build_transcoder(&config, &value_schema).unwrap();
+
+        let batch = RecordBatch::try_new(
+            Arc::new(value_schema),
+            vec![
+                Arc::new(StringArray::from(vec!["hello"])),
+                Arc::new(Int32Array::from(vec![42])),
+            ],
+        ).unwrap();
+
+        let result = transcoder.transcode_arrow(&batch).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(!result.value(0).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_build_transcoder_mutual_exclusion_error() {
+        use crate::config::ProtobufEncoding;
+        use crate::builder::build_transcoder;
+
+        let value_schema = Schema::new(vec![
+            Field::new("x", DataType::Int32, false),
+        ]);
+
+        let config = ProtobufEncoding {
+            descriptor: Some("abc".into()),
+            descriptor_uri: Some("gs://bucket/file".into()),
+            package: None,
+            message_name: "Msg".into(),
+        };
+
+        let result = build_transcoder(&config, &value_schema);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn test_build_transcoder_missing_package_error() {
+        use crate::config::ProtobufEncoding;
+        use crate::builder::build_transcoder;
+
+        let value_schema = Schema::new(vec![
+            Field::new("x", DataType::Int32, false),
+        ]);
+
+        let config = ProtobufEncoding {
+            descriptor: None,
+            descriptor_uri: None,
+            package: None, // missing — should error
+            message_name: "Msg".into(),
+        };
+
+        let result = build_transcoder(&config, &value_schema);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("package is required"));
+    }
 }

@@ -66,10 +66,13 @@ pub struct ProtobufEncoding {
     /// Mutually exclusive with `descriptor`.
     pub descriptor_uri: Option<String>,
     /// Protobuf package name (e.g. `"mypackage"`).
-    /// Required when auto-generating; ignored when a descriptor is provided.
+    /// Required when auto-generating (no descriptor); ignored otherwise.
     pub package: Option<String>,
-    /// Protobuf message name (e.g. `"MyMessage"`).
-    /// Required always — used as the top-level message to transcode into.
+    /// Protobuf message name.
+    /// When auto-generating: bare name (e.g. `"MyMessage"`) — combined with
+    /// `package` to form the FQN.
+    /// When a descriptor is provided: fully-qualified name
+    /// (e.g. `"mypackage.MyMessage"`).
     pub message_name: String,
 }
 
