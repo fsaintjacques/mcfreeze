@@ -11,10 +11,12 @@ import (
 )
 
 // VersionEntry extends api.VersionRecord with the local snapshot path
-// (used by the orchestrator to symlink into the volume base).
+// (used by the orchestrator to symlink into the volume base) and the
+// build handle (non-empty while State == building).
 type VersionEntry struct {
 	api.VersionRecord
 	SnapshotPath string
+	BuildHandle  BuildHandle
 }
 
 // Store holds the control-plane state in memory. All methods are safe for
@@ -397,6 +399,38 @@ func (s *Store) DeleteVersion(dataset, versionID string) error {
 		}
 	}
 	return fmt.Errorf("version %q not found for dataset %q", versionID, dataset)
+}
+
+// SetBuildHandle sets the build handle for a version in building state.
+func (s *Store) SetBuildHandle(dataset, versionID string, handle BuildHandle) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.findVersion(dataset, versionID)
+	if err != nil {
+		return err
+	}
+	if v.State != api.StateBuilding {
+		return fmt.Errorf("version %q is %q, expected building", versionID, v.State)
+	}
+	v.BuildHandle = handle
+	return nil
+}
+
+// GetBuildingVersions returns all versions in building state across all datasets.
+func (s *Store) GetBuildingVersions() []VersionEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var out []VersionEntry
+	for _, versions := range s.versions {
+		for _, v := range versions {
+			if v.State == api.StateBuilding {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
 
 // findVersion returns a pointer to the version entry (caller must hold mu).

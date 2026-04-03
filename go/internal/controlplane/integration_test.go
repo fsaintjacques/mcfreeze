@@ -35,7 +35,7 @@ func TestFullLoop(t *testing.T) {
 	buildBase := t.TempDir()
 
 	// --- control-plane ---
-	builder := &controlplane.FakeVersionBuilder{
+	builder := &controlplane.FakeBuilder{
 		FMBinary:   testutil.FMBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,
@@ -123,7 +123,7 @@ func TestFullLoop(t *testing.T) {
 func TestMultiNodeConvergenceAndRetirement(t *testing.T) {
 	buildBase := t.TempDir()
 
-	builder := &controlplane.FakeVersionBuilder{
+	builder := &controlplane.FakeBuilder{
 		FMBinary:   testutil.FMBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,

@@ -348,6 +348,59 @@ func TestStore_GetAssignments_UnknownNode(t *testing.T) {
 	}
 }
 
+// --- build handle tests ---
+
+func TestStore_SetBuildHandle(t *testing.T) {
+	s := NewStore()
+	s.CreateVersion("ds", "v1")
+
+	if err := s.SetBuildHandle("ds", "v1", "handle-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	versions := s.GetVersions("ds")
+	if len(versions) != 1 || versions[0].BuildHandle != "handle-1" {
+		t.Fatalf("expected handle-1, got %+v", versions)
+	}
+}
+
+func TestStore_SetBuildHandle_RejectsNonBuilding(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap", "pv")
+
+	if err := s.SetBuildHandle("ds", "v1", "handle-1"); err == nil {
+		t.Fatal("expected error setting handle on ready version")
+	}
+}
+
+func TestStore_GetBuildingVersions(t *testing.T) {
+	s := NewStore()
+	s.CreateVersion("ds1", "v1")
+	s.CreateVersion("ds2", "v2")
+
+	building := s.GetBuildingVersions()
+	if len(building) != 2 {
+		t.Fatalf("expected 2 building versions, got %d", len(building))
+	}
+
+	// Mark one as failed, only one should remain.
+	s.MarkFailed("ds1", "v1", "oops")
+	building = s.GetBuildingVersions()
+	if len(building) != 1 || building[0].ID != "v2" {
+		t.Fatalf("expected only v2 building, got %+v", building)
+	}
+}
+
+func TestStore_GetBuildingVersions_Empty(t *testing.T) {
+	s := NewStore()
+	building := s.GetBuildingVersions()
+	if len(building) != 0 {
+		t.Fatalf("expected 0 building versions, got %d", len(building))
+	}
+}
+
 func TestStore_ReportAndGetState(t *testing.T) {
 	s := NewStore()
 
