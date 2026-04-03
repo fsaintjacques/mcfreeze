@@ -14,6 +14,10 @@ import (
 
 // FakeBuilder implements AsyncBuilder by running fm load csv synchronously
 // in Start and storing the result. Used for tests where builds are fast.
+//
+// Concurrency: the internal mutex protects the results map only. Callers
+// must serialize Start calls for the same (dataset, versionID) per the
+// AsyncBuilder contract.
 type FakeBuilder struct {
 	// Data maps dataset name to key-value pairs to include in the snapshot.
 	Data map[string][][2][]byte

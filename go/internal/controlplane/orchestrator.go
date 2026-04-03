@@ -173,14 +173,13 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		slog.Error("initial reconcile", "err", err)
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
 	for {
+		// Schedule next tick only after the current reconciliation completes
+		// (tick-with-skip: no accumulated ticks during slow reconciliation).
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-time.After(interval):
 			if err := o.ReconcileBuilds(ctx); err != nil {
 				slog.Error("reconcile builds", "err", err)
 			}

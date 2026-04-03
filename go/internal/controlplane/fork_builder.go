@@ -18,6 +18,15 @@ import (
 // ForkBuilder implements AsyncBuilder by forking an fm subprocess.
 // The build handle is the output directory path, which is deterministic
 // from (OutputBase, dataset, versionID), making Start naturally idempotent.
+//
+// Concurrency: ForkBuilder is safe for concurrent use across different
+// (dataset, versionID) pairs. Callers must serialize Start calls for the
+// same (dataset, versionID) — the orchestrator guarantees this.
+//
+// Known limitation: process identity is tracked by PID only. PID recycling
+// could cause Poll to misidentify an unrelated process as the build, or
+// Cancel to kill a wrong process. This is acceptable for the fork builder's
+// expected lifetime (transitional until K8s Job builder).
 type ForkBuilder struct {
 	// FMBinary is the path to the fm binary. Defaults to "fm".
 	FMBinary string
@@ -90,6 +99,11 @@ func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 		return "", fmt.Errorf("fork builder: start fm: %w", err)
 	}
 
+	// Reap the child in the background so we don't leak a zombie or the
+	// exec.Cmd internal goroutine. We track the process via the pid file,
+	// not via the exec.Cmd.
+	go cmd.Wait()
+
 	// Write pid file.
 	pidPath := filepath.Join(dir, pidFile)
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
@@ -97,10 +111,6 @@ func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 		os.RemoveAll(dir)
 		return "", fmt.Errorf("fork builder: write pid: %w", err)
 	}
-
-	// Release the process so it isn't waited on by this goroutine —
-	// we poll via the pid file.
-	cmd.Process.Release()
 
 	return handle, nil
 }
@@ -150,8 +160,11 @@ func (b *ForkBuilder) Cancel(_ context.Context, handle BuildHandle) error {
 		return nil
 	}
 
-	// SIGTERM.
-	proc.Signal(syscall.SIGTERM)
+	// SIGTERM — if it fails, the process is already gone.
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		os.RemoveAll(dir)
+		return nil
+	}
 
 	// Wait for exit with grace period.
 	deadline := time.After(b.gracePeriod())
