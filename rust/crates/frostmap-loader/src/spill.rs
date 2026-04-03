@@ -10,9 +10,9 @@ use crate::error::LoaderError;
 // SpillRecord — 24-byte fixed-size on-disk entry
 // ---------------------------------------------------------------------------
 
-pub const SPILL_MAGIC:       [u8; 8] = *b"KVSPILL\n";
-pub const SPILL_HEADER_SIZE: usize   = 16; // magic(8) + count(8)
-pub const SPILL_RECORD_SIZE: usize   = 24;
+pub const SPILL_MAGIC: [u8; 8] = *b"KVSPILL\n";
+pub const SPILL_HEADER_SIZE: usize = 16; // magic(8) + count(8)
+pub const SPILL_RECORD_SIZE: usize = 24;
 
 /// On-disk representation of one index entry accumulated during scatter.
 ///
@@ -21,12 +21,12 @@ pub const SPILL_RECORD_SIZE: usize   = 24;
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct SpillRecord {
-    pub fingerprint:    u64,  //  8
-    pub aligned_offset: u64,  //  8
+    pub fingerprint: u64,    //  8
+    pub aligned_offset: u64, //  8
     /// Unused in V3 (value size is in the value header). Written as 0.
     /// Retained for struct layout compatibility (24-byte Pod record).
-    pub size:           u32,  //  4
-    pub _pad:           u32,  //  4  → total 24
+    pub size: u32, //  4
+    pub _pad: u32,           //  4  → total 24
 }
 
 const _: () = assert!(std::mem::size_of::<SpillRecord>() == SPILL_RECORD_SIZE);
@@ -37,7 +37,7 @@ const _: () = assert!(std::mem::size_of::<SpillRecord>() == SPILL_RECORD_SIZE);
 
 pub struct SpillWriter {
     writer: BufWriter<File>,
-    count:  u64,
+    count: u64,
 }
 
 impl SpillWriter {
@@ -59,8 +59,10 @@ impl SpillWriter {
     /// Flush, seek back to offset 8, overwrite the count field, return count.
     pub fn finish(mut self) -> Result<u64, LoaderError> {
         self.writer.flush()?;
-        let mut file = self.writer.into_inner()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let mut file = self
+            .writer
+            .into_inner()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         file.seek(SeekFrom::Start(8))?;
         file.write_all(&self.count.to_le_bytes())?;
         Ok(self.count)
@@ -72,14 +74,14 @@ impl SpillWriter {
 // ---------------------------------------------------------------------------
 
 pub struct SpillReader {
-    file:  File,
+    file: File,
     count: u64,
 }
 
 impl SpillReader {
     pub fn open(path: &Path) -> Result<Self, LoaderError> {
         let mut file = File::open(path)?;
-        let mut hdr  = [0u8; SPILL_HEADER_SIZE];
+        let mut hdr = [0u8; SPILL_HEADER_SIZE];
         file.read_exact(&mut hdr)?;
 
         if hdr[..8] != SPILL_MAGIC {
@@ -92,18 +94,20 @@ impl SpillReader {
         Ok(Self { file, count })
     }
 
-    pub fn count(&self) -> u64 { self.count }
+    pub fn count(&self) -> u64 {
+        self.count
+    }
 
     pub fn records(self) -> SpillIter {
         SpillIter {
-            reader:    BufReader::with_capacity(256 * 1024, self.file),
+            reader: BufReader::with_capacity(256 * 1024, self.file),
             remaining: self.count,
         }
     }
 }
 
 pub struct SpillIter {
-    reader:    BufReader<File>,
+    reader: BufReader<File>,
     remaining: u64,
 }
 
@@ -140,7 +144,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn round_trip(records: &[SpillRecord]) -> Vec<SpillRecord> {
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let path = dir.path().join("spill.bin");
 
         let mut w = SpillWriter::create(&path, 4096).unwrap();
@@ -168,37 +172,52 @@ mod tests {
 
     #[test]
     fn single_record() {
-        let r   = SpillRecord { fingerprint: 0xDEAD, aligned_offset: 42, size: 100, _pad: 0 };
+        let r = SpillRecord {
+            fingerprint: 0xDEAD,
+            aligned_offset: 42,
+            size: 100,
+            _pad: 0,
+        };
         let got = round_trip(&[r]);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].fingerprint,    r.fingerprint);
+        assert_eq!(got[0].fingerprint, r.fingerprint);
         assert_eq!(got[0].aligned_offset, r.aligned_offset);
-        assert_eq!(got[0].size,           r.size);
+        assert_eq!(got[0].size, r.size);
     }
 
     #[test]
     fn many_records() {
         let records: Vec<SpillRecord> = (0u64..1000)
-            .map(|i| SpillRecord { fingerprint: i, aligned_offset: i * 2, size: i as u32, _pad: 0 })
+            .map(|i| SpillRecord {
+                fingerprint: i,
+                aligned_offset: i * 2,
+                size: i as u32,
+                _pad: 0,
+            })
             .collect();
         let got = round_trip(&records);
         assert_eq!(got.len(), records.len());
         for (a, b) in got.iter().zip(records.iter()) {
-            assert_eq!(a.fingerprint,    b.fingerprint);
+            assert_eq!(a.fingerprint, b.fingerprint);
             assert_eq!(a.aligned_offset, b.aligned_offset);
-            assert_eq!(a.size,           b.size);
+            assert_eq!(a.size, b.size);
         }
     }
 
     #[test]
     fn spill_iter_size_hint() {
         let records: Vec<SpillRecord> = (0..5)
-            .map(|i| SpillRecord { fingerprint: i, ..Default::default() })
+            .map(|i| SpillRecord {
+                fingerprint: i,
+                ..Default::default()
+            })
             .collect();
-        let dir  = TempDir::new().unwrap();
+        let dir = TempDir::new().unwrap();
         let path = dir.path().join("spill.bin");
         let mut w = SpillWriter::create(&path, 4096).unwrap();
-        for &r in &records { w.push(r).unwrap(); }
+        for &r in &records {
+            w.push(r).unwrap();
+        }
         w.finish().unwrap();
 
         let mut iter = SpillReader::open(&path).unwrap().records();

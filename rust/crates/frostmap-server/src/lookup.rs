@@ -65,12 +65,13 @@ impl SnapshotLookup {
 #[async_trait]
 impl Lookup for SnapshotLookup {
     async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
-        let key   = Bytes::copy_from_slice(key);
+        let key = Bytes::copy_from_slice(key);
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
-            inner.get(key.as_ref())
-                 .map(|v| v.map(Bytes::from))
-                 .map_err(Into::into)
+            inner
+                .get(key.as_ref())
+                .map(|v| v.map(Bytes::from))
+                .map_err(Into::into)
         })
         .await
         .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
@@ -79,7 +80,9 @@ impl Lookup for SnapshotLookup {
 
 impl LookupFactory for SnapshotLookup {
     fn for_connection(&self) -> Box<dyn Lookup> {
-        Box::new(Self { inner: Arc::clone(&self.inner) })
+        Box::new(Self {
+            inner: Arc::clone(&self.inner),
+        })
     }
 }
 
@@ -122,7 +125,7 @@ impl LookupFactory for CatalogLookup {
 /// atomic increment, no heap allocation.
 struct PerConnectionCatalogLookup {
     registry: Arc<Registry>,
-    catalog:  Arc<ActiveCatalog>,
+    catalog: Arc<ActiveCatalog>,
 }
 
 #[async_trait]
@@ -137,8 +140,8 @@ impl Lookup for PerConnectionCatalogLookup {
         }
 
         let (dataset_bytes, actual_key) = split_prefix(key)?;
-        let dataset = std::str::from_utf8(dataset_bytes)
-            .map_err(|_| ServeError::InvalidDatasetName)?;
+        let dataset =
+            std::str::from_utf8(dataset_bytes).map_err(|_| ServeError::InvalidDatasetName)?;
         // Clone the Arc so we don't borrow self across the .await.
         Arc::clone(&self.catalog).get(dataset, actual_key).await
     }
@@ -151,7 +154,9 @@ impl Lookup for PerConnectionCatalogLookup {
 /// Split `b"<dataset>:<actual-key>"` on the first `b':'`.
 /// Both slices borrow from `key`; no allocation.
 fn split_prefix(key: &[u8]) -> Result<(&[u8], &[u8]), ServeError> {
-    let pos = key.iter().position(|&b| b == b':')
+    let pos = key
+        .iter()
+        .position(|&b| b == b':')
         .ok_or(ServeError::MissingDatasetPrefix)?;
     Ok((&key[..pos], &key[pos + 1..]))
 }
@@ -171,7 +176,9 @@ mod tests {
     fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {
         let dir = TempDir::new().unwrap();
         let mut w = SnapshotWriter::new(dir.path(), 4).unwrap();
-        for &(k, v) in pairs { w.write(k, v).unwrap(); }
+        for &(k, v) in pairs {
+            w.write(k, v).unwrap();
+        }
         w.finish(dir.path()).unwrap();
         dir
     }
@@ -180,15 +187,18 @@ mod tests {
 
     #[tokio::test]
     async fn hit_returns_value() {
-        let dir    = build_snapshot(&[(b"hello", b"world")]);
+        let dir = build_snapshot(&[(b"hello", b"world")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
-        assert_eq!(lookup.get(b"hello").await.unwrap(), Some(Bytes::from_static(b"world")));
+        assert_eq!(
+            lookup.get(b"hello").await.unwrap(),
+            Some(Bytes::from_static(b"world"))
+        );
     }
 
     #[tokio::test]
     async fn miss_returns_none() {
-        let dir    = build_snapshot(&[(b"present", b"yes")]);
+        let dir = build_snapshot(&[(b"present", b"yes")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
         assert_eq!(lookup.get(b"absent").await.unwrap(), None);
@@ -196,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_creates_independent_connection_lookups() {
-        let dir    = build_snapshot(&[(b"k", b"v")]);
+        let dir = build_snapshot(&[(b"k", b"v")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let factory = SnapshotLookup::new(Arc::new(reader));
         let mut c1 = factory.for_connection();
@@ -232,15 +242,28 @@ mod tests {
     fn make_registry(pairs: &[(&[u8], &[u8])], gen: u64) -> (Arc<Registry>, TempDir) {
         let dir = build_snapshot(pairs);
         let mut ds = HashMap::new();
-        ds.insert("ds".into(), DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap());
-        (Registry::new(ActiveCatalog::new(ds, gen, std::time::SystemTime::UNIX_EPOCH)), dir)
+        ds.insert(
+            "ds".into(),
+            DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap(),
+        );
+        (
+            Registry::new(ActiveCatalog::new(
+                ds,
+                gen,
+                std::time::SystemTime::UNIX_EPOCH,
+            )),
+            dir,
+        )
     }
 
     #[tokio::test]
     async fn catalog_hit() {
         let (reg, _dir) = make_registry(&[(b"key", b"val")], 1);
         let mut conn = CatalogLookup::new(reg).for_connection();
-        assert_eq!(conn.get(b"ds:key").await.unwrap(), Some(Bytes::from_static(b"val")));
+        assert_eq!(
+            conn.get(b"ds:key").await.unwrap(),
+            Some(Bytes::from_static(b"val"))
+        );
     }
 
     #[tokio::test]
@@ -252,14 +275,22 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_miss_unknown_dataset() {
-        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::UNIX_EPOCH));
+        let reg = Registry::new(ActiveCatalog::new(
+            HashMap::new(),
+            0,
+            std::time::SystemTime::UNIX_EPOCH,
+        ));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert_eq!(conn.get(b"unknown:key").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn catalog_missing_prefix_returns_error() {
-        let reg = Registry::new(ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::UNIX_EPOCH));
+        let reg = Registry::new(ActiveCatalog::new(
+            HashMap::new(),
+            0,
+            std::time::SystemTime::UNIX_EPOCH,
+        ));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert!(matches!(
             conn.get(b"no-colon").await.unwrap_err(),
@@ -273,18 +304,38 @@ mod tests {
         let dir2 = build_snapshot(&[(b"k", b"v2")]);
 
         let mut ds1 = HashMap::new();
-        ds1.insert("ds".into(), DatasetHandle::open("ds".into(), "v1".into(), dir1.path()).unwrap());
+        ds1.insert(
+            "ds".into(),
+            DatasetHandle::open("ds".into(), "v1".into(), dir1.path()).unwrap(),
+        );
         let mut ds2 = HashMap::new();
-        ds2.insert("ds".into(), DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap());
+        ds2.insert(
+            "ds".into(),
+            DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap(),
+        );
 
-        let reg = Registry::new(ActiveCatalog::new(ds1, 0, std::time::SystemTime::UNIX_EPOCH));
+        let reg = Registry::new(ActiveCatalog::new(
+            ds1,
+            0,
+            std::time::SystemTime::UNIX_EPOCH,
+        ));
         let mut conn = CatalogLookup::new(Arc::clone(&reg)).for_connection();
 
-        assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v1")));
+        assert_eq!(
+            conn.get(b"ds:k").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
 
-        reg.swap(Arc::new(ActiveCatalog::new(ds2, 1, std::time::SystemTime::UNIX_EPOCH)));
+        reg.swap(Arc::new(ActiveCatalog::new(
+            ds2,
+            1,
+            std::time::SystemTime::UNIX_EPOCH,
+        )));
 
-        assert_eq!(conn.get(b"ds:k").await.unwrap(), Some(Bytes::from_static(b"v2")));
+        assert_eq!(
+            conn.get(b"ds:k").await.unwrap(),
+            Some(Bytes::from_static(b"v2"))
+        );
     }
 
     // --- split_prefix ---
@@ -303,6 +354,9 @@ mod tests {
 
     #[test]
     fn split_prefix_no_colon() {
-        assert!(matches!(split_prefix(b"nocolon"), Err(ServeError::MissingDatasetPrefix)));
+        assert!(matches!(
+            split_prefix(b"nocolon"),
+            Err(ServeError::MissingDatasetPrefix)
+        ));
     }
 }

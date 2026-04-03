@@ -5,9 +5,11 @@ use memmap2::MmapOptions;
 
 use crate::{
     data::pread,
-    index::{self, Bucket, fingerprint, verify_fingerprint, compact_fingerprint,
-            home_position, probe_group, GROUP_SIZE, NO_MATCH},
-    meta::{Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE, index_path, partition_dir},
+    index::{
+        self, compact_fingerprint, fingerprint, home_position, probe_group, verify_fingerprint,
+        Bucket, GROUP_SIZE, NO_MATCH,
+    },
+    meta::{index_path, partition_dir, Layout, Meta, VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     Result,
 };
 
@@ -20,9 +22,9 @@ struct PartitionSlice {
     /// Byte offset of this partition's bucket array within the index mmap.
     bucket_offset: usize,
     /// Number of logical buckets in this partition.
-    n_buckets:     usize,
+    n_buckets: usize,
     /// Open file descriptor for `pread` calls into `data.bin`.
-    data:          File,
+    data: File,
 }
 
 // ---------------------------------------------------------------------------
@@ -41,11 +43,11 @@ struct PartitionSlice {
 /// }
 /// ```
 pub struct SnapshotReader {
-    layout:      Layout,
+    layout: Layout,
     verify_seed: u64,
     /// Single mmap of `index.all` (all partitions, 2MB-aligned).
-    index_mmap:  memmap2::Mmap,
-    partitions:  Vec<PartitionSlice>,
+    index_mmap: memmap2::Mmap,
+    partitions: Vec<PartitionSlice>,
 }
 
 impl SnapshotReader {
@@ -54,12 +56,12 @@ impl SnapshotReader {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
 
-        let json   = fs::read_to_string(root.join("meta.json"))?;
+        let json = fs::read_to_string(root.join("meta.json"))?;
         let meta: Meta = serde_json::from_str(&json)?;
         let layout = meta.layout()?;
 
         // Single mmap of index.all.
-        let idx_file  = File::open(index_path(root))?;
+        let idx_file = File::open(index_path(root))?;
         let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
 
         // Advise huge pages on Linux for TLB efficiency (best-effort;
@@ -73,31 +75,37 @@ impl SnapshotReader {
             let data = File::open(partition_dir(root, layout.n_partitions, i).join("data.bin"))?;
             partitions.push(PartitionSlice {
                 bucket_offset: meta.index_offsets[i] as usize,
-                n_buckets:     meta.index_n_buckets[i] as usize,
+                n_buckets: meta.index_n_buckets[i] as usize,
                 data,
             });
         }
 
-        Ok(Self { layout, verify_seed: meta.verify_seed, index_mmap, partitions })
+        Ok(Self {
+            layout,
+            verify_seed: meta.verify_seed,
+            index_mmap,
+            partitions,
+        })
     }
 
     /// Look up `key` and return its value, or `None` if not present.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let fp  = fingerprint(key);
+        let fp = fingerprint(key);
         let idx = self.layout.partition_of(fp);
-        let ps  = &self.partitions[idx];
+        let ps = &self.partitions[idx];
 
         let n = ps.n_buckets;
         if n == 0 {
             return Ok(None);
         }
 
-        let bucket_bytes = &self.index_mmap[ps.bucket_offset..ps.bucket_offset + n * std::mem::size_of::<Bucket>()];
+        let bucket_bytes = &self.index_mmap
+            [ps.bucket_offset..ps.bucket_offset + n * std::mem::size_of::<Bucket>()];
         let table: &[Bucket] = bytemuck::cast_slice(bucket_bytes);
 
         let cfp = compact_fingerprint(fp);
         let expected_vfp = verify_fingerprint(key, self.verify_seed);
-        let mut pos   = home_position(fp, n);
+        let mut pos = home_position(fp, n);
         let mut steps = 0usize;
 
         while steps < n {
@@ -117,7 +125,7 @@ impl SnapshotReader {
                 return Ok(None);
             }
 
-            pos    = (pos + GROUP_SIZE) % n;
+            pos = (pos + GROUP_SIZE) % n;
             steps += GROUP_SIZE;
         }
 
@@ -139,17 +147,21 @@ fn read_and_verify(data: &File, byte_offset: u64, expected_vfp: u64) -> Result<O
     }
 
     let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
-    let on_disk_size = VALUE_HEADER_SIZE.checked_add(byte_len).unwrap_or(usize::MAX);
+    let on_disk_size = VALUE_HEADER_SIZE.saturating_add(byte_len);
 
     if on_disk_size <= VALUE_ALIGNMENT as usize {
-        Ok(Some(first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+        Ok(Some(
+            first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
+        ))
     } else {
         let total = match u32::try_from(on_disk_size) {
-            Ok(s)  => index::aligned_size(s) as u32,
+            Ok(s) => index::aligned_size(s) as u32,
             Err(_) => return Ok(None),
         };
         let raw = pread(data, byte_offset, total)?;
-        Ok(Some(raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec()))
+        Ok(Some(
+            raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
+        ))
     }
 }
 
@@ -179,11 +191,11 @@ mod tests {
     fn get_existing_keys() {
         let pairs: &[(&[u8], &[u8])] = &[
             (b"hello", b"world"),
-            (b"foo",   b"bar"),
+            (b"foo", b"bar"),
             (b"alpha", b"beta gamma delta"),
         ];
         let dir = build_snapshot(pairs, 4);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
 
         for &(k, v) in pairs {
             let got = r.get(k).unwrap();
@@ -194,7 +206,7 @@ mod tests {
     #[test]
     fn get_missing_key_returns_none() {
         let dir = build_snapshot(&[(b"present", b"yes")], 4);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
         assert_eq!(r.get(b"absent").unwrap(), None);
     }
 
@@ -203,7 +215,7 @@ mod tests {
     #[test]
     fn get_empty_value() {
         let dir = build_snapshot(&[(b"k", b"")], 1);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
         assert_eq!(r.get(b"k").unwrap().as_deref(), Some(b"".as_slice()));
     }
 
@@ -211,7 +223,7 @@ mod tests {
     fn get_large_value() {
         let big = vec![0xABu8; 1024 * 1024]; // 1 MiB
         let dir = build_snapshot(&[(b"big", &big)], 1);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
         assert_eq!(r.get(b"big").unwrap(), Some(big));
     }
 
@@ -219,14 +231,22 @@ mod tests {
 
     #[test]
     fn roundtrip_many_keys() {
-        let n    = 10_000usize;
+        let n = 10_000usize;
         let vals: Vec<(Vec<u8>, Vec<u8>)> = (0..n)
-            .map(|i| (format!("key-{i}").into_bytes(), format!("value-{i}").into_bytes()))
+            .map(|i| {
+                (
+                    format!("key-{i}").into_bytes(),
+                    format!("value-{i}").into_bytes(),
+                )
+            })
             .collect();
-        let pairs: Vec<(&[u8], &[u8])> = vals.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        let pairs: Vec<(&[u8], &[u8])> = vals
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
 
         let dir = build_snapshot(&pairs, 64);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
 
         for (k, v) in &vals {
             let got = r.get(k).unwrap();
@@ -240,7 +260,7 @@ mod tests {
     fn single_partition_roundtrip() {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")];
         let dir = build_snapshot(pairs, 1);
-        let r   = SnapshotReader::open(dir.path()).unwrap();
+        let r = SnapshotReader::open(dir.path()).unwrap();
         for &(k, v) in pairs {
             assert_eq!(r.get(k).unwrap().as_deref(), Some(v));
         }
@@ -262,12 +282,10 @@ mod tests {
             let fp = fingerprint(k.as_bytes());
             let cfp = compact_fingerprint(fp);
             if let Some(prev) = seen.get(&cfp) {
-                let pairs: &[(&[u8], &[u8])] = &[
-                    (prev.as_bytes(), b"value-a"),
-                    (k.as_bytes(),    b"value-b"),
-                ];
+                let pairs: &[(&[u8], &[u8])] =
+                    &[(prev.as_bytes(), b"value-a"), (k.as_bytes(), b"value-b")];
                 let dir = build_snapshot(pairs, 1);
-                let r   = SnapshotReader::open(dir.path()).unwrap();
+                let r = SnapshotReader::open(dir.path()).unwrap();
 
                 assert_eq!(
                     r.get(prev.as_bytes()).unwrap().as_deref(),

@@ -27,15 +27,19 @@ const PAD: [u8; VALUE_ALIGNMENT as usize] = [0u8; VALUE_ALIGNMENT as usize];
 /// Callers that need large write buffers (e.g. 8 MiB per partition) should
 /// wrap the file in `BufWriter::with_capacity(...)` before constructing.
 pub struct AlignedWriter<W: Write> {
-    inner:        W,
-    byte_offset:  u64,
-    verify_seed:  u64,
+    inner: W,
+    byte_offset: u64,
+    verify_seed: u64,
 }
 
 impl<W: Write> AlignedWriter<W> {
     pub fn new(inner: W, verify_seed: u64) -> Self {
         assert!(verify_seed != 0, "verify_seed must be non-zero");
-        Self { inner, byte_offset: 0, verify_seed }
+        Self {
+            inner,
+            byte_offset: 0,
+            verify_seed,
+        }
     }
 
     /// Current byte position in the file (always a multiple of `VALUE_ALIGNMENT`).
@@ -66,7 +70,7 @@ impl<W: Write> AlignedWriter<W> {
         self.inner.write_all(value)?;
         let on_disk_size = VALUE_HEADER_SIZE as u32 + value.len() as u32;
 
-        let padded  = aligned_size(on_disk_size);
+        let padded = aligned_size(on_disk_size);
         let pad_len = (padded - on_disk_size as u64) as usize;
         if pad_len > 0 {
             self.inner.write_all(&PAD[..pad_len])?;
@@ -147,15 +151,15 @@ mod tests {
         let mut w = writer();
 
         // value 1B + header 12B = 13B → padded to 64B
-        let (off0, _) = w.write_value(b"k1", &vec![1u8; 1]).unwrap();
+        let (off0, _) = w.write_value(b"k1", &[1u8; 1]).unwrap();
         // value 52B + header 12B = 64B → no padding
-        let (off1, _) = w.write_value(b"k2", &vec![2u8; 52]).unwrap();
+        let (off1, _) = w.write_value(b"k2", &[2u8; 52]).unwrap();
         // value 53B + header 12B = 65B → padded to 128B
-        let (off2, _) = w.write_value(b"k3", &vec![3u8; 53]).unwrap();
+        let (off2, _) = w.write_value(b"k3", &[3u8; 53]).unwrap();
 
-        assert_eq!(off0, 0);   // byte 0  / 64 = 0
-        assert_eq!(off1, 1);   // byte 64 / 64 = 1
-        assert_eq!(off2, 2);   // byte 128 / 64 = 2
+        assert_eq!(off0, 0); // byte 0  / 64 = 0
+        assert_eq!(off1, 1); // byte 64 / 64 = 1
+        assert_eq!(off2, 2); // byte 128 / 64 = 2
 
         assert_eq!(w.byte_offset(), 64 + 64 + 128);
     }
@@ -243,7 +247,7 @@ mod tests {
 
         let file = w.finish().unwrap();
         // Read raw on-disk: header(12) + value(1) = 13 bytes.
-        let raw0 = pread(&file, 0,  13).unwrap();
+        let raw0 = pread(&file, 0, 13).unwrap();
         let raw1 = pread(&file, 64, 13).unwrap();
         assert_eq!(&raw0[VALUE_HEADER_SIZE..], b"X");
         assert_eq!(&raw1[VALUE_HEADER_SIZE..], b"Y");

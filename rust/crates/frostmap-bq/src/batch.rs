@@ -34,10 +34,30 @@ impl BinaryCol {
     pub fn total_bytes(&self) -> usize {
         let arr = self.0.as_ref();
         match arr.data_type() {
-            DataType::Binary     => arr.as_any().downcast_ref::<BinaryArray>()     .unwrap().values().len(),
-            DataType::LargeBinary => arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap().values().len(),
-            DataType::Utf8       => arr.as_any().downcast_ref::<StringArray>()     .unwrap().values().len(),
-            DataType::LargeUtf8  => arr.as_any().downcast_ref::<LargeStringArray>().unwrap().values().len(),
+            DataType::Binary => arr
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .values()
+                .len(),
+            DataType::LargeBinary => arr
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .values()
+                .len(),
+            DataType::Utf8 => arr
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .values()
+                .len(),
+            DataType::LargeUtf8 => arr
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .unwrap()
+                .values()
+                .len(),
             _ => unreachable!("BinaryCol::try_from already validated the type"),
         }
     }
@@ -46,11 +66,7 @@ impl BinaryCol {
     pub fn value(&self, i: usize) -> &[u8] {
         let arr = self.0.as_ref();
         match arr.data_type() {
-            DataType::Binary => arr
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap()
-                .value(i),
+            DataType::Binary => arr.as_any().downcast_ref::<BinaryArray>().unwrap().value(i),
             DataType::LargeBinary => arr
                 .as_any()
                 .downcast_ref::<LargeBinaryArray>()
@@ -87,13 +103,13 @@ unsafe impl Sync for BinaryCol {}
 /// Column references are zero-copy: `iter` borrows directly from the Arrow
 /// buffer memory without any per-row allocation.
 pub struct ArrowBatch {
-    pub(crate) keys:   BinaryCol,
+    pub(crate) keys: BinaryCol,
     pub(crate) values: BinaryCol,
 }
 
 impl ArrowBatch {
     pub fn from_record_batch(
-        batch:       &RecordBatch,
+        batch: &RecordBatch,
         key_col_idx: usize,
         val_col_idx: usize,
     ) -> Result<Self, crate::error::BqError> {
@@ -101,7 +117,7 @@ impl ArrowBatch {
         let key_name = schema.field(key_col_idx).name().clone();
         let val_name = schema.field(val_col_idx).name().clone();
         Ok(Self {
-            keys:   BinaryCol::try_from(batch.column(key_col_idx).clone(), &key_name)?,
+            keys: BinaryCol::try_from(batch.column(key_col_idx).clone(), &key_name)?,
             values: BinaryCol::try_from(batch.column(val_col_idx).clone(), &val_name)?,
         })
     }

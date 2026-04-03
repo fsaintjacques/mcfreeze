@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -8,8 +8,8 @@ use clap::{Args, Subcommand};
 use tracing::info;
 
 use frostmap_bq::{BqReadSession, BqSourceConfig};
-use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
 use frostmap_loader::source::CsvSource;
+use frostmap_loader::{KvBatch, KvSource, LoaderConfig, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -111,19 +111,26 @@ pub async fn run(args: LoadArgs) -> Result<()> {
         } => {
             // Open BQ session even on dry-run to validate credentials and table.
             let session = open_bq_session(
-                project, &table, &key_column, &value_column,
-                streams, row_restriction.as_deref(), no_compression,
-            ).await?;
+                project,
+                &table,
+                &key_column,
+                &value_column,
+                streams,
+                row_restriction.as_deref(),
+                no_compression,
+            )
+            .await?;
 
             if args.dry_run {
                 info!("dry-run: source validated, no data written");
                 return Ok(());
             }
 
-            let meta           = session.metadata();
+            let meta = session.metadata();
             let estimated_rows = meta.estimated_rows;
 
-            let sources = session.into_sources()
+            let sources = session
+                .into_sources()
                 .context("failed to split session into sources")?;
 
             if download_benchmark {
@@ -132,9 +139,14 @@ pub async fn run(args: LoadArgs) -> Result<()> {
 
             let output = args.output.context("--output is required")?;
             load_sources(
-                &output, args.partitions, args.index_parallelism,
-                args.progress_secs, estimated_rows, sources,
-            ).await
+                &output,
+                args.partitions,
+                args.index_parallelism,
+                args.progress_secs,
+                estimated_rows,
+                sources,
+            )
+            .await
         }
         Source::Csv { file, batch_size } => {
             // Validate the source is readable even on dry-run.
@@ -147,9 +159,14 @@ pub async fn run(args: LoadArgs) -> Result<()> {
 
             let output = args.output.context("--output is required")?;
             load_sources(
-                &output, args.partitions, args.index_parallelism,
-                args.progress_secs, None, vec![source],
-            ).await
+                &output,
+                args.partitions,
+                args.index_parallelism,
+                args.progress_secs,
+                None,
+                vec![source],
+            )
+            .await
         }
     }
 }
@@ -161,12 +178,12 @@ pub async fn run(args: LoadArgs) -> Result<()> {
 /// Load from one or more sources. All sources run in parallel via
 /// `scatter_parallel`; a single-element vec works fine.
 async fn load_sources<S>(
-    output:            &Path,
-    partitions:        u32,
+    output: &Path,
+    partitions: u32,
     index_parallelism: usize,
-    progress_secs:     u64,
-    estimated_rows:    Option<u64>,
-    sources:           Vec<S>,
+    progress_secs: u64,
+    estimated_rows: Option<u64>,
+    sources: Vec<S>,
 ) -> Result<()>
 where
     S: KvSource + Send + 'static,
@@ -175,17 +192,17 @@ where
     let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
 
     let loader_config = LoaderConfig {
-        n_partitions:      partitions,
+        n_partitions: partitions,
         index_parallelism,
-        progress_fn:       Some(scatter_reporter.updater()),
+        progress_fn: Some(scatter_reporter.updater()),
         progress_interval: 0,
         ..LoaderConfig::default()
     };
 
     info!(output = %output.display(), partitions, n_sources = sources.len(), "loading snapshot");
 
-    let loader = SnapshotLoader::new(output, loader_config)
-        .context("failed to create SnapshotLoader")?;
+    let loader =
+        SnapshotLoader::new(output, loader_config).context("failed to create SnapshotLoader")?;
 
     let scatter_result = loader
         .scatter_parallel(sources)
@@ -207,10 +224,10 @@ where
 
 fn log_stats(stats: &frostmap_loader::LoadStats) {
     info!(
-        n_keys       = stats.n_keys,
-        data_bytes   = stats.data_bytes,
+        n_keys = stats.n_keys,
+        data_bytes = stats.data_bytes,
         scatter_secs = stats.scatter_duration.as_secs_f64(),
-        index_secs   = stats.index_duration.as_secs_f64(),
+        index_secs = stats.index_duration.as_secs_f64(),
         "load complete",
     );
 }
@@ -220,23 +237,23 @@ fn log_stats(stats: &frostmap_loader::LoadStats) {
 // ---------------------------------------------------------------------------
 
 async fn open_bq_session(
-    project:         Option<String>,
-    table:           &str,
-    key_column:      &str,
-    value_column:    &str,
-    streams:         i32,
+    project: Option<String>,
+    table: &str,
+    key_column: &str,
+    value_column: &str,
+    streams: i32,
     row_restriction: Option<&str>,
-    no_compression:  bool,
+    no_compression: bool,
 ) -> Result<BqReadSession> {
     let (billing_project, table_resource) = parse_table(table, project.as_deref())?;
 
     let config = BqSourceConfig {
-        project:             billing_project.clone(),
-        table:               table_resource,
-        key_column:          key_column.to_owned(),
-        value_column:        value_column.to_owned(),
-        n_streams:           streams,
-        row_restriction:     row_restriction.map(|s| s.to_owned()),
+        project: billing_project.clone(),
+        table: table_resource,
+        key_column: key_column.to_owned(),
+        value_column: value_column.to_owned(),
+        n_streams: streams,
+        row_restriction: row_restriction.map(|s| s.to_owned()),
         disable_compression: no_compression,
     };
 
@@ -256,7 +273,7 @@ async fn open_bq_session(
 
     let meta = session.metadata();
     info!(
-        n_streams      = session.n_streams(),
+        n_streams = session.n_streams(),
         estimated_rows = meta.estimated_rows,
         estimated_bytes = meta.estimated_bytes,
         "BigQuery read session opened",
@@ -266,7 +283,7 @@ async fn open_bq_session(
 }
 
 fn open_csv_source(
-    file:       Option<PathBuf>,
+    file: Option<PathBuf>,
     batch_size: usize,
 ) -> Result<CsvSource<Box<dyn std::io::Read + Send>>> {
     match &file {
@@ -281,7 +298,10 @@ fn open_csv_source(
             let mut buf = Vec::new();
             std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut buf)
                 .context("failed to read stdin")?;
-            Ok(CsvSource::new(Box::new(std::io::Cursor::new(buf)), batch_size))
+            Ok(CsvSource::new(
+                Box::new(std::io::Cursor::new(buf)),
+                batch_size,
+            ))
         }
     }
 }
@@ -291,18 +311,18 @@ fn open_csv_source(
 // ---------------------------------------------------------------------------
 
 async fn benchmark_download<S>(
-    sources:        Vec<S>,
+    sources: Vec<S>,
     estimated_rows: Option<u64>,
-    progress_secs:  u64,
+    progress_secs: u64,
 ) -> Result<()>
 where
     S: KvSource + Send + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     info!(n_sources = sources.len(), "download benchmark started");
-    let start    = Instant::now();
+    let start = Instant::now();
     let reporter = ProgressReporter::new("download", estimated_rows, progress_secs);
-    let updater  = reporter.updater();
+    let updater = reporter.updater();
 
     let tasks: Vec<_> = sources
         .into_iter()
@@ -310,17 +330,17 @@ where
         .map(|(idx, mut src)| {
             let updater = updater.clone();
             tokio::spawn(async move {
-                let mut n_keys:        u64 = 0;
+                let mut n_keys: u64 = 0;
                 let mut payload_bytes: u64 = 0;
                 while let Some(batch) = src
                     .next_batch()
                     .await
                     .map_err(|e| anyhow::anyhow!("stream {idx}: {e}"))?
                 {
-                    let batch_keys  = batch.len() as u64;
+                    let batch_keys = batch.len() as u64;
                     let batch_bytes = batch.total_bytes();
                     updater(batch_keys, batch_bytes);
-                    n_keys        += batch_keys;
+                    n_keys += batch_keys;
                     payload_bytes += batch_bytes;
                 }
                 Ok::<(u64, u64), anyhow::Error>((n_keys, payload_bytes))
@@ -328,18 +348,22 @@ where
         })
         .collect();
 
-    let mut total_keys  = 0u64;
+    let mut total_keys = 0u64;
     let mut total_bytes = 0u64;
     for task in tasks {
         let (keys, bytes) = task.await??;
-        total_keys  += keys;
+        total_keys += keys;
         total_bytes += bytes;
     }
 
     reporter.stop();
 
-    let elapsed   = start.elapsed().as_secs_f64();
-    let bytes_sec = if elapsed > 0.0 { (total_bytes as f64 / elapsed) as u64 } else { 0 };
+    let elapsed = start.elapsed().as_secs_f64();
+    let bytes_sec = if elapsed > 0.0 {
+        (total_bytes as f64 / elapsed) as u64
+    } else {
+        0
+    };
 
     info!(
         n_keys        = total_keys,
@@ -383,10 +407,10 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
 pub fn human_bandwidth(bytes_per_sec: u64) -> String {
     const UNITS: &[&str] = &["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
     let mut value = bytes_per_sec as f64;
-    let mut unit  = 0;
+    let mut unit = 0;
     while value >= 1000.0 && unit + 1 < UNITS.len() {
         value /= 1000.0;
-        unit  += 1;
+        unit += 1;
     }
     format!("{value:.1} {}", UNITS[unit])
 }
@@ -396,40 +420,41 @@ pub fn human_bandwidth(bytes_per_sec: u64) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct ProgressReporter {
-    total_keys:  Arc<AtomicU64>,
+    total_keys: Arc<AtomicU64>,
     total_bytes: Arc<AtomicU64>,
-    task:        tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl ProgressReporter {
     pub fn new(phase: &'static str, estimated: Option<u64>, interval_secs: u64) -> Self {
-        let total_keys  = Arc::new(AtomicU64::new(0));
+        let total_keys = Arc::new(AtomicU64::new(0));
         let total_bytes = Arc::new(AtomicU64::new(0));
-        let interval    = Duration::from_secs(interval_secs.max(1));
+        let interval = Duration::from_secs(interval_secs.max(1));
 
         let task = tokio::spawn({
-            let keys  = total_keys.clone();
+            let keys = total_keys.clone();
             let bytes = total_bytes.clone();
             async move {
-                let mut ticker     = tokio::time::interval(interval);
+                let mut ticker = tokio::time::interval(interval);
                 ticker.tick().await;
-                let start          = Instant::now();
-                let mut prev_keys  = 0u64;
+                let start = Instant::now();
+                let mut prev_keys = 0u64;
                 let mut prev_bytes = 0u64;
-                let dt             = interval.as_secs_f64();
+                let dt = interval.as_secs_f64();
 
                 loop {
                     ticker.tick().await;
-                    let cur_keys  = keys.load(Ordering::Relaxed);
+                    let cur_keys = keys.load(Ordering::Relaxed);
                     let cur_bytes = bytes.load(Ordering::Relaxed);
-                    let elapsed   = start.elapsed().as_secs_f64();
-                    let recs_sec  = ((cur_keys  - prev_keys)  as f64 / dt) as u64;
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let recs_sec = ((cur_keys - prev_keys) as f64 / dt) as u64;
                     let bytes_sec = ((cur_bytes - prev_bytes) as f64 / dt) as u64;
 
                     let progress = match estimated {
                         Some(n) if n > 0 => format!(
                             "{}/{} ({:.1}%)",
-                            cur_keys, n,
+                            cur_keys,
+                            n,
                             cur_keys as f64 / n as f64 * 100.0,
                         ),
                         _ => format!("{cur_keys}"),
@@ -444,17 +469,21 @@ impl ProgressReporter {
                         "progress",
                     );
 
-                    prev_keys  = cur_keys;
+                    prev_keys = cur_keys;
                     prev_bytes = cur_bytes;
                 }
             }
         });
 
-        Self { total_keys, total_bytes, task }
+        Self {
+            total_keys,
+            total_bytes,
+            task,
+        }
     }
 
     pub fn updater(&self) -> Arc<dyn Fn(u64, u64) + Send + Sync> {
-        let keys  = self.total_keys.clone();
+        let keys = self.total_keys.clone();
         let bytes = self.total_bytes.clone();
         Arc::new(move |delta_keys, delta_bytes| {
             keys.fetch_add(delta_keys, Ordering::Relaxed);

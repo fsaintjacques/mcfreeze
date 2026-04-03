@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use frostmap_server::modes::catalog_mode::{CatalogConfig, run as run_catalog};
-use frostmap_server::modes::snapshot_mode::{SnapshotConfig, run as run_snapshot};
+use frostmap_server::modes::catalog_mode::{run as run_catalog, CatalogConfig};
+use frostmap_server::modes::snapshot_mode::{run as run_snapshot, SnapshotConfig};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -73,10 +73,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
                 anyhow::bail!("at least one of --uds or --tcp must be specified");
             }
             let cfg = SnapshotConfig {
-                dir:          a.dir,
-                uds_path:     a.uds,
-                tcp_addr:     a.tcp,
-                semver:       env!("CARGO_PKG_VERSION").to_owned(),
+                dir: a.dir,
+                uds_path: a.uds,
+                tcp_addr: a.tcp,
+                semver: env!("CARGO_PKG_VERSION").to_owned(),
                 metrics_addr: a.metrics,
             };
             run_snapshot(cfg).await?;
@@ -88,9 +88,9 @@ pub async fn run(args: ServeArgs) -> Result<()> {
             }
             let cfg = CatalogConfig {
                 catalog_path: a.catalog,
-                uds_path:     a.uds,
-                tcp_addr:     a.tcp,
-                semver:       env!("CARGO_PKG_VERSION").to_owned(),
+                uds_path: a.uds,
+                tcp_addr: a.tcp,
+                semver: env!("CARGO_PKG_VERSION").to_owned(),
                 metrics_addr: a.metrics,
             };
             run_catalog(cfg).await?;

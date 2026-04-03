@@ -6,25 +6,25 @@
 //! [`run_metrics_server`] to expose the Prometheus text exposition format.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use axum::Json;
-use axum::Router;
+use crate::registry::Registry as DataRegistry;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use serde::Serialize;
-use crate::registry::Registry as DataRegistry;
-use prometheus_client::encoding::EncodeLabelSet;
+use axum::Json;
+use axum::Router;
 use prometheus_client::encoding::text::encode;
+use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // Label types
@@ -50,8 +50,7 @@ pub struct TransportLabels {
 
 /// Per-key lookup latency: 50µs – 100ms.
 const REQUEST_DURATION_BUCKETS: [f64; 10] = [
-    0.000_050, 0.000_100, 0.000_200, 0.000_500,
-    0.001, 0.002, 0.005, 0.010, 0.050, 0.100,
+    0.000_050, 0.000_100, 0.000_200, 0.000_500, 0.001, 0.002, 0.005, 0.010, 0.050, 0.100,
 ];
 
 // ---------------------------------------------------------------------------
@@ -182,9 +181,9 @@ impl Metrics {
     ///
     /// Returns when the HTTP server exits (it normally runs forever).
     pub async fn run_server(
-        prom:     Arc<Registry>,
+        prom: Arc<Registry>,
         data_reg: Option<Arc<DataRegistry>>,
-        addr:     SocketAddr,
+        addr: SocketAddr,
     ) -> std::io::Result<()> {
         let state = HttpState { prom, data_reg };
         let router = Router::new()
@@ -197,7 +196,7 @@ impl Metrics {
 
         axum::serve(listener, router)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -208,7 +207,7 @@ impl Metrics {
 /// State shared across all HTTP handlers.
 #[derive(Clone)]
 struct HttpState {
-    prom:     Arc<Registry>,
+    prom: Arc<Registry>,
     /// `None` in snapshot mode, which has no catalog registry.
     data_reg: Option<Arc<DataRegistry>>,
 }
@@ -221,9 +220,9 @@ struct HttpState {
 /// Matches the Go `api.KVDatasetVersion` JSON shape.
 #[derive(Serialize)]
 struct KVDatasetVersion {
-    dataset:    String,
+    dataset: String,
     version_id: String,
-    loaded_at:  String, // RFC3339 UTC
+    loaded_at: String, // RFC3339 UTC
 }
 
 /// Wire type for the `GET /version` response body.
@@ -250,11 +249,15 @@ async fn version_handler(State(state): State<HttpState>) -> Json<KVVersionRespon
         None => vec![],
         Some(reg) => {
             let catalog = Arc::clone(&*reg.load());
-            catalog.version_snapshot().into_iter().map(|e| KVDatasetVersion {
-                dataset:    e.dataset,
-                version_id: e.version_id,
-                loaded_at:  format_rfc3339(e.loaded_at),
-            }).collect()
+            catalog
+                .version_snapshot()
+                .into_iter()
+                .map(|e| KVDatasetVersion {
+                    dataset: e.dataset,
+                    version_id: e.version_id,
+                    loaded_at: format_rfc3339(e.loaded_at),
+                })
+                .collect()
         }
     };
     Json(KVVersionResponse { datasets })
@@ -280,8 +283,12 @@ mod tests {
         // spot-check: recording should not panic
         m.keys_requested_total.inc();
         m.keys_hit_total.inc();
-        m.connections_active.get_or_create(&TransportLabels { transport: "tcp" }).inc();
-        m.connections_active.get_or_create(&TransportLabels { transport: "tcp" }).dec();
+        m.connections_active
+            .get_or_create(&TransportLabels { transport: "tcp" })
+            .inc();
+        m.connections_active
+            .get_or_create(&TransportLabels { transport: "tcp" })
+            .dec();
         m.active_datasets.set(1);
         m.catalog_generation.set(0);
     }
@@ -298,7 +305,10 @@ mod tests {
 
     #[test]
     fn format_rfc3339_unix_epoch() {
-        assert_eq!(format_rfc3339(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            format_rfc3339(SystemTime::UNIX_EPOCH),
+            "1970-01-01T00:00:00Z"
+        );
     }
 
     // --- version handler ---
@@ -312,7 +322,9 @@ mod tests {
     fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {
         let dir = TempDir::new().unwrap();
         let mut w = SnapshotWriter::new(dir.path(), 1).unwrap();
-        for &(k, v) in pairs { w.write(k, v).unwrap(); }
+        for &(k, v) in pairs {
+            w.write(k, v).unwrap();
+        }
         w.finish(dir.path()).unwrap();
         dir
     }

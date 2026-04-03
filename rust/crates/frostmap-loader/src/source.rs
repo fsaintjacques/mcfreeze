@@ -1,6 +1,6 @@
 use std::io::Read;
 
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
 use crate::error::LoaderError;
 
@@ -16,7 +16,7 @@ use crate::error::LoaderError;
 #[derive(Debug, Default, Clone)]
 pub struct SourceMetadata {
     /// Estimated total number of key-value pairs.
-    pub estimated_rows:  Option<u64>,
+    pub estimated_rows: Option<u64>,
     /// Estimated total uncompressed byte size of all values.
     pub estimated_bytes: Option<u64>,
 }
@@ -31,7 +31,9 @@ pub struct SourceMetadata {
 /// `RecordBatch` (ADBC / BigQuery Storage, zero-copy into Arrow buffers).
 pub trait KvBatch {
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool { self.len() == 0 }
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])>;
 
     /// Total byte size of all keys + values in this batch.
@@ -68,11 +70,14 @@ pub trait KvSource {
 
     /// The `+ Send` bound on the returned future is required for
     /// `tokio::spawn` in the parallel-source path.
-    fn next_batch(&mut self)
-        -> impl Future<Output = Result<Option<Self::Batch>, Self::Error>> + Send;
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<Self::Batch>, Self::Error>> + Send;
 
     /// Metadata available before streaming starts.
-    fn metadata(&self) -> SourceMetadata { SourceMetadata::default() }
+    fn metadata(&self) -> SourceMetadata {
+        SourceMetadata::default()
+    }
 }
 
 use std::future::Future;
@@ -84,7 +89,9 @@ use std::future::Future;
 pub struct VecBatch(pub Vec<(Vec<u8>, Vec<u8>)>);
 
 impl KvBatch for VecBatch {
-    fn len(&self) -> usize { self.0.len() }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
 
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
         self.0.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
@@ -101,15 +108,15 @@ impl KvBatch for VecBatch {
 /// Rows are accumulated into batches of `batch_size` before being returned
 /// to the scatter loop, amortising per-row overhead.
 pub struct CsvSource<R: Read> {
-    reader:     csv::Reader<R>,
+    reader: csv::Reader<R>,
     batch_size: usize,
     record_idx: u64,
-    metadata:   SourceMetadata,
+    metadata: SourceMetadata,
 }
 
 impl CsvSource<std::fs::File> {
     pub fn from_path(
-        path:       impl AsRef<std::path::Path>,
+        path: impl AsRef<std::path::Path>,
         batch_size: usize,
     ) -> Result<Self, LoaderError> {
         let file = std::fs::File::open(path)?;
@@ -120,38 +127,46 @@ impl CsvSource<std::fs::File> {
 impl<R: Read> CsvSource<R> {
     pub fn new(reader: R, batch_size: usize) -> Self {
         Self {
-            reader:     csv::ReaderBuilder::new().has_headers(false).from_reader(reader),
+            reader: csv::ReaderBuilder::new()
+                .has_headers(false)
+                .from_reader(reader),
             batch_size: batch_size.max(1),
             record_idx: 0,
-            metadata:   SourceMetadata::default(),
+            metadata: SourceMetadata::default(),
         }
     }
 
     fn next_batch_sync(&mut self) -> Result<Option<VecBatch>, LoaderError> {
-        let mut batch  = Vec::with_capacity(self.batch_size);
+        let mut batch = Vec::with_capacity(self.batch_size);
         let mut record = csv::StringRecord::new();
 
         while batch.len() < self.batch_size {
             if !self.reader.read_record(&mut record)? {
                 break;
             }
-            let key_b64   = record.get(0).unwrap_or("");
+            let key_b64 = record.get(0).unwrap_or("");
             let value_b64 = record.get(1).unwrap_or("");
 
             let key = B64.decode(key_b64).map_err(|e| LoaderError::Base64Decode {
                 record: self.record_idx,
                 source: e,
             })?;
-            let value = B64.decode(value_b64).map_err(|e| LoaderError::Base64Decode {
-                record: self.record_idx,
-                source: e,
-            })?;
+            let value = B64
+                .decode(value_b64)
+                .map_err(|e| LoaderError::Base64Decode {
+                    record: self.record_idx,
+                    source: e,
+                })?;
 
             batch.push((key, value));
             self.record_idx += 1;
         }
 
-        if batch.is_empty() { Ok(None) } else { Ok(Some(VecBatch(batch))) }
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(VecBatch(batch)))
+        }
     }
 }
 
@@ -159,14 +174,14 @@ impl<R: Read + Send> KvSource for CsvSource<R> {
     type Batch = VecBatch;
     type Error = LoaderError;
 
-    fn next_batch(&mut self)
-        -> impl Future<Output = Result<Option<VecBatch>, LoaderError>> + Send
-    {
+    fn next_batch(&mut self) -> impl Future<Output = Result<Option<VecBatch>, LoaderError>> + Send {
         // CsvSource does only sync I/O; the future completes without yielding.
         std::future::ready(self.next_batch_sync())
     }
 
-    fn metadata(&self) -> SourceMetadata { self.metadata.clone() }
+    fn metadata(&self) -> SourceMetadata {
+        self.metadata.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +191,7 @@ impl<R: Read + Send> KvSource for CsvSource<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     fn make_csv(pairs: &[(&[u8], &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -205,12 +220,12 @@ mod tests {
     async fn csv_roundtrip() {
         let pairs: &[(&[u8], &[u8])] = &[
             (b"hello", b"world"),
-            (b"foo",   b"bar baz"),
+            (b"foo", b"bar baz"),
             (b"\x00\x01\x02", b"\xff\xfe"),
         ];
-        let csv  = make_csv(pairs);
+        let csv = make_csv(pairs);
         let mut src = CsvSource::new(csv.as_slice(), 10);
-        let got  = collect_all(&mut src).await;
+        let got = collect_all(&mut src).await;
         assert_eq!(got.len(), pairs.len());
         for (i, (k, v)) in got.iter().enumerate() {
             assert_eq!(k.as_slice(), pairs[i].0);
@@ -221,11 +236,13 @@ mod tests {
     #[tokio::test]
     async fn csv_batch_boundaries() {
         // 5 rows, batch_size=2 → batches of [2, 2, 1]
-        let pairs: Vec<(&[u8], &[u8])> = (0u8..5).map(|i| {
-            let k: &'static [u8] = Box::leak(vec![i].into_boxed_slice());
-            let v: &'static [u8] = Box::leak(vec![i + 10].into_boxed_slice());
-            (k, v)
-        }).collect();
+        let pairs: Vec<(&[u8], &[u8])> = (0u8..5)
+            .map(|i| {
+                let k: &'static [u8] = Box::leak(vec![i].into_boxed_slice());
+                let v: &'static [u8] = Box::leak(vec![i + 10].into_boxed_slice());
+                (k, v)
+            })
+            .collect();
         let csv = make_csv(&pairs);
         let mut src = CsvSource::new(csv.as_slice(), 2);
 
@@ -255,7 +272,7 @@ mod tests {
     #[test]
     fn source_metadata_default() {
         let src = CsvSource::new(b"".as_slice(), 10);
-        let m   = src.metadata();
+        let m = src.metadata();
         assert!(m.estimated_rows.is_none());
         assert!(m.estimated_bytes.is_none());
     }

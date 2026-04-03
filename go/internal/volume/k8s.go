@@ -60,20 +60,10 @@ func (m *ComputeDiskManager) WaitForDevice(ctx context.Context, pvName string) (
 	deviceLink := fmt.Sprintf("/dev/disk/by-id/google-%s", diskName)
 
 	deadline := time.Now().Add(m.DevicePollTimeout)
-	for {
-		// TODO: replace with os.Lstat(deviceLink) once wired up.
-		_ = deviceLink
-		return "", errors.New("ComputeDiskManager.WaitForDevice: not implemented")
-
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout waiting for device %s", deviceLink)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(m.DevicePollInterval):
-		}
-	}
+	// TODO: implement device polling loop once wired up.
+	_ = deviceLink
+	_ = deadline
+	return "", errors.New("ComputeDiskManager.WaitForDevice: not implemented")
 }
 
 // DetachDisk resolves pvName to a disk URL, then calls Compute Engine

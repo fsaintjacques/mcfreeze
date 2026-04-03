@@ -20,8 +20,7 @@ pub struct GetArgs {
 }
 
 pub fn run(args: GetArgs) -> Result<()> {
-    let reader = SnapshotReader::open(&args.snapshot)
-        .context("failed to open snapshot")?;
+    let reader = SnapshotReader::open(&args.snapshot).context("failed to open snapshot")?;
 
     match reader.get(args.key.as_bytes()).context("lookup failed")? {
         None => {
@@ -33,7 +32,7 @@ pub fn run(args: GetArgs) -> Result<()> {
                 println!("{}", hex(&bytes));
             } else {
                 match std::str::from_utf8(&bytes) {
-                    Ok(s)  => println!("{s}"),
+                    Ok(s) => println!("{s}"),
                     Err(_) => println!("{}", hex(&bytes)),
                 }
             }

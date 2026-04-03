@@ -17,12 +17,12 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nom::{
-    IResult,
     branch::alt,
     bytes::streaming::{tag, take_until},
     character::streaming::{digit1, space1},
     combinator::{map_res, opt},
     sequence::preceded,
+    IResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -98,11 +98,7 @@ fn parse_mg(input: &[u8]) -> ParseResult<'_, Command> {
     // (e.g. `N300`); we only inspect the first byte.
     // Unknown flags are silently ignored for forward compatibility.
     loop {
-        match opt(preceded(
-            space1::<&[u8], nom::error::Error<&[u8]>>,
-            token,
-        ))(rest)
-        {
+        match opt(preceded(space1::<&[u8], nom::error::Error<&[u8]>>, token))(rest) {
             Ok((r, Some(tok))) => {
                 if let Some(&b) = tok.first() {
                     match b {
@@ -121,7 +117,13 @@ fn parse_mg(input: &[u8]) -> ParseResult<'_, Command> {
     }
 
     let (rest, _) = crlf(rest)?;
-    Ok((rest, Command::Mg { key: Bytes::copy_from_slice(key_bytes), flags }))
+    Ok((
+        rest,
+        Command::Mg {
+            key: Bytes::copy_from_slice(key_bytes),
+            flags,
+        },
+    ))
 }
 
 fn parse_version(input: &[u8]) -> ParseResult<'_, Command> {
@@ -143,10 +145,9 @@ fn parse_ms(input: &[u8]) -> ParseResult<'_, Command> {
     let (input, _) = space1(input)?;
     let (input, _) = token(input)?; // key
     let (input, _) = space1(input)?;
-    let (input, data_len) = map_res(
-        map_res(digit1, std::str::from_utf8),
-        |s: &str| s.parse::<usize>(),
-    )(input)?;
+    let (input, data_len) = map_res(map_res(digit1, std::str::from_utf8), |s: &str| {
+        s.parse::<usize>()
+    })(input)?;
     let (input, _) = take_until(b"\r\n" as &[u8])(input)?;
     let (input, _) = crlf(input)?;
     Ok((input, Command::WriteRejected { data_len }))
@@ -249,28 +250,45 @@ mod tests {
     #[test]
     fn mg_no_flags() {
         let cmd = parse(b"mg mykey\r\n").unwrap().unwrap();
-        assert_eq!(cmd, Command::Mg {
-            key:   Bytes::from_static(b"mykey"),
-            flags: MgFlags::default(),
-        });
+        assert_eq!(
+            cmd,
+            Command::Mg {
+                key: Bytes::from_static(b"mykey"),
+                flags: MgFlags::default(),
+            }
+        );
     }
 
     #[test]
     fn mg_all_flags() {
         let cmd = parse(b"mg mykey v t h k\r\n").unwrap().unwrap();
-        assert_eq!(cmd, Command::Mg {
-            key:   Bytes::from_static(b"mykey"),
-            flags: MgFlags { v: true, t: true, h: true, k: true },
-        });
+        assert_eq!(
+            cmd,
+            Command::Mg {
+                key: Bytes::from_static(b"mykey"),
+                flags: MgFlags {
+                    v: true,
+                    t: true,
+                    h: true,
+                    k: true
+                },
+            }
+        );
     }
 
     #[test]
     fn mg_unknown_flag_ignored() {
         let cmd = parse(b"mg key v X\r\n").unwrap().unwrap();
-        assert_eq!(cmd, Command::Mg {
-            key:   Bytes::from_static(b"key"),
-            flags: MgFlags { v: true, ..Default::default() },
-        });
+        assert_eq!(
+            cmd,
+            Command::Mg {
+                key: Bytes::from_static(b"key"),
+                flags: MgFlags {
+                    v: true,
+                    ..Default::default()
+                },
+            }
+        );
     }
 
     #[test]
@@ -278,10 +296,16 @@ mod tests {
         // Flags like `N300` (inline value) — first byte is `N`, which is unknown;
         // should be silently ignored.
         let cmd = parse(b"mg key N300 v\r\n").unwrap().unwrap();
-        assert_eq!(cmd, Command::Mg {
-            key:   Bytes::from_static(b"key"),
-            flags: MgFlags { v: true, ..Default::default() },
-        });
+        assert_eq!(
+            cmd,
+            Command::Mg {
+                key: Bytes::from_static(b"key"),
+                flags: MgFlags {
+                    v: true,
+                    ..Default::default()
+                },
+            }
+        );
     }
 
     // --- Parser: version / quit ---
@@ -365,21 +389,46 @@ mod tests {
     #[test]
     fn va_with_key_echo() {
         let mut dst = BytesMut::new();
-        write_va(&mut dst, b"hello", &MgFlags { k: true, ..Default::default() }, b"mykey");
+        write_va(
+            &mut dst,
+            b"hello",
+            &MgFlags {
+                k: true,
+                ..Default::default()
+            },
+            b"mykey",
+        );
         assert_eq!(&dst[..], b"VA 5 kmykey\r\nhello\r\n");
     }
 
     #[test]
     fn va_with_ttl() {
         let mut dst = BytesMut::new();
-        write_va(&mut dst, b"hello", &MgFlags { t: true, ..Default::default() }, b"key");
+        write_va(
+            &mut dst,
+            b"hello",
+            &MgFlags {
+                t: true,
+                ..Default::default()
+            },
+            b"key",
+        );
         assert_eq!(&dst[..], b"VA 5 t-1\r\nhello\r\n");
     }
 
     #[test]
     fn va_with_key_and_ttl() {
         let mut dst = BytesMut::new();
-        write_va(&mut dst, b"v", &MgFlags { k: true, t: true, ..Default::default() }, b"k");
+        write_va(
+            &mut dst,
+            b"v",
+            &MgFlags {
+                k: true,
+                t: true,
+                ..Default::default()
+            },
+            b"k",
+        );
         assert_eq!(&dst[..], b"VA 1 kk t-1\r\nv\r\n");
     }
 

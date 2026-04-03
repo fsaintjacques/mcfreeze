@@ -2,6 +2,9 @@
 #
 # Targets:
 #   all               Build all binaries (Rust + Go)
+#   check             Run fmt + lint (CI gate)
+#   fmt               Check formatting (rustfmt + gofmt)
+#   lint              Run linters (clippy + go vet)
 #   test              Run all tests (unit + integration)
 #   test-unit         Run unit tests only (no binary prereqs)
 #   test-integration  Run integration tests (builds binaries first)
@@ -15,7 +18,7 @@ FM            := $(RUST_RELEASE)/fm
 GO_BIN        := go/bin
 FMTCTL        := $(GO_BIN)/fmtctl
 
-.PHONY: all test test-unit test-integration clean
+.PHONY: all check fmt lint test test-unit test-integration clean
 
 # --- Build ---
 
@@ -27,6 +30,18 @@ $(FM): $(shell find rust/crates -name '*.rs' -o -name 'Cargo.toml') rust/Cargo.l
 $(FMTCTL): $(shell find go -name '*.go') go/go.mod
 	mkdir -p $(GO_BIN)
 	cd go && go build -o ../$(FMTCTL) ./cmd/node-agent
+
+# --- Check (lint + format) ---
+
+check: fmt lint
+
+fmt:
+	cd rust && cargo fmt --all -- --check
+	@test -z "$$(cd go && gofmt -l .)" || { echo "gofmt: the following files need formatting:"; cd go && gofmt -l .; exit 1; }
+
+lint:
+	cd rust && cargo clippy --all-targets -- -D warnings
+	cd go && go vet ./...
 
 # --- Test ---
 

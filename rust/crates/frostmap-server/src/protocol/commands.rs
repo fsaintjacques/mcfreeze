@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use bytes::BytesMut;
 
+use super::meta::{write_en, write_server_error, write_va, write_version, Command, MgFlags};
 use crate::lookup::Lookup;
 use crate::metrics::{Metrics, ResultLabels};
-use super::meta::{Command, MgFlags, write_en, write_server_error, write_va, write_version};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -118,7 +118,7 @@ async fn dispatch_mg(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Metrics, ServeError, lookup::Lookup};
+    use crate::{lookup::Lookup, Metrics, ServeError};
     use async_trait::async_trait;
     use bytes::Bytes;
     use prometheus_client::registry::Registry;
@@ -155,7 +155,9 @@ mod tests {
         }
     }
 
-    fn buf() -> BytesMut { BytesMut::new() }
+    fn buf() -> BytesMut {
+        BytesMut::new()
+    }
 
     // --- mg: hit ---
 
@@ -163,7 +165,10 @@ mod tests {
     async fn mg_hit_writes_va() {
         let mut lookup = MockLookup::new(&[(b"hello", b"world")]);
         let mut dst = buf();
-        let cmd = Command::Mg { key: Bytes::from_static(b"hello"), flags: MgFlags::default() };
+        let cmd = Command::Mg {
+            key: Bytes::from_static(b"hello"),
+            flags: MgFlags::default(),
+        };
         let d = dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VA 5\r\nworld\r\n");
@@ -174,8 +179,11 @@ mod tests {
         let mut lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
         let cmd = Command::Mg {
-            key:   Bytes::from_static(b"k"),
-            flags: MgFlags { k: true, ..Default::default() },
+            key: Bytes::from_static(b"k"),
+            flags: MgFlags {
+                k: true,
+                ..Default::default()
+            },
         };
         dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 kk\r\nv\r\n");
@@ -186,8 +194,11 @@ mod tests {
         let mut lookup = MockLookup::new(&[(b"k", b"v")]);
         let mut dst = buf();
         let cmd = Command::Mg {
-            key:   Bytes::from_static(b"k"),
-            flags: MgFlags { t: true, ..Default::default() },
+            key: Bytes::from_static(b"k"),
+            flags: MgFlags {
+                t: true,
+                ..Default::default()
+            },
         };
         dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(&dst[..], b"VA 1 t-1\r\nv\r\n");
@@ -199,7 +210,10 @@ mod tests {
     async fn mg_miss_writes_en() {
         let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let cmd = Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() };
+        let cmd = Command::Mg {
+            key: Bytes::from_static(b"absent"),
+            flags: MgFlags::default(),
+        };
         let d = dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"EN\r\n");
@@ -210,7 +224,10 @@ mod tests {
     #[tokio::test]
     async fn mg_error_writes_server_error() {
         let mut dst = buf();
-        let cmd = Command::Mg { key: Bytes::from_static(b"k"), flags: MgFlags::default() };
+        let cmd = Command::Mg {
+            key: Bytes::from_static(b"k"),
+            flags: MgFlags::default(),
+        };
         let d = dispatch(cmd, &mut ErrLookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR internal error\r\n");
@@ -222,7 +239,15 @@ mod tests {
     async fn version_writes_version_line() {
         let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Version, &mut lookup, &mut dst, "0.1.0", 3, &noop_metrics()).await;
+        let d = dispatch(
+            Command::Version,
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            3,
+            &noop_metrics(),
+        )
+        .await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"VERSION 0.1.0 gen/3\r\n");
     }
@@ -233,9 +258,17 @@ mod tests {
     async fn quit_returns_close() {
         let mut lookup = MockLookup::new(&[]);
         let mut dst = buf();
-        let d = dispatch(Command::Quit, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
+        let d = dispatch(
+            Command::Quit,
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            0,
+            &noop_metrics(),
+        )
+        .await;
         assert_eq!(d, Disposition::Close);
-        assert!(dst.is_empty());  // no response bytes
+        assert!(dst.is_empty()); // no response bytes
     }
 
     // --- write commands ---
@@ -247,8 +280,13 @@ mod tests {
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 0 },
-            &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
-        ).await;
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            0,
+            &noop_metrics(),
+        )
+        .await;
         assert_eq!(d, Disposition::Continue);
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
     }
@@ -260,8 +298,13 @@ mod tests {
         let mut dst = buf();
         let d = dispatch(
             Command::WriteRejected { data_len: 5 },
-            &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics(),
-        ).await;
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            0,
+            &noop_metrics(),
+        )
+        .await;
         assert_eq!(d, Disposition::Drain(7));
         assert_eq!(&dst[..], b"SERVER_ERROR read-only\r\n");
     }
@@ -274,8 +317,30 @@ mod tests {
         let mut dst = buf();
 
         let m = noop_metrics();
-        dispatch(Command::Mg { key: Bytes::from_static(b"k"),      flags: MgFlags::default() }, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
-        dispatch(Command::Mg { key: Bytes::from_static(b"absent"), flags: MgFlags::default() }, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
+        dispatch(
+            Command::Mg {
+                key: Bytes::from_static(b"k"),
+                flags: MgFlags::default(),
+            },
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            1,
+            &m,
+        )
+        .await;
+        dispatch(
+            Command::Mg {
+                key: Bytes::from_static(b"absent"),
+                flags: MgFlags::default(),
+            },
+            &mut lookup,
+            &mut dst,
+            "0.1.0",
+            1,
+            &m,
+        )
+        .await;
         dispatch(Command::Version, &mut lookup, &mut dst, "0.1.0", 1, &m).await;
 
         assert_eq!(&dst[..], b"VA 1\r\nv\r\nEN\r\nVERSION 0.1.0 gen/1\r\n");

@@ -11,11 +11,7 @@ mod serve;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(
-    name    = "fm",
-    about   = "Frostmap CLI",
-    version,
-)]
+#[command(name = "fm", about = "Frostmap CLI", version)]
 struct Cli {
     /// Set log level to DEBUG (default: INFO). Overridden by RUST_LOG.
     #[arg(short, long, global = true)]
@@ -44,8 +40,8 @@ async fn main() {
     let cli = Cli::parse();
 
     let default_level = if cli.verbose { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -59,8 +55,8 @@ async fn main() {
         .expect("failed to install rustls crypto provider");
 
     let result: Result<()> = match cli.command {
-        Command::Load(args)  => load::run(args).await,
-        Command::Get(args)   => get::run(args).map_err(Into::into),
+        Command::Load(args) => load::run(args).await,
+        Command::Get(args) => get::run(args),
         Command::Serve(args) => serve::run(args).await,
     };
 

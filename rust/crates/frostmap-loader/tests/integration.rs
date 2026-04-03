@@ -1,19 +1,21 @@
 use std::io::Write;
 
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use rand::{RngCore, SeedableRng, rngs::StdRng};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tempfile::TempDir;
 
 use frostmap_format::reader::SnapshotReader;
-use frostmap_loader::{LoaderConfig, SnapshotLoader, source::CsvSource};
+use frostmap_loader::{source::CsvSource, LoaderConfig, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
-    let mut rng  = StdRng::seed_from_u64(seed);
-    let dir      = TempDir::new().unwrap();
+type KeyValuePairs = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn gen_csv(n: usize, seed: u64) -> (TempDir, KeyValuePairs) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let dir = TempDir::new().unwrap();
     let csv_path = dir.path().join("data.csv");
     let mut file = std::fs::File::create(&csv_path).unwrap();
 
@@ -34,9 +36,9 @@ fn gen_csv(n: usize, seed: u64) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
     (dir, pairs)
 }
 
-fn gen_csv_offset(n: usize, seed: u64, global_offset: usize) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
-    let mut rng  = StdRng::seed_from_u64(seed);
-    let dir      = TempDir::new().unwrap();
+fn gen_csv_offset(n: usize, seed: u64, global_offset: usize) -> (TempDir, KeyValuePairs) {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let dir = TempDir::new().unwrap();
     let csv_path = dir.path().join("data.csv");
     let mut file = std::fs::File::create(&csv_path).unwrap();
 
@@ -60,8 +62,8 @@ fn gen_csv_offset(n: usize, seed: u64, global_offset: usize) -> (TempDir, Vec<(V
 fn loader(root: &std::path::Path, n_partitions: u32) -> SnapshotLoader {
     let config = LoaderConfig {
         n_partitions,
-        data_buf_bytes:    1024 * 1024,
-        spill_buf_bytes:   64 * 1024,
+        data_buf_bytes: 1024 * 1024,
+        spill_buf_bytes: 64 * 1024,
         index_parallelism: 2,
         ..LoaderConfig::default()
     };
@@ -74,9 +76,9 @@ fn loader(root: &std::path::Path, n_partitions: u32) -> SnapshotLoader {
 
 #[tokio::test]
 async fn roundtrip_small() {
-    let n                = 500;
+    let n = 500;
     let (csv_dir, pairs) = gen_csv(n, 42);
-    let snap_dir         = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     let stats = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 64).unwrap())
@@ -96,9 +98,9 @@ async fn roundtrip_small() {
 
 #[tokio::test]
 async fn roundtrip_large() {
-    let n                = 100_000;
+    let n = 100_000;
     let (csv_dir, pairs) = gen_csv(n, 99);
-    let snap_dir         = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     loader(snap_dir.path(), 64)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 1000).unwrap())
@@ -114,7 +116,7 @@ async fn roundtrip_large() {
 #[tokio::test]
 async fn empty_source() {
     let snap_dir = TempDir::new().unwrap();
-    let stats    = loader(snap_dir.path(), 4)
+    let stats = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::new(b"".as_slice(), 100))
         .await
         .unwrap();
@@ -128,9 +130,9 @@ async fn empty_source() {
 
 #[tokio::test]
 async fn stats_are_accurate() {
-    let n                = 1_000;
+    let n = 1_000;
     let (csv_dir, pairs) = gen_csv(n, 7);
-    let snap_dir         = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     let stats = loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 100).unwrap())
@@ -145,33 +147,45 @@ async fn stats_are_accurate() {
 #[tokio::test]
 async fn meta_json_written_last_and_valid() {
     let (csv_dir, _) = gen_csv(10, 1);
-    let snap_dir     = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 10).unwrap())
         .await
         .unwrap();
 
-    let raw: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(snap_dir.path().join("meta.json")).unwrap()
-    ).unwrap();
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(snap_dir.path().join("meta.json")).unwrap())
+            .unwrap();
 
     assert_eq!(raw["format_version"], 4);
-    assert_eq!(raw["n_partitions"],   4);
-    assert_eq!(raw["n_keys"],         10);
+    assert_eq!(raw["n_partitions"], 4);
+    assert_eq!(raw["n_keys"], 10);
     assert_eq!(raw["hash_algorithm"], "xxhash64");
 
     // scatter and index stats are embedded; .done files must be deleted.
-    assert!(raw["scatter"].is_object(), "scatter must be embedded in meta.json");
-    assert!(raw["index"].is_object(),   "index must be embedded in meta.json");
-    assert!(!snap_dir.path().join("scatter.done").exists(), "scatter.done must be deleted");
-    assert!(!snap_dir.path().join("index.done").exists(),   "index.done must be deleted");
+    assert!(
+        raw["scatter"].is_object(),
+        "scatter must be embedded in meta.json"
+    );
+    assert!(
+        raw["index"].is_object(),
+        "index must be embedded in meta.json"
+    );
+    assert!(
+        !snap_dir.path().join("scatter.done").exists(),
+        "scatter.done must be deleted"
+    );
+    assert!(
+        !snap_dir.path().join("index.done").exists(),
+        "index.done must be deleted"
+    );
 }
 
 #[tokio::test]
 async fn spill_files_absent_after_load() {
     let (csv_dir, _) = gen_csv(50, 3);
-    let snap_dir     = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     loader(snap_dir.path(), 4)
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 10).unwrap())
@@ -191,9 +205,9 @@ async fn spill_files_absent_after_load() {
 async fn load_parallel_roundtrip() {
     // Simulate multiple independent sources (e.g. BQ read streams).
     // Each CSV file is a separate "stream"; load_parallel drives them concurrently.
-    let n_streams  = 4usize;
+    let n_streams = 4usize;
     let n_per_stream = 2_000usize;
-    let snap_dir   = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
     let mut all_pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut sources = Vec::new();
@@ -210,14 +224,15 @@ async fn load_parallel_roundtrip() {
     }
 
     let config = LoaderConfig {
-        n_partitions:      16,
-        data_buf_bytes:    1024 * 1024,
-        spill_buf_bytes:   64 * 1024,
-        channel_capacity:  8,
+        n_partitions: 16,
+        data_buf_bytes: 1024 * 1024,
+        spill_buf_bytes: 64 * 1024,
+        channel_capacity: 8,
         index_parallelism: 2,
         ..LoaderConfig::default()
     };
-    let stats = SnapshotLoader::new(snap_dir.path(), config).unwrap()
+    let stats = SnapshotLoader::new(snap_dir.path(), config)
+        .unwrap()
         .load_parallel(sources)
         .await
         .unwrap();
@@ -235,29 +250,34 @@ async fn progress_callback_fires() {
     use std::sync::{Arc, Mutex};
 
     let (csv_dir, _) = gen_csv(300_000, 5);
-    let snap_dir     = TempDir::new().unwrap();
+    let snap_dir = TempDir::new().unwrap();
 
-    let calls  = Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
+    let calls = Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
     let calls2 = calls.clone();
 
     let config = LoaderConfig {
-        n_partitions:      4,
-        data_buf_bytes:    1024 * 1024,
-        spill_buf_bytes:   64 * 1024,
-        channel_capacity:  8,
+        n_partitions: 4,
+        data_buf_bytes: 1024 * 1024,
+        spill_buf_bytes: 64 * 1024,
+        channel_capacity: 8,
         index_parallelism: 2,
         progress_interval: 100_000,
         progress_fn: Some(Arc::new(move |n, b| {
             calls2.lock().unwrap().push((n, b));
         })),
     };
-    SnapshotLoader::new(snap_dir.path(), config).unwrap()
+    SnapshotLoader::new(snap_dir.path(), config)
+        .unwrap()
         .load(&mut CsvSource::from_path(csv_dir.path().join("data.csv"), 1000).unwrap())
         .await
         .unwrap();
 
     let recorded = calls.lock().unwrap();
-    assert!(recorded.len() >= 2, "expected progress callbacks, got {}", recorded.len());
+    assert!(
+        recorded.len() >= 2,
+        "expected progress callbacks, got {}",
+        recorded.len()
+    );
     // Each callback receives deltas: both keys and bytes must be positive.
     for (n, b) in recorded.iter() {
         assert!(*n > 0, "delta keys must be positive");

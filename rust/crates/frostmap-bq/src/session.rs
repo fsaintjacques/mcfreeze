@@ -1,13 +1,13 @@
 use arrow::buffer::Buffer;
 use arrow::ipc::reader::StreamReader;
 use bytes::Bytes;
-use gcloud_sdk::{GoogleApi, GoogleAuthMiddleware};
 use gcloud_sdk::google::cloud::bigquery::storage::v1::{
+    arrow_serialization_options::CompressionCodec,
     big_query_read_client::BigQueryReadClient,
     read_session::{Schema as SessionSchema, TableReadOptions},
-    arrow_serialization_options::CompressionCodec,
     ArrowSerializationOptions, CreateReadSessionRequest, DataFormat, ReadSession,
 };
+use gcloud_sdk::{GoogleApi, GoogleAuthMiddleware};
 
 /// gRPC max decoding message size.
 /// The official Go client uses math.MaxInt32 (~2 GiB); we match that.
@@ -15,7 +15,7 @@ const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
 use frostmap_loader::SourceMetadata;
 
-use crate::{BqStreamSource, error::BqError};
+use crate::{error::BqError, BqStreamSource};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,12 +63,12 @@ pub struct BqSourceConfig {
 /// one [`BqStreamSource`] per BQ read stream, then pass those to
 /// [`SnapshotLoader::load_parallel`].
 pub struct BqReadSession {
-    pub(crate) client:       BqApi,
-    pub(crate) streams:      Vec<String>,
+    pub(crate) client: BqApi,
+    pub(crate) streams: Vec<String>,
     pub(crate) schema_bytes: Bytes,
-    pub(crate) key_col_idx:  usize,
-    pub(crate) val_col_idx:  usize,
-    metadata:    SourceMetadata,
+    pub(crate) key_col_idx: usize,
+    pub(crate) val_col_idx: usize,
+    metadata: SourceMetadata,
 }
 
 impl BqReadSession {
@@ -115,44 +115,57 @@ impl BqReadSession {
         let request = CreateReadSessionRequest {
             parent: format!("projects/{}", config.project),
             read_session: Some(ReadSession {
-                table:        config.table,
-                data_format:  DataFormat::Arrow as i32,
+                table: config.table,
+                data_format: DataFormat::Arrow as i32,
                 read_options,
                 ..Default::default()
             }),
-            max_stream_count:           config.n_streams,
+            max_stream_count: config.n_streams,
             preferred_min_stream_count: config.n_streams,
         };
 
-        let session = client.get().create_read_session(request).await?.into_inner();
+        let session = client
+            .get()
+            .create_read_session(request)
+            .await?
+            .into_inner();
 
         let schema_bytes = match session.schema {
             Some(SessionSchema::ArrowSchema(ref s)) => Bytes::copy_from_slice(&s.serialized_schema),
             Some(SessionSchema::AvroSchema(_)) => {
-                return Err(BqError::Schema("session returned Avro schema; request must use DataFormat::Arrow".into()));
+                return Err(BqError::Schema(
+                    "session returned Avro schema; request must use DataFormat::Arrow".into(),
+                ));
             }
             None => return Err(BqError::Schema("server did not return a schema".into())),
         };
 
         let arrow_schema = decode_schema(&schema_bytes)?;
 
-        let key_col_idx = arrow_schema
-            .index_of(&config.key_column)
-            .map_err(|_| BqError::Schema(format!("key column {:?} not found", config.key_column)))?;
-        let val_col_idx = arrow_schema
-            .index_of(&config.value_column)
-            .map_err(|_| BqError::Schema(format!("value column {:?} not found", config.value_column)))?;
+        let key_col_idx = arrow_schema.index_of(&config.key_column).map_err(|_| {
+            BqError::Schema(format!("key column {:?} not found", config.key_column))
+        })?;
+        let val_col_idx = arrow_schema.index_of(&config.value_column).map_err(|_| {
+            BqError::Schema(format!("value column {:?} not found", config.value_column))
+        })?;
 
         let streams: Vec<String> = session.streams.into_iter().map(|s| s.name).collect();
 
         let metadata = SourceMetadata {
-            estimated_rows:  (session.estimated_row_count > 0)
+            estimated_rows: (session.estimated_row_count > 0)
                 .then_some(session.estimated_row_count as u64),
             estimated_bytes: (session.estimated_total_bytes_scanned > 0)
                 .then_some(session.estimated_total_bytes_scanned as u64),
         };
 
-        Ok(Self { client, streams, schema_bytes, key_col_idx, val_col_idx, metadata })
+        Ok(Self {
+            client,
+            streams,
+            schema_bytes,
+            key_col_idx,
+            val_col_idx,
+            metadata,
+        })
     }
 
     /// Number of read streams returned by BQ (may differ from the requested hint).
@@ -192,16 +205,15 @@ impl BqReadSession {
 /// `StreamReader::try_new` reads the schema message and stops; we never call
 /// `.next()` on the reader so no data batches are required.
 pub(crate) fn decode_schema(schema_bytes: &Bytes) -> Result<arrow::datatypes::Schema, BqError> {
-    let reader = StreamReader::try_new(
-        std::io::Cursor::new(schema_bytes.as_ref()),
-        None,
-    )?;
+    let reader = StreamReader::try_new(std::io::Cursor::new(schema_bytes.as_ref()), None)?;
     Ok(reader.schema().as_ref().clone())
 }
 
 /// Initialise a `StreamDecoder` by feeding it the schema IPC message so it
 /// can decode record batches without needing the schema in-band.
-pub(crate) fn prime_decoder(schema_bytes: &Bytes) -> Result<arrow::ipc::reader::StreamDecoder, BqError> {
+pub(crate) fn prime_decoder(
+    schema_bytes: &Bytes,
+) -> Result<arrow::ipc::reader::StreamDecoder, BqError> {
     let mut decoder = arrow::ipc::reader::StreamDecoder::new();
     let mut buf = Buffer::from(schema_bytes.as_ref());
     decoder.decode(&mut buf)?;

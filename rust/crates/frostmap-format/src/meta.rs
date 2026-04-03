@@ -6,12 +6,12 @@ use crate::{Error, Result};
 // Format-wide constants
 // ---------------------------------------------------------------------------
 
-pub const FORMAT_VERSION: u32   = 4;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Default seed for the value-header verification fingerprint.
 /// Must be != 0 so it is independent of the index fingerprint (seed 0).
 pub const DEFAULT_VERIFY_SEED: u64 = 0x517cc1b727220a95; // xxhash64("frostmap-verify")
-pub const HASH_ALGORITHM: &str  = "xxhash64";
+pub const HASH_ALGORITHM: &str = "xxhash64";
 
 /// Value alignment in bytes. Every value in `data.bin` starts at a multiple of this.
 pub const VALUE_ALIGNMENT: u64 = 64;
@@ -37,7 +37,7 @@ pub const INDEX_ALIGNMENT: u64 = 2 * 1024 * 1024;
 pub struct Layout {
     pub n_partitions: u32,
     /// `n_partitions - 1`; used for fast modulo on the power-of-two count.
-    partition_mask:   u64,
+    partition_mask: u64,
 }
 
 impl Layout {
@@ -94,25 +94,25 @@ pub const VALUE_HEADER_SIZE: usize = 12;
 /// Contents of `meta.json`, written last as the snapshot completion signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
-    pub format_version:  u32,
-    pub n_partitions:    u32,
-    pub hash_algorithm:  String,
-    pub n_keys:          u64,
+    pub format_version: u32,
+    pub n_partitions: u32,
+    pub hash_algorithm: String,
+    pub n_keys: u64,
     /// Seed for the verification fingerprint stored in each value header.
     /// Must be non-zero in V3 snapshots.
-    pub verify_seed:     u64,
-    pub created_at:      String,
+    pub verify_seed: u64,
+    pub created_at: String,
     /// Byte offset of each partition's bucket array within `index.all`.
     /// Each offset is 2 MiB-aligned for huge page backing.
-    pub index_offsets:   Vec<u64>,
+    pub index_offsets: Vec<u64>,
     /// Number of logical buckets per partition.
     pub index_n_buckets: Vec<u64>,
     /// Embedded contents of `scatter.done` (opaque to kv-format).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scatter:         Option<serde_json::Value>,
+    pub scatter: Option<serde_json::Value>,
     /// Embedded contents of `index.done` (opaque to kv-format).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub index:           Option<serde_json::Value>,
+    pub index: Option<serde_json::Value>,
 }
 
 impl Meta {
@@ -121,14 +121,14 @@ impl Meta {
         if self.format_version != FORMAT_VERSION {
             return Err(Error::VersionMismatch {
                 expected: FORMAT_VERSION,
-                got:      self.format_version,
+                got: self.format_version,
             });
         }
         let n = self.n_partitions as usize;
         if self.index_offsets.len() != n || self.index_n_buckets.len() != n {
             return Err(Error::InvalidIndexMetadata {
                 expected: n,
-                got_offsets:  self.index_offsets.len(),
+                got_offsets: self.index_offsets.len(),
                 got_buckets: self.index_n_buckets.len(),
             });
         }
@@ -177,16 +177,16 @@ mod tests {
     #[test]
     fn meta_layout_roundtrip() {
         let meta = Meta {
-            format_version:  FORMAT_VERSION,
-            n_partitions:    64,
-            hash_algorithm:  HASH_ALGORITHM.to_string(),
-            n_keys:          0,
-            verify_seed:     DEFAULT_VERIFY_SEED,
-            created_at:      "2026-03-27T00:00:00Z".to_string(),
-            index_offsets:   vec![0; 64],
+            format_version: FORMAT_VERSION,
+            n_partitions: 64,
+            hash_algorithm: HASH_ALGORITHM.to_string(),
+            n_keys: 0,
+            verify_seed: DEFAULT_VERIFY_SEED,
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            index_offsets: vec![0; 64],
             index_n_buckets: vec![0; 64],
-            scatter:         None,
-            index:           None,
+            scatter: None,
+            index: None,
         };
         let layout = meta.layout().unwrap();
         assert_eq!(layout.n_partitions, 64);
@@ -195,16 +195,16 @@ mod tests {
     #[test]
     fn meta_rejects_old_format_version() {
         let meta = Meta {
-            format_version:  2,
-            n_partitions:    64,
-            hash_algorithm:  HASH_ALGORITHM.to_string(),
-            n_keys:          0,
-            verify_seed:     DEFAULT_VERIFY_SEED,
-            created_at:      "2026-03-27T00:00:00Z".to_string(),
-            index_offsets:   vec![0; 64],
+            format_version: 2,
+            n_partitions: 64,
+            hash_algorithm: HASH_ALGORITHM.to_string(),
+            n_keys: 0,
+            verify_seed: DEFAULT_VERIFY_SEED,
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            index_offsets: vec![0; 64],
             index_n_buckets: vec![0; 64],
-            scatter:         None,
-            index:           None,
+            scatter: None,
+            index: None,
         };
         assert!(meta.layout().is_err());
     }
@@ -212,16 +212,16 @@ mod tests {
     #[test]
     fn meta_rejects_mismatched_index_metadata() {
         let meta = Meta {
-            format_version:  FORMAT_VERSION,
-            n_partitions:    4,
-            hash_algorithm:  HASH_ALGORITHM.to_string(),
-            n_keys:          0,
-            verify_seed:     DEFAULT_VERIFY_SEED,
-            created_at:      "2026-03-27T00:00:00Z".to_string(),
-            index_offsets:   vec![0; 4],
+            format_version: FORMAT_VERSION,
+            n_partitions: 4,
+            hash_algorithm: HASH_ALGORITHM.to_string(),
+            n_keys: 0,
+            verify_seed: DEFAULT_VERIFY_SEED,
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            index_offsets: vec![0; 4],
             index_n_buckets: vec![0; 3], // wrong length
-            scatter:         None,
-            index:           None,
+            scatter: None,
+            index: None,
         };
         assert!(meta.layout().is_err());
     }

@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use prometheus_client::registry::Registry;
 use tokio::sync::{mpsc, oneshot};
@@ -36,11 +36,11 @@ pub struct CatalogConfig {
     /// Path to `catalog.json` watched for changes.
     pub catalog_path: PathBuf,
     /// Unix-domain socket path to bind, if any.
-    pub uds_path:     Option<PathBuf>,
+    pub uds_path: Option<PathBuf>,
     /// TCP address to bind, if any.
-    pub tcp_addr:     Option<SocketAddr>,
+    pub tcp_addr: Option<SocketAddr>,
     /// Semver string returned by the `version` command.
-    pub semver:       String,
+    pub semver: String,
     /// Address to expose Prometheus `/metrics` on, if any.
     pub metrics_addr: Option<SocketAddr>,
 }
@@ -51,9 +51,9 @@ pub struct CatalogConfig {
 
 /// Run catalog mode until all listeners exit.
 pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
-    let mut prom    = Registry::default();
-    let metrics     = Metrics::new(&mut prom);
-    let prom        = Arc::new(prom);
+    let mut prom = Registry::default();
+    let metrics = Metrics::new(&mut prom);
+    let prom = Arc::new(prom);
 
     // Load initial catalog synchronously.  If the file does not exist yet
     // (e.g. the node-agent hasn't written it), start with an empty catalog;
@@ -66,7 +66,7 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         }
         Err(e) => return Err(e),
     };
-    let n_ds     = initial.dataset_count() as i64;
+    let n_ds = initial.dataset_count() as i64;
     let registry = DataRegistry::new(initial);
 
     metrics.active_datasets.set(n_ds);
@@ -77,7 +77,7 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
 
     // HTTP server (serves /metrics and /version): fire-and-forget.
     if let Some(addr) = cfg.metrics_addr {
-        let prom     = Arc::clone(&prom);
+        let prom = Arc::clone(&prom);
         let data_reg = Arc::clone(&registry);
         tokio::spawn(async move {
             if let Err(e) = Metrics::run_server(prom, Some(data_reg), addr).await {
@@ -92,9 +92,9 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
     let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
     {
         let catalog_path = cfg.catalog_path.clone();
-        let registry     = Arc::clone(&registry);
-        let metrics      = Arc::clone(&metrics);
-        let gen_watcher  = Arc::clone(&generation);
+        let registry = Arc::clone(&registry);
+        let metrics = Arc::clone(&metrics);
+        let gen_watcher = Arc::clone(&generation);
         tokio::spawn(async move {
             watch_catalog(catalog_path, registry, metrics, gen_watcher, startup_tx).await;
         });
@@ -102,15 +102,23 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
     // Wait for the watcher to confirm it started before accepting connections.
     match startup_rx.await {
         Ok(Ok(())) => {}
-        Ok(Err(msg)) => return Err(ServeError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, msg)
-        )),
-        Err(_) => return Err(ServeError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "catalog watcher task died during init")
-        )),
+        Ok(Err(msg)) => return Err(ServeError::Io(std::io::Error::other(msg))),
+        Err(_) => {
+            return Err(ServeError::Io(std::io::Error::other(
+                "catalog watcher task died during init",
+            )))
+        }
     }
 
-    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, generation, metrics).await?;
+    run_listeners(
+        factory,
+        cfg.uds_path,
+        cfg.tcp_addr,
+        cfg.semver,
+        generation,
+        metrics,
+    )
+    .await?;
     Ok(())
 }
 
@@ -124,14 +132,14 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
 /// and processes reload requests on the async side.
 async fn watch_catalog(
     catalog_path: PathBuf,
-    registry:     Arc<DataRegistry>,
-    metrics:      Arc<Metrics>,
-    generation:   Arc<AtomicU64>,
-    startup_tx:   oneshot::Sender<Result<(), String>>,
+    registry: Arc<DataRegistry>,
+    metrics: Arc<Metrics>,
+    generation: Arc<AtomicU64>,
+    startup_tx: oneshot::Sender<Result<(), String>>,
 ) {
     let parent = match catalog_path.parent() {
         Some(p) => p.to_owned(),
-        None    => {
+        None => {
             let _ = startup_tx.send(Err("catalog path has no parent directory".into()));
             return;
         }
@@ -151,9 +159,10 @@ async fn watch_catalog(
         let (std_tx, std_rx) = std_mpsc::channel::<notify::Result<notify::Event>>();
 
         let mut watcher = match RecommendedWatcher::new(std_tx, Config::default()) {
-            Ok(w)  => w,
+            Ok(w) => w,
             Err(e) => {
-                let _ = startup_tx_bg.send(Err(format!("failed to create filesystem watcher: {e}")));
+                let _ =
+                    startup_tx_bg.send(Err(format!("failed to create filesystem watcher: {e}")));
                 return;
             }
         };
@@ -168,14 +177,13 @@ async fn watch_catalog(
             match result {
                 Ok(event) => {
                     // React to create/modify/rename events on the catalog path only.
-                    let is_relevant = matches!(
-                        event.kind,
-                        EventKind::Create(_) | EventKind::Modify(_)
-                    );
-                    if is_relevant && event.paths.iter().any(|p| p == &catalog_path_bg) {
-                        if tx.blocking_send(()).is_err() {
-                            return; // receiver dropped — shut down
-                        }
+                    let is_relevant =
+                        matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
+                    if is_relevant
+                        && event.paths.iter().any(|p| p == &catalog_path_bg)
+                        && tx.blocking_send(()).is_err()
+                    {
+                        return; // receiver dropped — shut down
                     }
                 }
                 Err(e) => tracing::error!("catalog watch error: {e}"),
@@ -186,7 +194,7 @@ async fn watch_catalog(
 
     // Forward the blocking startup result to the async caller.
     let startup_result = match startup_rx_bg.recv() {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(_) => Err("watcher blocking task died before signalling startup".into()),
     };
     let _ = startup_tx.send(startup_result);
@@ -201,7 +209,7 @@ async fn watch_catalog(
             }
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
-                let old  = registry.swap(Arc::new(new_catalog));
+                let old = registry.swap(Arc::new(new_catalog));
                 drop(old); // release mmaps and file descriptors
 
                 generation.store(next_gen, Ordering::Relaxed);
@@ -221,13 +229,31 @@ async fn watch_catalog(
 /// Runs in the blocking thread pool since `SnapshotReader::open` does file I/O.
 async fn build_catalog_blocking(
     catalog_path: PathBuf,
-    generation:   u64,
+    generation: u64,
 ) -> Result<ActiveCatalog, ServeError> {
-    tokio::task::spawn_blocking(move || {
-        build_catalog_sync(&catalog_path, generation)
-    })
-    .await
-    .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
+    tokio::task::spawn_blocking(move || build_catalog_sync(&catalog_path, generation))
+        .await
+        .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
+}
+
+fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, ServeError> {
+    let file = CatalogFile::load(path)?;
+    let mut datasets = HashMap::new();
+    for entry in file.entries {
+        if datasets.contains_key(&entry.key_prefix) {
+            return Err(ServeError::CatalogParse(format!(
+                "duplicate key_prefix {:?} in catalog",
+                entry.key_prefix
+            )));
+        }
+        let handle = DatasetHandle::open(entry.dataset, entry.version_id, &entry.mount_path)?;
+        datasets.insert(entry.key_prefix, handle);
+    }
+    Ok(ActiveCatalog::new(
+        datasets,
+        generation,
+        std::time::SystemTime::now(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -237,8 +263,8 @@ async fn build_catalog_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use frostmap_format::writer::SnapshotWriter;
+    use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
     fn write_catalog(json: &str) -> NamedTempFile {
@@ -263,36 +289,22 @@ mod tests {
         // the second entry's duplicate check fires.
         let snap = build_snapshot();
         let snap_path = snap.path().to_str().unwrap();
-        let json = format!(r#"{{"entries":[
+        let json = format!(
+            r#"{{"entries":[
             {{"dataset":"ds-a","key_prefix":"shared","version_id":"v1","mount_path":"{snap_path}"}},
             {{"dataset":"ds-b","key_prefix":"shared","version_id":"v1","mount_path":"{snap_path}"}}
-        ]}}"#);
+        ]}}"#
+        );
         let f = write_catalog(&json);
         match build_catalog_sync(f.path(), 0) {
             Err(ServeError::CatalogParse(msg)) => {
-                assert!(msg.contains("shared"), "error should mention the duplicate key_prefix: {msg}");
+                assert!(
+                    msg.contains("shared"),
+                    "error should mention the duplicate key_prefix: {msg}"
+                );
             }
             Err(other) => panic!("expected CatalogParse, got: {other}"),
-            Ok(_)      => panic!("expected error, got Ok"),
+            Ok(_) => panic!("expected error, got Ok"),
         }
     }
-}
-
-fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, ServeError> {
-    let file = CatalogFile::load(path)?;
-    let mut datasets = HashMap::new();
-    for entry in file.entries {
-        if datasets.contains_key(&entry.key_prefix) {
-            return Err(ServeError::CatalogParse(
-                format!("duplicate key_prefix {:?} in catalog", entry.key_prefix)
-            ));
-        }
-        let handle = DatasetHandle::open(
-            entry.dataset,
-            entry.version_id,
-            &entry.mount_path,
-        )?;
-        datasets.insert(entry.key_prefix, handle);
-    }
-    Ok(ActiveCatalog::new(datasets, generation, std::time::SystemTime::now()))
 }

@@ -17,7 +17,7 @@ use crate::ServeError;
 #[derive(Debug, Deserialize)]
 pub struct CatalogEntry {
     /// Dataset name, e.g. `"my-ds"`.
-    pub dataset:    String,
+    pub dataset: String,
     /// Routing prefix the KV server uses to match incoming requests, e.g. `"my-ds"`.
     /// Requests whose key starts with `"<key_prefix>:"` are routed to this dataset.
     pub key_prefix: String,
@@ -38,8 +38,7 @@ impl CatalogFile {
     /// `spawn_blocking` or at startup before the async runtime is loaded.
     pub fn load(path: &Path) -> Result<Self, ServeError> {
         let data = std::fs::read(path)?;
-        serde_json::from_slice(&data)
-            .map_err(|e| ServeError::CatalogParse(e.to_string()))
+        serde_json::from_slice(&data).map_err(|e| ServeError::CatalogParse(e.to_string()))
     }
 }
 
@@ -61,10 +60,12 @@ mod tests {
 
     #[test]
     fn parse_valid_catalog() {
-        let f = write_catalog(r#"{"entries":[
+        let f = write_catalog(
+            r#"{"entries":[
             {"dataset":"ds1","key_prefix":"ds1","version_id":"v1","mount_path":"/mnt/kv/ds1/v1"},
             {"dataset":"ds2","key_prefix":"ds2","version_id":"v2","mount_path":"/mnt/kv/ds2/v2"}
-        ]}"#);
+        ]}"#,
+        );
         let cat = CatalogFile::load(f.path()).unwrap();
         assert_eq!(cat.entries.len(), 2);
         assert_eq!(cat.entries[0].dataset, "ds1");
@@ -75,9 +76,11 @@ mod tests {
     fn parse_key_prefix_differs_from_dataset() {
         // key_prefix and dataset are independent fields; a dataset can be routed
         // under a prefix that does not match its name.
-        let f = write_catalog(r#"{"entries":[
+        let f = write_catalog(
+            r#"{"entries":[
             {"dataset":"my-dataset","key_prefix":"mds","version_id":"v1","mount_path":"/mnt/kv/my-dataset/v1"}
-        ]}"#);
+        ]}"#,
+        );
         let cat = CatalogFile::load(f.path()).unwrap();
         assert_eq!(cat.entries[0].dataset, "my-dataset");
         assert_eq!(cat.entries[0].key_prefix, "mds");

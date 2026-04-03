@@ -5,8 +5,8 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use frostmap_format::reader::SnapshotReader;
 use prometheus_client::registry::Registry;
@@ -50,8 +50,7 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     let reader = SnapshotReader::open(&cfg.dir)?;
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
-    let factory: Arc<dyn LookupFactory> =
-        Arc::new(SnapshotLookup::new(Arc::new(reader)));
+    let factory: Arc<dyn LookupFactory> = Arc::new(SnapshotLookup::new(Arc::new(reader)));
 
     // Metrics server is secondary: fire-and-forget, never blocks startup.
     if let Some(addr) = cfg.metrics_addr {
@@ -65,6 +64,14 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
 
     // Propagate bind / accept errors so process supervisors see a non-zero exit.
     let generation = Arc::new(AtomicU64::new(0));
-    run_listeners(factory, cfg.uds_path, cfg.tcp_addr, cfg.semver, generation, metrics).await?;
+    run_listeners(
+        factory,
+        cfg.uds_path,
+        cfg.tcp_addr,
+        cfg.semver,
+        generation,
+        metrics,
+    )
+    .await?;
     Ok(())
 }

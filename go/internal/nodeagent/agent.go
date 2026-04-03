@@ -419,4 +419,3 @@ func (a *Agent) writeCatalog(dataset, versionID, keyPrefix, mountPath string) er
 	}
 	return nil
 }
-

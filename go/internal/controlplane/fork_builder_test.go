@@ -73,7 +73,7 @@ func TestForkBuilder_StartIdempotent(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source: api.SourceConfig{Project: "p", Table: "t"},
+		Source:     api.SourceConfig{Project: "p", Table: "t"},
 	}
 
 	ctx := context.Background()
@@ -110,7 +110,7 @@ func TestForkBuilder_Cancel(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source: api.SourceConfig{Project: "p", Table: "t"},
+		Source:     api.SourceConfig{Project: "p", Table: "t"},
 	}
 
 	ctx := context.Background()
@@ -150,7 +150,7 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source: api.SourceConfig{Project: "p", Table: "t"},
+		Source:     api.SourceConfig{Project: "p", Table: "t"},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
