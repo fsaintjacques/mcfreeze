@@ -39,7 +39,9 @@ pub struct BqSourceConfig {
     pub key_column: String,
 
     /// Arrow column name whose bytes become the KV value.
-    pub value_column: String,
+    /// Required for the raw encoding path (`into_sources`); not needed for the
+    /// record-batch path (`into_record_batch_sources`).
+    pub value_column: Option<String>,
 
     /// Column projection — only read these columns. Empty = all columns.
     /// The key and value columns are always included regardless of this list.
@@ -71,7 +73,7 @@ pub struct BqReadSession {
     pub(crate) streams: Vec<String>,
     pub(crate) schema_bytes: Bytes,
     pub(crate) key_col_idx: usize,
-    pub(crate) val_col_idx: usize,
+    pub(crate) val_col_idx: Option<usize>,
     metadata: SourceMetadata,
 }
 
@@ -150,9 +152,15 @@ impl BqReadSession {
         let key_col_idx = arrow_schema.index_of(&config.key_column).map_err(|_| {
             BqError::Schema(format!("key column {:?} not found", config.key_column))
         })?;
-        let val_col_idx = arrow_schema.index_of(&config.value_column).map_err(|_| {
-            BqError::Schema(format!("value column {:?} not found", config.value_column))
-        })?;
+        let val_col_idx = config
+            .value_column
+            .as_ref()
+            .map(|vc| {
+                arrow_schema
+                    .index_of(vc)
+                    .map_err(|_| BqError::Schema(format!("value column {:?} not found", vc)))
+            })
+            .transpose()?;
 
         let streams: Vec<String> = session.streams.into_iter().map(|s| s.name).collect();
 
@@ -195,8 +203,12 @@ impl BqReadSession {
     /// Consume the session and return one [`BqStreamSource`] per stream.
     ///
     /// Each source extracts pre-determined key and value columns as byte pairs.
+    /// Requires that `value_column` was set in the config; returns an error otherwise.
     /// Pass the returned `Vec` directly to [`SnapshotLoader::load_parallel`].
     pub fn into_sources(self) -> Result<Vec<BqStreamSource>, BqError> {
+        let val_col_idx = self.val_col_idx.ok_or_else(|| {
+            BqError::Schema("into_sources() requires value_column to be set in BqSourceConfig".into())
+        })?;
         self.streams
             .into_iter()
             .map(|name| {
@@ -204,7 +216,7 @@ impl BqReadSession {
                     self.client.clone(),
                     name,
                     self.key_col_idx,
-                    self.val_col_idx,
+                    val_col_idx,
                     self.schema_bytes.clone(),
                 )
             })

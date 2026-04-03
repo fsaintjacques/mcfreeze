@@ -76,9 +76,6 @@ impl<S> ProtobufEncodingSource<S> {
     }
 }
 
-// SAFETY: Transcoder is Sync (documented in apb), and all other fields are Send.
-unsafe impl<S: Send> Send for ProtobufEncodingSource<S> {}
-
 impl<S> KvSource for ProtobufEncodingSource<S>
 where
     S: RecordBatchSource,
@@ -123,6 +120,9 @@ where
 
 /// Extract key bytes from an Arrow column at the given row index.
 fn extract_key_bytes(col: &dyn Array, row: usize) -> Result<&[u8], EncodeError> {
+    if col.is_null(row) {
+        return Err(EncodeError::Config(format!("key column is null at row {row}")));
+    }
     match col.data_type() {
         DataType::Binary => Ok(col.as_bytes::<BinaryType>().value(row)),
         DataType::LargeBinary => Ok(col.as_bytes::<LargeBinaryType>().value(row)),

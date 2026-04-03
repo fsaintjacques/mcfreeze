@@ -32,6 +32,8 @@ pub struct BigQuerySource {
     pub table: String,
     pub key_column: String,
     /// Required when encoding is raw (no encoding spec).
+    /// Empty string is treated as absent.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub value_column: Option<String>,
     /// Column projection — only read these columns. Empty = all columns.
     #[serde(default)]
@@ -62,4 +64,13 @@ pub struct ProtobufEncoding {
     /// Fully-qualified protobuf message name.
     /// Required when `descriptor` is set; auto-generated otherwise.
     pub message_name: Option<String>,
+}
+
+/// Deserialize an empty string as `None`.
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.filter(|s| !s.is_empty()))
 }

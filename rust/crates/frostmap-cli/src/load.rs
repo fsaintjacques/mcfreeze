@@ -272,13 +272,13 @@ async fn run_from_config(
         // Protobuf encoding: open session without value column constraint,
         // build transcoder, wrap sources.
         let bq_config = BqSourceConfig {
-            project:             billing_project,
-            table:               table_resource,
-            key_column:          bq.key_column.clone(),
-            value_column:        bq.key_column.clone(), // dummy — not used for record batch sources
-            selected_fields:     bq.selected_fields.clone(),
-            n_streams:           bq.streams,
-            row_restriction:     bq.row_restriction.clone(),
+            project: billing_project,
+            table: table_resource,
+            key_column: bq.key_column.clone(),
+            value_column: None,
+            selected_fields: bq.selected_fields.clone(),
+            n_streams: bq.streams,
+            row_restriction: bq.row_restriction.clone(),
             disable_compression: bq.no_compression,
         };
 
@@ -370,7 +370,7 @@ async fn open_bq_session(
         project: billing_project.clone(),
         table: table_resource,
         key_column: key_column.to_owned(),
-        value_column: value_column.to_owned(),
+        value_column: Some(value_column.to_owned()),
         selected_fields: vec![],
         n_streams: streams,
         row_restriction: row_restriction.map(|s| s.to_owned()),
