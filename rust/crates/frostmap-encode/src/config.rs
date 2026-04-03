@@ -58,12 +58,19 @@ pub struct EncodingSpec {
 /// Protobuf encoding via apb.
 #[derive(Debug, Deserialize)]
 pub struct ProtobufEncoding {
-    /// Base64-encoded `FileDescriptorSet`. When absent, the descriptor is
-    /// auto-generated from the Arrow schema.
+    /// Base64-encoded `FileDescriptorSet`.
+    /// Mutually exclusive with `descriptor_uri`. When both are absent,
+    /// the descriptor is auto-generated from the Arrow schema.
     pub descriptor: Option<String>,
-    /// Fully-qualified protobuf message name.
-    /// Required when `descriptor` is set; auto-generated otherwise.
-    pub message_name: Option<String>,
+    /// GCS URI to a `FileDescriptorSet` binary (e.g. `gs://bucket/schema.desc`).
+    /// Mutually exclusive with `descriptor`.
+    pub descriptor_uri: Option<String>,
+    /// Protobuf package name (e.g. `"mypackage"`).
+    /// Required when auto-generating; ignored when a descriptor is provided.
+    pub package: Option<String>,
+    /// Protobuf message name (e.g. `"MyMessage"`).
+    /// Required always — used as the top-level message to transcode into.
+    pub message_name: String,
 }
 
 /// Deserialize an empty string as `None`.

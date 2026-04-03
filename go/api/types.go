@@ -41,11 +41,18 @@ type EncodingSpec struct {
 // ProtobufEncoding configures Arrow → protobuf transcoding via apb.
 type ProtobufEncoding struct {
 	// Descriptor is a base64-encoded FileDescriptorSet.
-	// When empty, the descriptor is auto-generated from the Arrow schema.
+	// Mutually exclusive with DescriptorURI. When both are empty,
+	// the descriptor is auto-generated from the Arrow schema.
 	Descriptor string `json:"descriptor,omitempty"`
-	// MessageName is the fully-qualified protobuf message name.
-	// Required when Descriptor is set; auto-generated otherwise.
-	MessageName string `json:"message_name,omitempty"`
+	// DescriptorURI is a GCS URI to a FileDescriptorSet binary
+	// (e.g. "gs://bucket/schema.desc"). Mutually exclusive with Descriptor.
+	DescriptorURI string `json:"descriptor_uri,omitempty"`
+	// Package is the protobuf package name (e.g. "mypackage").
+	// Required when auto-generating; ignored when a descriptor is provided.
+	Package string `json:"package,omitempty"`
+	// MessageName is the protobuf message name (e.g. "MyMessage").
+	// Required always.
+	MessageName string `json:"message_name"`
 }
 
 // VersionState is the lifecycle state of a VersionRecord.

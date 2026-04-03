@@ -238,7 +238,9 @@ mod tests {
 
         let config = ProtobufEncoding {
             descriptor: None,
-            message_name: None,
+            descriptor_uri: None,
+            package: Some("test".into()),
+            message_name: "Row".into(),
         };
 
         let transcoder = build_transcoder(&config, &value_schema).unwrap();
