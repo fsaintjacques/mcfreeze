@@ -83,6 +83,29 @@ pub trait KvSource {
 use std::future::Future;
 
 // ---------------------------------------------------------------------------
+// RecordBatchSource — async Arrow RecordBatch iterator (requires "arrow" feature)
+// ---------------------------------------------------------------------------
+
+/// Async batch iterator yielding Arrow `RecordBatch`es.
+///
+/// This is the Arrow-level counterpart of [`KvSource`]: sources that produce
+/// full record batches (BigQuery Storage, Arrow Flight, Parquet, …) implement
+/// this trait.  Downstream adapters (e.g. protobuf encoding) consume it and
+/// produce a [`KvSource`].
+#[cfg(feature = "arrow")]
+pub trait RecordBatchSource: Send {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<arrow_array::RecordBatch>, Self::Error>> + Send;
+
+    fn metadata(&self) -> SourceMetadata {
+        SourceMetadata::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VecBatch — simple owned batch used by CsvSource
 // ---------------------------------------------------------------------------
 

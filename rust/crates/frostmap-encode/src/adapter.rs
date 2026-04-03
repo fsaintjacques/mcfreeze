@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
@@ -7,123 +6,49 @@ use arrow_array::{Array, BinaryArray, RecordBatch};
 use arrow_schema::DataType;
 
 use apb_core::transcode::Transcoder;
-use frostmap_loader::{KvSource, SourceMetadata, VecBatch};
+use frostmap_loader::{KvSource, RecordBatchSource, SourceMetadata, VecBatch};
 
 use crate::error::EncodeError;
 
-// ---------------------------------------------------------------------------
-// RecordBatchSource — trait for sources that yield full RecordBatches
-// ---------------------------------------------------------------------------
+/// A key-value pair of owned byte vectors.
+pub type KvPair = (Vec<u8>, Vec<u8>);
 
-/// Async batch iterator yielding Arrow `RecordBatch`es.
+/// Encode a `RecordBatch` into key-value pairs where the value is serialized
+/// protobuf bytes.
 ///
-/// This is the input side of [`ProtobufEncodingSource`]: any source that can
-/// produce full record batches (e.g. `BqRecordBatchSource`) implements this.
-pub trait RecordBatchSource: Send {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn next_batch(
-        &mut self,
-    ) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send;
-
-    fn metadata(&self) -> SourceMetadata {
-        SourceMetadata::default()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RecordBatchSource impl for BqRecordBatchSource
-// ---------------------------------------------------------------------------
-
-impl RecordBatchSource for frostmap_bq::BqRecordBatchSource {
-    type Error = frostmap_bq::BqError;
-
-    fn next_batch(
-        &mut self,
-    ) -> impl Future<Output = Result<Option<RecordBatch>, Self::Error>> + Send {
-        self.next_batch()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ProtobufEncodingSource
-// ---------------------------------------------------------------------------
-
-/// Wraps a [`RecordBatchSource`] and transcodes each batch into key-value
-/// pairs where the value is a serialized protobuf message.
+/// - `key_col_idx`: index of the column to extract as the key
+/// - `transcoder`: pre-built apb `Transcoder`
 ///
-/// The key column is extracted by index, and all remaining columns are
-/// transcoded via the apb [`Transcoder`].
-pub struct ProtobufEncodingSource<S> {
-    inner: S,
+/// All columns except the key column are transcoded into a single protobuf
+/// message per row.
+pub fn encode_batch(
+    batch: &RecordBatch,
     key_col_idx: usize,
-    value_col_indices: Vec<usize>,
-    transcoder: Arc<Transcoder>,
-}
+    transcoder: &Transcoder,
+) -> Result<Vec<KvPair>, EncodeError> {
+    let num_rows = batch.num_rows();
+    let key_col = batch.column(key_col_idx);
 
-impl<S> ProtobufEncodingSource<S> {
-    /// Create a new encoding source.
-    ///
-    /// - `inner`: source producing Arrow `RecordBatch`es
-    /// - `key_col_idx`: index of the column to extract as the KV key
-    /// - `transcoder`: pre-built apb `Transcoder`, shared via `Arc` (it is `Sync`)
-    ///
-    /// `value_col_indices` is auto-computed as all columns except the key.
-    pub fn new(
-        inner: S,
-        key_col_idx: usize,
-        n_columns: usize,
-        transcoder: Arc<Transcoder>,
-    ) -> Self {
-        let value_col_indices: Vec<usize> = (0..n_columns).filter(|&i| i != key_col_idx).collect();
-        Self {
-            inner,
-            key_col_idx,
-            value_col_indices,
-            transcoder,
-        }
-    }
-}
+    // Project value columns (everything except key).
+    let value_col_indices: Vec<usize> = (0..batch.num_columns())
+        .filter(|&i| i != key_col_idx)
+        .collect();
+    let value_batch = batch
+        .project(&value_col_indices)
+        .map_err(EncodeError::Arrow)?;
 
-impl<S> KvSource for ProtobufEncodingSource<S>
-where
-    S: RecordBatchSource,
-{
-    type Batch = VecBatch;
-    type Error = EncodeError;
+    // Transcode value columns → protobuf BinaryArray.
+    let proto_values: BinaryArray = transcoder.transcode_arrow(&value_batch)?;
 
-    async fn next_batch(&mut self) -> Result<Option<VecBatch>, EncodeError> {
-        let batch = match self.inner.next_batch().await {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(EncodeError::Source(Box::new(e))),
-        };
-
-        let num_rows = batch.num_rows();
-        let key_col = batch.column(self.key_col_idx);
-
-        // Project value columns for transcoding.
-        let value_batch = batch
-            .project(&self.value_col_indices)
-            .map_err(EncodeError::Arrow)?;
-
-        // Transcode value columns → protobuf BinaryArray.
-        let proto_values: BinaryArray = self.transcoder.transcode_arrow(&value_batch)?;
-
-        // Build (key, value) pairs.
-        let mut pairs = Vec::with_capacity(num_rows);
-        for i in 0..num_rows {
-            let key = extract_key_bytes(key_col.as_ref(), i)?;
-            let value = proto_values.value(i);
-            pairs.push((key.to_vec(), value.to_vec()));
-        }
-
-        Ok(Some(VecBatch(pairs)))
+    // Build (key, value) pairs.
+    let mut pairs = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        let key = extract_key_bytes(key_col.as_ref(), i)?;
+        let value = proto_values.value(i);
+        pairs.push((key.to_vec(), value.to_vec()));
     }
 
-    fn metadata(&self) -> SourceMetadata {
-        self.inner.metadata()
-    }
+    Ok(pairs)
 }
 
 /// Extract key bytes from an Arrow column at the given row index.
@@ -144,6 +69,59 @@ fn extract_key_bytes(col: &dyn Array, row: usize) -> Result<&[u8], EncodeError> 
     }
 }
 
+// ---------------------------------------------------------------------------
+// ProtobufEncodingSource
+// ---------------------------------------------------------------------------
+
+/// Wraps a [`RecordBatchSource`] and transcodes each batch into key-value
+/// pairs where the value is a serialized protobuf message.
+///
+/// The key column is extracted by index, and all remaining columns are
+/// transcoded via the apb [`Transcoder`].
+pub struct ProtobufEncodingSource<S> {
+    inner: S,
+    key_col_idx: usize,
+    transcoder: Arc<Transcoder>,
+}
+
+impl<S> ProtobufEncodingSource<S> {
+    /// Create a new encoding source.
+    ///
+    /// - `inner`: source producing Arrow `RecordBatch`es
+    /// - `key_col_idx`: index of the column to extract as the KV key
+    /// - `transcoder`: pre-built apb `Transcoder`, shared via `Arc` (it is `Sync`)
+    pub fn new(inner: S, key_col_idx: usize, transcoder: Arc<Transcoder>) -> Self {
+        Self {
+            inner,
+            key_col_idx,
+            transcoder,
+        }
+    }
+}
+
+impl<S> KvSource for ProtobufEncodingSource<S>
+where
+    S: RecordBatchSource,
+{
+    type Batch = VecBatch;
+    type Error = EncodeError;
+
+    async fn next_batch(&mut self) -> Result<Option<VecBatch>, EncodeError> {
+        let batch = match self.inner.next_batch().await {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(EncodeError::Source(Box::new(e))),
+        };
+
+        let pairs = encode_batch(&batch, self.key_col_idx, &self.transcoder)?;
+        Ok(Some(VecBatch(pairs)))
+    }
+
+    fn metadata(&self) -> SourceMetadata {
+        self.inner.metadata()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,34 +136,8 @@ mod tests {
     use prost_reflect::prost::Message;
     use prost_reflect::prost_types::FileDescriptorSet;
 
-    /// A test source that yields a fixed list of RecordBatches.
-    struct VecRecordBatchSource {
-        batches: Vec<RecordBatch>,
-        idx: usize,
-    }
-
-    impl VecRecordBatchSource {
-        fn new(batches: Vec<RecordBatch>) -> Self {
-            Self { batches, idx: 0 }
-        }
-    }
-
-    impl RecordBatchSource for VecRecordBatchSource {
-        type Error = arrow_schema::ArrowError;
-
-        async fn next_batch(&mut self) -> Result<Option<RecordBatch>, Self::Error> {
-            if self.idx < self.batches.len() {
-                let batch = self.batches[self.idx].clone();
-                self.idx += 1;
-                Ok(Some(batch))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_protobuf_encoding_source_auto_generate() {
+    #[test]
+    fn test_encode_batch_auto_generate() {
         // Build a RecordBatch: key (Utf8), age (Int32), score (Float64)
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
@@ -216,27 +168,16 @@ mod tests {
         let mapping = infer_mapping(&value_schema, &msg, &InferOptions::default()).unwrap();
         let transcoder = Transcoder::new(&mapping).unwrap();
 
-        let source = VecRecordBatchSource::new(vec![batch]);
-        let mut enc_source = ProtobufEncodingSource::new(source, 0, 3, Arc::new(transcoder));
-
-        // First call should yield 2 rows.
-        let batch = enc_source.next_batch().await.unwrap().unwrap();
-        assert_eq!(frostmap_loader::KvBatch::len(&batch), 2);
-
-        let pairs: Vec<_> = frostmap_loader::KvBatch::iter(&batch).collect();
+        let pairs = encode_batch(&batch, 0, &transcoder).unwrap();
+        assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, b"alice");
         assert_eq!(pairs[1].0, b"bob");
-
-        // Values should be non-empty protobuf bytes.
         assert!(!pairs[0].1.is_empty());
         assert!(!pairs[1].1.is_empty());
-
-        // Second call should yield None.
-        assert!(enc_source.next_batch().await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn test_build_transcoder_auto_generate() {
+    #[test]
+    fn test_build_transcoder_auto_generate() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -269,8 +210,8 @@ mod tests {
         assert!(!result.value(0).is_empty());
     }
 
-    #[tokio::test]
-    async fn test_build_transcoder_inline_descriptor() {
+    #[test]
+    fn test_build_transcoder_inline_descriptor() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
         use prost_reflect::prost::Message;
@@ -292,7 +233,7 @@ mod tests {
             descriptor: Some(desc_b64),
             descriptor_uri: None,
             package: None,
-            message_name: "pkg.Msg".into(), // FQN when descriptor is provided
+            message_name: "pkg.Msg".into(),
         };
 
         let transcoder = build_transcoder(&config, &value_schema).unwrap();
@@ -311,8 +252,8 @@ mod tests {
         assert!(!result.value(0).is_empty());
     }
 
-    #[tokio::test]
-    async fn test_build_transcoder_mutual_exclusion_error() {
+    #[test]
+    fn test_build_transcoder_mutual_exclusion_error() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -334,8 +275,8 @@ mod tests {
             .contains("mutually exclusive"));
     }
 
-    #[tokio::test]
-    async fn test_build_transcoder_missing_package_error() {
+    #[test]
+    fn test_build_transcoder_missing_package_error() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -344,7 +285,7 @@ mod tests {
         let config = ProtobufEncoding {
             descriptor: None,
             descriptor_uri: None,
-            package: None, // missing — should error
+            package: None,
             message_name: "Msg".into(),
         };
 

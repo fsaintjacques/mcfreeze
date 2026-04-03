@@ -292,7 +292,6 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
 
         let schema = session.schema().context("failed to get Arrow schema")?;
         let key_col_idx = session.key_column_index();
-        let n_columns = schema.fields().len();
         let estimated_rows = session.metadata().estimated_rows;
 
         // Build value schema (all columns except key).
@@ -324,12 +323,7 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
         let sources: Vec<_> = rb_sources
             .into_iter()
             .map(|s| {
-                frostmap_encode::ProtobufEncodingSource::new(
-                    s,
-                    key_col_idx,
-                    n_columns,
-                    transcoder.clone(),
-                )
+                frostmap_encode::ProtobufEncodingSource::new(s, key_col_idx, transcoder.clone())
             })
             .collect();
 

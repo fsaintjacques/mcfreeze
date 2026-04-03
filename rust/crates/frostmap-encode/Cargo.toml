@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-frostmap-loader = { path = "../frostmap-loader" }
-frostmap-bq     = { path = "../frostmap-bq" }
+frostmap-loader = { path = "../frostmap-loader", features = ["arrow"] }
 apb-core        = { path = "../../../../../../../apb/crates/apb-core" }
 arrow-array     = "58"
 arrow-schema    = "58"
@@ -16,5 +15,4 @@ serde_json      = "1"
 thiserror       = "2"
 
 [dev-dependencies]
-tokio    = { version = "1", features = ["rt-multi-thread", "macros"] }
 tempfile = "3"

@@ -1,4 +1,5 @@
 mod batch;
+mod encode;
 mod error;
 mod session;
 mod source;

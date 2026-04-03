@@ -908,14 +908,12 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "base64 0.22.1",
- "frostmap-bq",
  "frostmap-loader",
  "prost-reflect",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -938,6 +936,7 @@ dependencies = [
 name = "frostmap-loader"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
  "base64 0.22.1",
  "bytemuck",
  "chrono",
