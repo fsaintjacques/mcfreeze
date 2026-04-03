@@ -4,24 +4,48 @@ package api
 
 import "time"
 
-// SourceConfig describes the BigQuery source for a dataset.
-type SourceConfig struct {
-	Project     string `json:"project"`
-	Table       string `json:"table"`
-	KeyColumn   string `json:"key_column"`
-	ValueColumn string `json:"value_column"`
-}
-
 // DatasetSpec describes a dataset and its build configuration.
 type DatasetSpec struct {
 	Name string `json:"name"`
 	// KeyPrefix is the routing prefix the KV server uses to match incoming
 	// requests to this dataset, e.g. "users" routes "users:<key>" lookups.
 	// Must be unique across all datasets on a node.
-	KeyPrefix  string       `json:"key_prefix"`
-	Source     SourceConfig `json:"source"`
-	ShardCount int          `json:"shard_count"`
-	Retention  int          `json:"retention"` // number of ready versions to keep
+	KeyPrefix  string        `json:"key_prefix"`
+	Source     SourceSpec    `json:"source"`
+	Encoding   *EncodingSpec `json:"encoding,omitempty"` // nil → raw (single column as bytes)
+	ShardCount int           `json:"shard_count"`
+	Retention  int           `json:"retention"` // number of ready versions to keep
+}
+
+// SourceSpec is a discriminated union: exactly one field must be set.
+type SourceSpec struct {
+	BigQuery *BigQuerySource `json:"bigquery,omitempty"`
+}
+
+// BigQuerySource describes a BigQuery Storage Read API source.
+type BigQuerySource struct {
+	Project        string   `json:"project"`
+	Table          string   `json:"table"`
+	KeyColumn      string   `json:"key_column"`
+	ValueColumn    string   `json:"value_column,omitempty"`     // required when encoding is raw
+	SelectedFields []string `json:"selected_fields,omitempty"`  // column projection; empty = all columns
+	RowRestriction string   `json:"row_restriction,omitempty"`  // SQL WHERE predicate pushed down to BQ
+}
+
+// EncodingSpec is a discriminated union for value encoding.
+// When nil/absent, values are taken raw from a single column.
+type EncodingSpec struct {
+	Protobuf *ProtobufEncoding `json:"protobuf,omitempty"`
+}
+
+// ProtobufEncoding configures Arrow → protobuf transcoding via apb.
+type ProtobufEncoding struct {
+	// Descriptor is a base64-encoded FileDescriptorSet.
+	// When empty, the descriptor is auto-generated from the Arrow schema.
+	Descriptor string `json:"descriptor,omitempty"`
+	// MessageName is the fully-qualified protobuf message name.
+	// Required when Descriptor is set; auto-generated otherwise.
+	MessageName string `json:"message_name,omitempty"`
 }
 
 // VersionState is the lifecycle state of a VersionRecord.

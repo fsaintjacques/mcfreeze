@@ -8,13 +8,16 @@ name = "fm"
 path = "src/main.rs"
 
 [dependencies]
-frostmap-loader = { path = "../frostmap-loader" }
-frostmap-bq     = { path = "../frostmap-bq" }
-frostmap-format = { path = "../frostmap-format" }
-frostmap-server = { path = "../frostmap-server" }
+frostmap-loader  = { path = "../frostmap-loader" }
+frostmap-bq      = { path = "../frostmap-bq" }
+frostmap-encode  = { path = "../frostmap-encode" }
+frostmap-format  = { path = "../frostmap-format" }
+frostmap-server  = { path = "../frostmap-server" }
+arrow                = { version = "58", default-features = false }
 clap                 = { version = "4", features = ["derive"] }
 tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 anyhow               = "1"
+serde_json           = "1"
 rustls               = { version = "0.23", features = ["ring"], default-features = false }
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3", features = ["env-filter"] }

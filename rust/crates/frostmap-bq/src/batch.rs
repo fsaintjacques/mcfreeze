@@ -11,7 +11,7 @@ use frostmap_loader::KvBatch;
 
 /// Wraps an Arrow column that holds byte data (Binary, LargeBinary, Utf8,
 /// LargeUtf8) and provides zero-copy access to individual values.
-pub(crate) struct BinaryCol(ArrayRef);
+pub struct BinaryCol(ArrayRef);
 
 impl BinaryCol {
     pub fn try_from(arr: ArrayRef, col: &str) -> Result<Self, crate::error::BqError> {

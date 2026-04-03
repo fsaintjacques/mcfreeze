@@ -15,7 +15,7 @@ const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
 use frostmap_loader::SourceMetadata;
 
-use crate::{error::BqError, BqStreamSource};
+use crate::{error::BqError, source::BqRecordBatchSource, BqStreamSource};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +40,10 @@ pub struct BqSourceConfig {
 
     /// Arrow column name whose bytes become the KV value.
     pub value_column: String,
+
+    /// Column projection — only read these columns. Empty = all columns.
+    /// The key and value columns are always included regardless of this list.
+    pub selected_fields: Vec<String>,
 
     /// Hint for the number of parallel read streams.
     /// BQ may return fewer; call [`BqReadSession::n_streams`] for the actual count.
@@ -107,6 +111,7 @@ impl BqReadSession {
         };
 
         let read_options = Some(TableReadOptions {
+            selected_fields: config.selected_fields,
             row_restriction: config.row_restriction.unwrap_or_default(),
             output_format_serialization_options: serialization_opts,
             ..Default::default()
@@ -177,8 +182,19 @@ impl BqReadSession {
         &self.metadata
     }
 
+    /// Return the Arrow schema for this session's table.
+    pub fn schema(&self) -> Result<arrow::datatypes::Schema, BqError> {
+        decode_schema(&self.schema_bytes)
+    }
+
+    /// Return the column index of the key column.
+    pub fn key_column_index(&self) -> usize {
+        self.key_col_idx
+    }
+
     /// Consume the session and return one [`BqStreamSource`] per stream.
     ///
+    /// Each source extracts pre-determined key and value columns as byte pairs.
     /// Pass the returned `Vec` directly to [`SnapshotLoader::load_parallel`].
     pub fn into_sources(self) -> Result<Vec<BqStreamSource>, BqError> {
         self.streams
@@ -189,6 +205,23 @@ impl BqReadSession {
                     name,
                     self.key_col_idx,
                     self.val_col_idx,
+                    self.schema_bytes.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Consume the session and return one [`BqRecordBatchSource`] per stream.
+    ///
+    /// Unlike [`into_sources`], these yield full Arrow `RecordBatch`es without
+    /// key/value extraction — suitable for downstream encoding (e.g. protobuf).
+    pub fn into_record_batch_sources(self) -> Result<Vec<BqRecordBatchSource>, BqError> {
+        self.streams
+            .into_iter()
+            .map(|name| {
+                BqRecordBatchSource::new(
+                    self.client.clone(),
+                    name,
                     self.schema_bytes.clone(),
                 )
             })

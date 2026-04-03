@@ -6,6 +6,8 @@ use gcloud_sdk::google::cloud::bigquery::storage::v1::{
 };
 use tonic::Streaming;
 
+use arrow::record_batch::RecordBatch;
+
 use frostmap_loader::{KvSource, SourceMetadata};
 
 use crate::{
@@ -109,15 +111,78 @@ impl KvSource for BqStreamSource {
 }
 
 // ---------------------------------------------------------------------------
+// BqRecordBatchSource
+// ---------------------------------------------------------------------------
+
+/// A single BigQuery read stream that yields full Arrow `RecordBatch`es.
+///
+/// Unlike [`BqStreamSource`], this does not extract key/value columns —
+/// the caller receives the complete batch for downstream processing
+/// (e.g. protobuf encoding via apb).
+pub struct BqRecordBatchSource {
+    client:       BqApi,
+    stream_name:  String,
+    decoder:      StreamDecoder,
+    state:        ReadState,
+}
+
+unsafe impl Send for BqRecordBatchSource {}
+
+impl BqRecordBatchSource {
+    pub(crate) fn new(
+        client:       BqApi,
+        stream_name:  String,
+        schema_bytes: Bytes,
+    ) -> Result<Self, BqError> {
+        Ok(Self {
+            client,
+            stream_name,
+            decoder: prime_decoder(&schema_bytes)?,
+            state:   ReadState::NotStarted,
+        })
+    }
+
+    /// Read the next Arrow `RecordBatch` from the stream.
+    ///
+    /// Returns `Ok(None)` when the stream is exhausted.
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>, BqError> {
+        if matches!(self.state, ReadState::NotStarted) {
+            let stream = self
+                .client
+                .get()
+                .read_rows(ReadRowsRequest {
+                    read_stream: self.stream_name.clone(),
+                    offset: 0,
+                })
+                .await?
+                .into_inner();
+            self.state = ReadState::Reading(Box::new(stream));
+        }
+
+        let prev = std::mem::replace(&mut self.state, ReadState::Done);
+        let ReadState::Reading(mut stream) = prev else {
+            return Ok(None);
+        };
+
+        match stream.message().await? {
+            None => Ok(None),
+            Some(response) => {
+                self.state = ReadState::Reading(stream);
+                decode_record_batch(response, &mut self.decoder).map(Some)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn decode_batch(
+/// Decode a `ReadRowsResponse` into a raw Arrow `RecordBatch`.
+fn decode_record_batch(
     response: ReadRowsResponse,
     decoder: &mut StreamDecoder,
-    key_col_idx: usize,
-    val_col_idx: usize,
-) -> Result<ArrowBatch, BqError> {
+) -> Result<RecordBatch, BqError> {
     let arrow_batch = match response.rows {
         Some(Rows::ArrowRecordBatch(b)) => b,
         Some(Rows::AvroRows(_)) => {
@@ -129,9 +194,17 @@ fn decode_batch(
     };
 
     let mut buf = Buffer::from(arrow_batch.serialized_record_batch.as_slice());
-    let record_batch = decoder.decode(&mut buf)?.ok_or_else(|| {
+    decoder.decode(&mut buf)?.ok_or_else(|| {
         BqError::Schema("IPC decoder returned no batch after consuming batch bytes".into())
-    })?;
+    })
+}
 
+fn decode_batch(
+    response: ReadRowsResponse,
+    decoder: &mut StreamDecoder,
+    key_col_idx: usize,
+    val_col_idx: usize,
+) -> Result<ArrowBatch, BqError> {
+    let record_batch = decode_record_batch(response, decoder)?;
     ArrowBatch::from_record_batch(&record_batch, key_col_idx, val_col_idx)
 }
