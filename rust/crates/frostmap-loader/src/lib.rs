@@ -7,8 +7,8 @@ mod spill;
 
 pub use error::LoaderError;
 pub use source::{
-    ArrowKvBatch, CsvSource, KvBatch, KvSource, RawEncodingSource, RecordBatchSource,
-    SourceMetadata, VecBatch,
+    ArrowKvBatch, BoxedRecordBatchSource, CsvSource, KvBatch, KvSource, RawEncodingSource,
+    RecordBatchSource, SourceMetadata, VecBatch,
 };
 
 use std::path::Path;

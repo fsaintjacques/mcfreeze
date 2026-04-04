@@ -73,7 +73,7 @@ pub struct EncodingSpec {
 }
 
 /// Protobuf encoding via apb.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProtobufEncoding {
     /// Base64-encoded `FileDescriptorSet`.
     /// Mutually exclusive with `descriptor_uri`. When both are absent,

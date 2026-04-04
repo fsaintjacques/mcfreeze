@@ -2,7 +2,6 @@
 package testutil
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,13 +40,11 @@ func BuildSnapshot(t *testing.T, pairs []KV, partitions int) string {
 		partitions = 4
 	}
 
-	// Build CSV: each row is base64(key),base64(value)
+	// Build CSV with header row; keys and values are written as raw strings.
 	var csv strings.Builder
+	csv.WriteString("key,value\n")
 	for _, p := range pairs {
-		fmt.Fprintf(&csv, "%s,%s\n",
-			base64.StdEncoding.EncodeToString(p.Key),
-			base64.StdEncoding.EncodeToString(p.Value),
-		)
+		fmt.Fprintf(&csv, "%s,%s\n", p.Key, p.Value)
 	}
 
 	fm := FMBinary(t)

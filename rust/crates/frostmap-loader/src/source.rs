@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io::Read;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
@@ -95,6 +96,73 @@ pub trait RecordBatchSource: Send {
 
     fn metadata(&self) -> SourceMetadata {
         SourceMetadata::default()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BoxedRecordBatchSource — type-erased RecordBatchSource
+// ---------------------------------------------------------------------------
+
+/// Type-erased [`RecordBatchSource`] using boxed futures.
+///
+/// Allows different concrete source types (BigQuery, CSV, …) to be stored in
+/// a single `Vec<BoxedRecordBatchSource>` and processed uniformly.
+pub struct BoxedRecordBatchSource(Box<dyn ErasedRecordBatchSource>);
+
+impl BoxedRecordBatchSource {
+    pub fn new<S>(source: S) -> Self
+    where
+        S: RecordBatchSource + 'static,
+        S::Error: std::error::Error + Send + Sync + 'static,
+    {
+        Self(Box::new(ErasedAdapter(source)))
+    }
+}
+
+impl RecordBatchSource for BoxedRecordBatchSource {
+    type Error = LoaderError;
+
+    fn next_batch(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<RecordBatch>, LoaderError>> + Send {
+        self.0.next_batch_boxed()
+    }
+
+    fn metadata(&self) -> SourceMetadata {
+        self.0.metadata()
+    }
+}
+
+/// Object-safe helper trait for type erasure.
+trait ErasedRecordBatchSource: Send {
+    fn next_batch_boxed(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RecordBatch>, LoaderError>> + Send + '_>>;
+
+    fn metadata(&self) -> SourceMetadata;
+}
+
+/// Adapter that boxes the future returned by a concrete `RecordBatchSource`.
+struct ErasedAdapter<S>(S);
+
+impl<S> ErasedRecordBatchSource for ErasedAdapter<S>
+where
+    S: RecordBatchSource + 'static,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    fn next_batch_boxed(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<RecordBatch>, LoaderError>> + Send + '_>> {
+        Box::pin(async {
+            self.0
+                .next_batch()
+                .await
+                .map_err(|e| LoaderError::Source(Box::new(e)))
+        })
+    }
+
+    fn metadata(&self) -> SourceMetadata {
+        self.0.metadata()
     }
 }
 
