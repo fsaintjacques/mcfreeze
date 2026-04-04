@@ -20,7 +20,7 @@ pub struct GetArgs {
 
     /// Decode value as protobuf and print JSON.
     /// Requires the snapshot to have an embedded descriptor in meta.json.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "hex")]
     json: bool,
 }
 
@@ -81,7 +81,7 @@ fn print_json(snapshot: &std::path::Path, value_bytes: &[u8]) -> Result<()> {
         .context("failed to decode base64 descriptor")?;
 
     let pool = {
-        let mut pool = prost_reflect::DescriptorPool::global();
+        let mut pool = prost_reflect::DescriptorPool::new();
         pool.decode_file_descriptor_set(&desc_bytes[..])
             .context("failed to parse FileDescriptorSet")?;
         pool

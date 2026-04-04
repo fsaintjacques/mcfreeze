@@ -138,7 +138,7 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 			}
 
 			// Extract protobuf descriptor from meta.json if present.
-			if desc, msgName := readDescriptorFromMeta(snapPath); desc != "" {
+			if desc, msgName := readDescriptorFromMeta(snapPath); desc != "" && msgName != "" {
 				if err := o.Store.SetDescriptor(v.Dataset, v.ID, desc, msgName); err != nil {
 					slog.Error("set descriptor", "dataset", v.Dataset, "version", v.ID, "err", err)
 				}
