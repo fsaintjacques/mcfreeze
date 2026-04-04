@@ -149,9 +149,9 @@ pub async fn run(args: LoadArgs) -> Result<()> {
             )
             .await?;
             let schema = session.schema().context("failed to get Arrow schema")?;
-            let key_col_idx = schema.index_of(&args.key_column).with_context(|| {
-                format!("key column {:?} not found in schema", args.key_column)
-            })?;
+            let key_col_idx = schema
+                .index_of(&args.key_column)
+                .with_context(|| format!("key column {:?} not found in schema", args.key_column))?;
             let val_col_idx = schema.index_of(&args.value_column).with_context(|| {
                 format!("value column {:?} not found in schema", args.value_column)
             })?;
