@@ -10,8 +10,7 @@ use tracing::info;
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_encode::config::WorkerConfig;
 use frostmap_loader::{
-    CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource, RecordBatchSource,
-    SnapshotLoader,
+    CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource, SnapshotLoader,
 };
 
 // ---------------------------------------------------------------------------
@@ -149,16 +148,20 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                 selected_fields.clone(),
             )
             .await?;
+            let schema = session.schema().context("failed to get Arrow schema")?;
+            let key_col_idx = schema.index_of(&args.key_column).with_context(|| {
+                format!("key column {:?} not found in schema", args.key_column)
+            })?;
+            let val_col_idx = schema.index_of(&args.value_column).with_context(|| {
+                format!("value column {:?} not found in schema", args.value_column)
+            })?;
             let estimated_rows = session.metadata().estimated_rows;
             let sources = session
                 .into_record_batch_sources()
                 .context("failed to create record batch sources")?;
-            let key_col_idx = resolve_key_column_idx(&sources, &args.key_column)?;
             let raw_sources: Vec<_> = sources
                 .into_iter()
-                .map(|s| {
-                    RawEncodingSource::new(s, key_col_idx, resolve_value_column_idx_for_benchmark())
-                })
+                .map(|s| RawEncodingSource::new(s, key_col_idx, val_col_idx))
                 .collect();
             return benchmark_download(raw_sources, estimated_rows, args.progress_secs).await;
         }
@@ -695,23 +698,6 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
 
     let billing = project_override.unwrap_or(&project).to_string();
     Ok((billing, resource))
-}
-
-/// Dummy value column index for the download benchmark path.
-/// The benchmark only measures download throughput; values are discarded.
-/// We use column index 0 which will be the key column — the RawEncodingSource
-/// will produce key=key, value=key pairs but we never look at the values.
-fn resolve_key_column_idx<S: RecordBatchSource>(
-    _sources: &[S],
-    _key_column: &str,
-) -> Result<usize> {
-    // For the benchmark path, we don't have schema access on the sources.
-    // Use 0 as a placeholder — the benchmark discards all values anyway.
-    Ok(0)
-}
-
-fn resolve_value_column_idx_for_benchmark() -> usize {
-    0
 }
 
 pub fn human_bandwidth(bytes_per_sec: u64) -> String {
