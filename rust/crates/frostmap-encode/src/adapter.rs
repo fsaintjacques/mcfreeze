@@ -235,7 +235,9 @@ mod tests {
             message_name: "Row".into(),
         };
 
-        let transcoder = build_transcoder(&config, &value_schema).unwrap();
+        let output = build_transcoder(&config, &value_schema).unwrap();
+        assert_eq!(output.message_fqn, "test.Row");
+        assert!(!output.descriptor_bytes.is_empty());
 
         let batch = RecordBatch::try_new(
             Arc::new(value_schema),
@@ -246,7 +248,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = transcoder.transcode_arrow(&batch).unwrap();
+        let result = output.transcoder.transcode_arrow(&batch).unwrap();
         assert_eq!(result.len(), 1);
         assert!(!result.value(0).is_empty());
     }
@@ -276,7 +278,8 @@ mod tests {
             message_name: "pkg.Msg".into(),
         };
 
-        let transcoder = build_transcoder(&config, &value_schema).unwrap();
+        let output = build_transcoder(&config, &value_schema).unwrap();
+        assert_eq!(output.message_fqn, "pkg.Msg");
 
         let batch = RecordBatch::try_new(
             Arc::new(value_schema),
@@ -287,7 +290,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = transcoder.transcode_arrow(&batch).unwrap();
+        let result = output.transcoder.transcode_arrow(&batch).unwrap();
         assert_eq!(result.len(), 1);
         assert!(!result.value(0).is_empty());
     }

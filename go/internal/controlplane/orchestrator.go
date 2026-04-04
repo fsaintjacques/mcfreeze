@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -136,6 +137,13 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 				continue
 			}
 
+			// Extract protobuf descriptor from meta.json if present.
+			if desc, msgName := readDescriptorFromMeta(snapPath); desc != "" {
+				if err := o.Store.SetDescriptor(v.Dataset, v.ID, desc, msgName); err != nil {
+					slog.Error("set descriptor", "dataset", v.Dataset, "version", v.ID, "err", err)
+				}
+			}
+
 			if err := o.Store.Promote(v.Dataset, v.ID); err != nil {
 				slog.Error("promote", "dataset", v.Dataset, "version", v.ID, "err", err)
 			} else {
@@ -250,4 +258,29 @@ func (o *Orchestrator) WaitForConvergence(ctx context.Context, dataset, versionI
 // Close shuts down the HTTP server.
 func (o *Orchestrator) Close() error {
 	return o.Server.Close()
+}
+
+// readDescriptorFromMeta reads the protobuf descriptor and message name from
+// a snapshot's meta.json. Returns empty strings if the file is missing, the
+// encoding section is absent, or any parse error occurs.
+func readDescriptorFromMeta(snapshotPath string) (descriptor, messageName string) {
+	data, err := os.ReadFile(filepath.Join(snapshotPath, "meta.json"))
+	if err != nil {
+		return "", ""
+	}
+	var meta struct {
+		Encoding *struct {
+			Protobuf *struct {
+				Descriptor  string `json:"descriptor"`
+				MessageName string `json:"message_name"`
+			} `json:"protobuf"`
+		} `json:"encoding"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", ""
+	}
+	if meta.Encoding == nil || meta.Encoding.Protobuf == nil {
+		return "", ""
+	}
+	return meta.Encoding.Protobuf.Descriptor, meta.Encoding.Protobuf.MessageName
 }

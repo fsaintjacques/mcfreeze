@@ -205,6 +205,24 @@ func (s *Store) MarkReady(dataset, versionID, snapshotPath, pvName string) error
 	return nil
 }
 
+// SetDescriptor sets the protobuf descriptor and message name on a version.
+// No-op if both values are empty. Safe to call at any lifecycle state.
+func (s *Store) SetDescriptor(dataset, versionID, descriptor, messageName string) error {
+	if descriptor == "" && messageName == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.findVersion(dataset, versionID)
+	if err != nil {
+		return err
+	}
+	v.Descriptor = descriptor
+	v.MessageName = messageName
+	return nil
+}
+
 // MarkFailed transitions a version from building to failed.
 func (s *Store) MarkFailed(dataset, versionID, reason string) error {
 	s.mu.Lock()

@@ -90,6 +90,12 @@ type VersionRecord struct {
 	State      VersionState `json:"state"`
 	ShardCount int          `json:"shard_count"`
 	CreatedAt  time.Time    `json:"created_at"`
+	// Descriptor is a base64-encoded FileDescriptorSet for protobuf-encoded
+	// snapshots. Empty for raw-encoded snapshots or when unavailable.
+	Descriptor string `json:"descriptor,omitempty"`
+	// MessageName is the fully-qualified protobuf message name
+	// (e.g. "mypackage.MyMessage"). Empty when Descriptor is empty.
+	MessageName string `json:"message_name,omitempty"`
 }
 
 // CatalogEntry is one per-dataset entry written to catalog.json on the shared

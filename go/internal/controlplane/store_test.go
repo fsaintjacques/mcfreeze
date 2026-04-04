@@ -401,6 +401,48 @@ func TestStore_GetBuildingVersions_Empty(t *testing.T) {
 	}
 }
 
+func TestStore_SetDescriptor(t *testing.T) {
+	s := NewStore()
+	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
+	s.RegisterNode("node-1")
+
+	s.CreateVersion("ds", "v1")
+	s.MarkReady("ds", "v1", "/snap/v1", "pv-v1")
+
+	if err := s.SetDescriptor("ds", "v1", "AQID", "pkg.Msg"); err != nil {
+		t.Fatal(err)
+	}
+
+	versions := s.GetVersions("ds")
+	if len(versions) != 1 {
+		t.Fatalf("expected 1 version, got %d", len(versions))
+	}
+	if versions[0].Descriptor != "AQID" {
+		t.Errorf("descriptor = %q, want %q", versions[0].Descriptor, "AQID")
+	}
+	if versions[0].MessageName != "pkg.Msg" {
+		t.Errorf("message_name = %q, want %q", versions[0].MessageName, "pkg.Msg")
+	}
+
+	// Promote and verify descriptor propagates through assignments.
+	s.Promote("ds", "v1")
+	resp, _ := s.GetAssignments("node-1", 0)
+	if len(resp.Assignments) != 1 {
+		t.Fatalf("expected 1 assignment, got %d", len(resp.Assignments))
+	}
+	if resp.Assignments[0].Version.Descriptor != "AQID" {
+		t.Errorf("assignment descriptor = %q, want %q", resp.Assignments[0].Version.Descriptor, "AQID")
+	}
+}
+
+func TestStore_SetDescriptor_NoopOnEmpty(t *testing.T) {
+	s := NewStore()
+	// Should not error even if version doesn't exist (no-op for empty strings).
+	if err := s.SetDescriptor("ds", "v1", "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStore_ReportAndGetState(t *testing.T) {
 	s := NewStore()
 

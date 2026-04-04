@@ -25,6 +25,8 @@ const (
 // BuildResult holds the output of a completed build.
 type BuildResult struct {
 	SnapshotPath string // on-disk location of the snapshot
+	Descriptor   string // base64-encoded FileDescriptorSet (empty for raw encoding)
+	MessageName  string // fully-qualified protobuf message name (empty for raw encoding)
 }
 
 // BuildStatus is the current status of a build as returned by Poll.

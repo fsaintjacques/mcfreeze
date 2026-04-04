@@ -11,6 +11,16 @@ use apb_core::transcode::Transcoder;
 use crate::config::ProtobufEncoding;
 use crate::error::EncodeError;
 
+/// Result of building a protobuf transcoder, including the resolved descriptor
+/// bytes for downstream persistence (e.g. embedding in `meta.json`).
+pub struct TranscoderOutput {
+    pub transcoder: Transcoder,
+    /// Serialized `FileDescriptorSet` (protobuf binary).
+    pub descriptor_bytes: Vec<u8>,
+    /// Fully-qualified protobuf message name (e.g. `"mypackage.MyMessage"`).
+    pub message_fqn: String,
+}
+
 /// Build a [`Transcoder`] from encoding config and the Arrow schema of the
 /// value columns (key column already removed).
 ///
@@ -21,7 +31,7 @@ use crate::error::EncodeError;
 pub fn build_transcoder(
     config: &ProtobufEncoding,
     value_schema: &Schema,
-) -> Result<Transcoder, EncodeError> {
+) -> Result<TranscoderOutput, EncodeError> {
     let auto_generated = config.descriptor.is_none() && config.descriptor_uri.is_none();
     let descriptor_bytes = resolve_descriptor(config, value_schema)?;
     let fqn = if auto_generated {
@@ -36,7 +46,11 @@ pub fn build_transcoder(
     let msg = schema.message(&fqn)?;
     let mapping = infer_mapping(value_schema, &msg, &InferOptions::default())?;
     let transcoder = Transcoder::new(&mapping)?;
-    Ok(transcoder)
+    Ok(TranscoderOutput {
+        transcoder,
+        descriptor_bytes,
+        message_fqn: fqn,
+    })
 }
 
 /// Resolve descriptor bytes from config.

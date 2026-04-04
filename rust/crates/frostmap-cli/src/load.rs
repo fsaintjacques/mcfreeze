@@ -7,6 +7,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use tracing::info;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_encode::config::WorkerConfig;
 use frostmap_loader::{
@@ -229,9 +231,11 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                     .map(|(_, f)| f.clone())
                     .collect();
                 let value_schema = arrow::datatypes::Schema::new(value_fields);
-                let transcoder = frostmap_encode::build_transcoder(&proto_config, &value_schema)
+                let tc_output = frostmap_encode::build_transcoder(&proto_config, &value_schema)
                     .context("failed to build protobuf transcoder")?;
-                let transcoder = Arc::new(transcoder);
+                let descriptor_bytes = tc_output.descriptor_bytes.clone();
+                let message_fqn = tc_output.message_fqn.clone();
+                let transcoder = Arc::new(tc_output.transcoder);
 
                 let sources: Vec<_> = rb_sources
                     .into_iter()
@@ -252,7 +256,10 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                     estimated_rows,
                     sources,
                 )
-                .await
+                .await?;
+
+                patch_meta_descriptor(&output, &descriptor_bytes, &message_fqn).await?;
+                Ok(())
             } else {
                 let val_col_idx = schema.index_of(&value_column).with_context(|| {
                     format!("value column {:?} not found in schema", value_column)
@@ -311,9 +318,11 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                     .map(|(_, f)| f.clone())
                     .collect();
                 let value_schema = arrow::datatypes::Schema::new(value_fields);
-                let transcoder = frostmap_encode::build_transcoder(&proto_config, &value_schema)
+                let tc_output = frostmap_encode::build_transcoder(&proto_config, &value_schema)
                     .context("failed to build protobuf transcoder")?;
-                let transcoder = Arc::new(transcoder);
+                let descriptor_bytes = tc_output.descriptor_bytes.clone();
+                let message_fqn = tc_output.message_fqn.clone();
+                let transcoder = Arc::new(tc_output.transcoder);
 
                 let source = frostmap_encode::ProtobufEncodingSource::new(
                     csv_source,
@@ -328,7 +337,10 @@ pub async fn run(args: LoadArgs) -> Result<()> {
                     None,
                     vec![source],
                 )
-                .await
+                .await?;
+
+                patch_meta_descriptor(&output, &descriptor_bytes, &message_fqn).await?;
+                Ok(())
             } else {
                 let val_col_idx = schema
                     .index_of(&value_column)
@@ -486,15 +498,17 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
             .protobuf
             .as_ref()
             .unwrap();
-        let transcoder = frostmap_encode::build_transcoder(proto_config, &value_schema)
+        let tc_output = frostmap_encode::build_transcoder(proto_config, &value_schema)
             .context("failed to build protobuf transcoder")?;
+        let descriptor_bytes = tc_output.descriptor_bytes.clone();
+        let message_fqn = tc_output.message_fqn.clone();
 
         info!(
             message_fields = value_schema.fields().len(),
             "protobuf transcoder ready"
         );
 
-        let transcoder = Arc::new(transcoder);
+        let transcoder = Arc::new(tc_output.transcoder);
         let sources: Vec<_> = rb_sources
             .into_iter()
             .map(|s| {
@@ -510,7 +524,9 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
             estimated_rows,
             sources,
         )
-        .await
+        .await?;
+
+        patch_meta_descriptor(&config.output, &descriptor_bytes, &message_fqn).await
     } else {
         let value_column = config
             .source
@@ -675,6 +691,40 @@ where
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Patch the snapshot's `meta.json` to include the protobuf descriptor and
+/// message name so downstream tools can decode values without the original
+/// build config.
+async fn patch_meta_descriptor(
+    output: &Path,
+    descriptor_bytes: &[u8],
+    message_fqn: &str,
+) -> Result<()> {
+    let meta_path = output.join("meta.json");
+    let raw = tokio::fs::read_to_string(&meta_path)
+        .await
+        .context("failed to read meta.json for descriptor patching")?;
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&raw).context("failed to parse meta.json")?;
+
+    meta["encoding"] = serde_json::json!({
+        "protobuf": {
+            "descriptor": STANDARD.encode(descriptor_bytes),
+            "message_name": message_fqn,
+        }
+    });
+
+    let patched = serde_json::to_string_pretty(&meta).context("failed to serialize meta.json")?;
+    tokio::fs::write(&meta_path, patched)
+        .await
+        .context("failed to write patched meta.json")?;
+
+    info!(
+        message_name = message_fqn,
+        "descriptor embedded in meta.json"
+    );
+    Ok(())
+}
 
 fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, String)> {
     let (project, resource) = if table.starts_with("projects/") {
