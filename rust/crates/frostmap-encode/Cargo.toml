@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 frostmap-loader = { path = "../frostmap-loader" }
-apb-core        = { path = "../../../../../../../apb/crates/apb-core" }
+apb-core        = { git = "https://github.com/fsaintjacques/apb", tag = "v1.0.0" }
 arrow-array     = "58"
 arrow-schema    = "58"
 base64          = "0.22"

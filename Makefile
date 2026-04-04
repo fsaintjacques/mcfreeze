@@ -36,7 +36,7 @@ $(FMTCTL): $(shell find go -name '*.go') go/go.mod
 check: fmt lint
 
 fmt:
-	cd rust && cargo fmt --all -- --check
+	cd rust && cargo fmt --all
 	@test -z "$$(cd go && gofmt -l .)" || { echo "gofmt: the following files need formatting:"; cd go && gofmt -l .; exit 1; }
 
 lint:
