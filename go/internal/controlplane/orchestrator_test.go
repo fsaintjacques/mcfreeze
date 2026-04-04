@@ -13,6 +13,9 @@ func TestReadDescriptorFromMeta(t *testing.T) {
 	// With encoding section present.
 	meta := `{
 		"format_version": 4,
+		"hash_algorithm": "xxhash64",
+		"verify_seed": 0,
+		"partitions": [],
 		"encoding": {
 			"protobuf": {
 				"descriptor": "ChhteXBhY2thZ2UvTXlNZXNzYWdl",
