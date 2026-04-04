@@ -18,6 +18,7 @@ clap                 = { version = "4", features = ["derive"] }
 tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 anyhow               = "1"
 base64               = "0.22"
+prost-reflect        = { version = "0.14", features = ["serde"] }
 serde_json           = "1"
 rustls               = { version = "0.23", features = ["ring"], default-features = false }
 tracing              = "0.1"
