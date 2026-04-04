@@ -18,7 +18,7 @@ FM            := $(RUST_RELEASE)/fm
 GO_BIN        := go/bin
 FMTCTL        := $(GO_BIN)/fmtctl
 
-.PHONY: all check fmt lint test test-unit test-integration clean
+.PHONY: all check fmt lint test test-unit test-integration test-e2e clean
 
 # --- Build ---
 
@@ -53,6 +53,9 @@ test-unit:
 
 test-integration: $(FM)
 	cd go && FM=$(abspath $(FM)) go test -tags integration ./...
+
+test-e2e:
+	./hack/e2e-test.sh
 
 # --- Clean ---
 

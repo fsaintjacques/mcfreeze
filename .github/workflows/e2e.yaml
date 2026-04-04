@@ -1,0 +1,56 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR/branch.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Kind
+      uses: helm/kind-action@v1
+      with:
+        install_only: true
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v4
+
+    # Cache the Docker build layers to speed up Rust compilation.
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build frostmap image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile
+        load: true
+        tags: frostmap:e2e
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Run e2e tests
+      run: ./hack/e2e-test.sh --no-build
+
+    - name: Collect logs on failure
+      if: failure()
+      run: |
+        echo "=== Pod status ==="
+        kubectl get pods -o wide || true
+        echo "=== Pod descriptions ==="
+        kubectl describe pods || true
+        echo "=== PV/PVC ==="
+        kubectl get pv,pvc || true
+        echo "=== Events ==="
+        kubectl get events --sort-by='.lastTimestamp' || true

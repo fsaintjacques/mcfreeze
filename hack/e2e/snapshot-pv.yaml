@@ -1,0 +1,31 @@
+# PV + PVC for the snapshot built by the build Job.
+#
+# In production the control-plane creates a PV referencing a GCE persistent
+# disk. Here we use a hostPath PV pointing at the same directory the build Job
+# wrote to on the Kind node.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-test-v1
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+  - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data/snapshots/test/v1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pv-test-v1
+spec:
+  accessModes:
+  - ReadOnlyMany
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: pv-test-v1
+  storageClassName: ""

@@ -1,0 +1,77 @@
+# KV server pod that mounts the snapshot PV and serves it via memcache.
+#
+# An init container writes catalog.json to the shared emptyDir, simulating
+# what the node-agent does in production. The main container runs
+# `fm serve catalog` and watches catalog.json for changes.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kv-server
+  labels:
+    app: kv-server
+spec:
+  initContainers:
+  - name: write-catalog
+    image: frostmap:e2e
+    command:
+    - sh
+    - -c
+    - |
+      cat > /run/kv/catalog.json <<'CATALOG'
+      {"entries":[{"dataset":"test","key_prefix":"test","version_id":"v1","mount_path":"/mnt/kv/test/v1"}]}
+      CATALOG
+    volumeMounts:
+    - name: catalog
+      mountPath: /run/kv
+  containers:
+  - name: kv-server
+    image: frostmap:e2e
+    command:
+    - fm
+    - serve
+    - catalog
+    - --catalog
+    - /run/kv/catalog.json
+    - --tcp
+    - 0.0.0.0:11211
+    - --metrics
+    - 0.0.0.0:7777
+    ports:
+    - name: memcache
+      containerPort: 11211
+    - name: metrics
+      containerPort: 7777
+    readinessProbe:
+      httpGet:
+        path: /version
+        port: 7777
+      initialDelaySeconds: 1
+      periodSeconds: 2
+    volumeMounts:
+    - name: snapshot
+      mountPath: /mnt/kv/test/v1
+      readOnly: true
+    - name: catalog
+      mountPath: /run/kv
+  volumes:
+  - name: snapshot
+    persistentVolumeClaim:
+      claimName: pv-test-v1
+      readOnly: true
+  - name: catalog
+    emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kv-server
+spec:
+  selector:
+    app: kv-server
+  ports:
+  - name: memcache
+    port: 11211
+    targetPort: 11211
+  - name: metrics
+    port: 7777
+    targetPort: 7777

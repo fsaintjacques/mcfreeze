@@ -1,0 +1,46 @@
+# Job: run `fm load csv` with test data, write snapshot to a hostPath volume.
+#
+# The hostPath persists on the Kind node so subsequent pods (kv-server) can
+# mount it via a PV. This simulates the production path where a K8s Job builds
+# the snapshot and the control-plane creates a PV from the result.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-data
+data:
+  data.csv: |
+    key1,QWxpY2U=
+    key2,Qm9i
+    key3,Q2hhcmxpZQ==
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: snapshot-build
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: builder
+        image: frostmap:e2e
+        command:
+        - sh
+        - -c
+        - |
+          fm load -o /data/snapshots/test/v1 --partitions 4 csv < /test-data/data.csv
+        volumeMounts:
+        - name: test-data
+          mountPath: /test-data
+          readOnly: true
+        - name: snapshot-storage
+          mountPath: /data/snapshots
+      volumes:
+      - name: test-data
+        configMap:
+          name: test-data
+      - name: snapshot-storage
+        hostPath:
+          path: /data/snapshots
+          type: DirectoryOrCreate
