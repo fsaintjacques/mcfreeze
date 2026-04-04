@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,16 @@ import (
 
 	"frostmap.io/fmtctl/api"
 )
+
+// workerConfig is the JSON config consumed by `fm load config --config`.
+// Wire-compatible with the Rust WorkerConfig type in frostmap-encode.
+type workerConfig struct {
+	Source     api.SourceSpec `json:"source"`
+	Output     string         `json:"output"`
+	Partitions int            `json:"partitions"`
+}
+
+const workerConfigFile = "worker.json"
 
 // ForkBuilder implements AsyncBuilder by forking an fm subprocess.
 // The build handle is the output directory path, which is deterministic
@@ -83,17 +94,23 @@ func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 		return "", fmt.Errorf("fork builder: mkdir %s: %w", dir, err)
 	}
 
-	bq := spec.Source.BigQuery
-	if bq == nil {
-		return "", fmt.Errorf("fork builder: only bigquery source is supported")
+	wc := workerConfig{
+		Source:     spec.Source,
+		Output:     dir,
+		Partitions: spec.ShardCount,
 	}
-	cmd := exec.CommandContext(ctx, b.fmBinary(), "load",
-		"-o", dir,
-		"--partitions", fmt.Sprintf("%d", spec.ShardCount),
-		"bq",
-		"--project", bq.Project,
-		"--table", bq.Table,
-	)
+	configPath := filepath.Join(dir, workerConfigFile)
+	configBytes, err := json.Marshal(wc)
+	if err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("fork builder: marshal config: %w", err)
+	}
+	if err := os.WriteFile(configPath, configBytes, 0o644); err != nil {
+		os.RemoveAll(dir)
+		return "", fmt.Errorf("fork builder: write config: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, b.fmBinary(), "load", "config", "--config", configPath)
 	// Detach from parent process group so the child survives if the
 	// control-plane exits.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

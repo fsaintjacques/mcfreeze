@@ -10,15 +10,29 @@ type DatasetSpec struct {
 	// KeyPrefix is the routing prefix the KV server uses to match incoming
 	// requests to this dataset, e.g. "users" routes "users:<key>" lookups.
 	// Must be unique across all datasets on a node.
-	KeyPrefix  string        `json:"key_prefix"`
-	Source     SourceSpec    `json:"source"`
-	Encoding   *EncodingSpec `json:"encoding,omitempty"` // nil → raw (single column as bytes)
-	ShardCount int           `json:"shard_count"`
-	Retention  int           `json:"retention"` // number of ready versions to keep
+	KeyPrefix  string     `json:"key_prefix"`
+	Source     SourceSpec `json:"source"`
+	ShardCount int        `json:"shard_count"`
+	Retention  int        `json:"retention"` // number of ready versions to keep
 }
 
-// SourceSpec is a discriminated union: exactly one field must be set.
+// SourceSpec describes how to produce key-value pairs from a tabular source.
+// KeyColumn and ValueColumn/Encoding sit above the source-type discriminant
+// because they apply regardless of where the data comes from.
+//
+// Validation: exactly one of ValueColumn or Encoding must be set.
+// ValueColumn → raw encoding (take the column bytes as-is).
+// Encoding    → transcode non-key columns (e.g. to protobuf).
 type SourceSpec struct {
+	// KeyColumn is the Arrow column name whose bytes become the KV key.
+	KeyColumn string `json:"key_column"`
+	// ValueColumn is the Arrow column name whose bytes become the KV value.
+	// Required when Encoding is nil (raw mode); must be empty when Encoding is set.
+	ValueColumn string `json:"value_column,omitempty"`
+	// Encoding specifies how to transcode non-key columns into the KV value.
+	// When nil, values are taken raw from ValueColumn.
+	Encoding *EncodingSpec `json:"encoding,omitempty"`
+	// Exactly one source type must be set.
 	BigQuery *BigQuerySource `json:"bigquery,omitempty"`
 }
 
@@ -26,8 +40,6 @@ type SourceSpec struct {
 type BigQuerySource struct {
 	Project        string   `json:"project"`
 	Table          string   `json:"table"`
-	KeyColumn      string   `json:"key_column"`
-	ValueColumn    string   `json:"value_column,omitempty"`    // required when encoding is raw
 	SelectedFields []string `json:"selected_fields,omitempty"` // column projection; empty = all columns
 	RowRestriction string   `json:"row_restriction,omitempty"` // SQL WHERE predicate pushed down to BQ
 }

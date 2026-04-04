@@ -15,7 +15,7 @@ const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
 use frostmap_loader::SourceMetadata;
 
-use crate::{error::BqError, source::BqRecordBatchSource, BqStreamSource};
+use crate::{error::BqError, source::BqRecordBatchSource};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,16 +35,7 @@ pub struct BqSourceConfig {
     /// `"projects/{project}/datasets/{dataset}/tables/{table}"`.
     pub table: String,
 
-    /// Arrow column name whose bytes become the KV key.
-    pub key_column: String,
-
-    /// Arrow column name whose bytes become the KV value.
-    /// Required for the raw encoding path (`into_sources`); not needed for the
-    /// record-batch path (`into_record_batch_sources`).
-    pub value_column: Option<String>,
-
     /// Column projection — only read these columns. Empty = all columns.
-    /// The key and value columns are always included regardless of this list.
     pub selected_fields: Vec<String>,
 
     /// Hint for the number of parallel read streams.
@@ -72,8 +63,6 @@ pub struct BqReadSession {
     pub(crate) client: BqApi,
     pub(crate) streams: Vec<String>,
     pub(crate) schema_bytes: Bytes,
-    pub(crate) key_col_idx: usize,
-    pub(crate) val_col_idx: Option<usize>,
     metadata: SourceMetadata,
 }
 
@@ -147,21 +136,6 @@ impl BqReadSession {
             None => return Err(BqError::Schema("server did not return a schema".into())),
         };
 
-        let arrow_schema = decode_schema(&schema_bytes)?;
-
-        let key_col_idx = arrow_schema.index_of(&config.key_column).map_err(|_| {
-            BqError::Schema(format!("key column {:?} not found", config.key_column))
-        })?;
-        let val_col_idx = config
-            .value_column
-            .as_ref()
-            .map(|vc| {
-                arrow_schema
-                    .index_of(vc)
-                    .map_err(|_| BqError::Schema(format!("value column {:?} not found", vc)))
-            })
-            .transpose()?;
-
         let streams: Vec<String> = session.streams.into_iter().map(|s| s.name).collect();
 
         let metadata = SourceMetadata {
@@ -175,8 +149,6 @@ impl BqReadSession {
             client,
             streams,
             schema_bytes,
-            key_col_idx,
-            val_col_idx,
             metadata,
         })
     }
@@ -195,40 +167,10 @@ impl BqReadSession {
         decode_schema(&self.schema_bytes)
     }
 
-    /// Return the column index of the key column.
-    pub fn key_column_index(&self) -> usize {
-        self.key_col_idx
-    }
-
-    /// Consume the session and return one [`BqStreamSource`] per stream.
-    ///
-    /// Each source extracts pre-determined key and value columns as byte pairs.
-    /// Requires that `value_column` was set in the config; returns an error otherwise.
-    /// Pass the returned `Vec` directly to [`SnapshotLoader::load_parallel`].
-    pub fn into_sources(self) -> Result<Vec<BqStreamSource>, BqError> {
-        let val_col_idx = self.val_col_idx.ok_or_else(|| {
-            BqError::Schema(
-                "into_sources() requires value_column to be set in BqSourceConfig".into(),
-            )
-        })?;
-        self.streams
-            .into_iter()
-            .map(|name| {
-                BqStreamSource::new(
-                    self.client.clone(),
-                    name,
-                    self.key_col_idx,
-                    val_col_idx,
-                    self.schema_bytes.clone(),
-                )
-            })
-            .collect()
-    }
-
     /// Consume the session and return one [`BqRecordBatchSource`] per stream.
     ///
-    /// Unlike [`into_sources`], these yield full Arrow `RecordBatch`es without
-    /// key/value extraction — suitable for downstream encoding (e.g. protobuf).
+    /// Each source yields full Arrow `RecordBatch`es. The caller is responsible
+    /// for column interpretation (key extraction, encoding).
     pub fn into_record_batch_sources(self) -> Result<Vec<BqRecordBatchSource>, BqError> {
         self.streams
             .into_iter()

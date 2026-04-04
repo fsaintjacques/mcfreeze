@@ -7,8 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"encoding/base64"
-
 	"frostmap.io/fmtctl/api"
 )
 
@@ -67,11 +65,9 @@ func (b *FakeBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 	outDir := string(handle)
 
 	var csv strings.Builder
+	csv.WriteString("key,value\n")
 	for _, kv := range pairs {
-		fmt.Fprintf(&csv, "%s,%s\n",
-			base64.StdEncoding.EncodeToString(kv[0]),
-			base64.StdEncoding.EncodeToString(kv[1]),
-		)
+		fmt.Fprintf(&csv, "%s,%s\n", kv[0], kv[1])
 	}
 
 	cmd := exec.CommandContext(ctx, fm, "load",

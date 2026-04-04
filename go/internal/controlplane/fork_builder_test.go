@@ -26,7 +26,11 @@ func TestForkBuilder_StartPollComplete(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source:     api.SourceSpec{BigQuery: &api.BigQuerySource{Project: "proj", Table: "tbl"}},
+		Source: api.SourceSpec{
+			KeyColumn:   "key",
+			ValueColumn: "value",
+			BigQuery:    &api.BigQuerySource{Project: "proj", Table: "tbl"},
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -73,7 +77,11 @@ func TestForkBuilder_StartIdempotent(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source:     api.SourceSpec{BigQuery: &api.BigQuerySource{Project: "p", Table: "t"}},
+		Source: api.SourceSpec{
+			KeyColumn:   "key",
+			ValueColumn: "value",
+			BigQuery:    &api.BigQuerySource{Project: "p", Table: "t"},
+		},
 	}
 
 	ctx := context.Background()
@@ -110,7 +118,11 @@ func TestForkBuilder_Cancel(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source:     api.SourceSpec{BigQuery: &api.BigQuerySource{Project: "p", Table: "t"}},
+		Source: api.SourceSpec{
+			KeyColumn:   "key",
+			ValueColumn: "value",
+			BigQuery:    &api.BigQuerySource{Project: "p", Table: "t"},
+		},
 	}
 
 	ctx := context.Background()
@@ -150,7 +162,11 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 	spec := api.DatasetSpec{
 		Name:       "ds",
 		ShardCount: 4,
-		Source:     api.SourceSpec{BigQuery: &api.BigQuerySource{Project: "p", Table: "t"}},
+		Source: api.SourceSpec{
+			KeyColumn:   "key",
+			ValueColumn: "value",
+			BigQuery:    &api.BigQuerySource{Project: "p", Table: "t"},
+		},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -211,19 +227,21 @@ func TestForkBuilder_PollNotFound(t *testing.T) {
 
 // --- helpers ---
 
-// createFMScript creates a shell script that mimics fm: reads -o flag,
-// creates the output directory and writes meta.json.
+// createFMScript creates a shell script that mimics fm: reads --config flag,
+// extracts output from the JSON config, and writes meta.json.
 func createFMScript(t *testing.T, baseDir string) string {
 	t.Helper()
 	script := filepath.Join(baseDir, "fake-fm.sh")
 	content := `#!/bin/sh
-# Parse -o flag
+# Parse --config flag from: fm load config --config <path>
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o) shift; OUTDIR="$1"; shift;;
+    --config) shift; CONFIG="$1"; shift;;
     *) shift;;
   esac
 done
+# Extract output from JSON config (simple grep/sed, no jq dependency).
+OUTDIR=$(sed -n 's/.*"output":"\([^"]*\)".*/\1/p' "$CONFIG")
 mkdir -p "$OUTDIR"
 echo '{"format_version":3,"n_partitions":4}' > "$OUTDIR/meta.json"
 `
@@ -238,13 +256,14 @@ func createSleeperScript(t *testing.T, baseDir string) string {
 	t.Helper()
 	script := filepath.Join(baseDir, "sleeper-fm.sh")
 	content := `#!/bin/sh
-# Parse -o flag
+# Parse --config flag
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o) shift; OUTDIR="$1"; shift;;
+    --config) shift; CONFIG="$1"; shift;;
     *) shift;;
   esac
 done
+OUTDIR=$(sed -n 's/.*"output":"\([^"]*\)".*/\1/p' "$CONFIG")
 mkdir -p "$OUTDIR"
 sleep 3600
 `
@@ -262,10 +281,11 @@ func createSlowFMScript(t *testing.T, baseDir string, delay time.Duration) strin
 	content := `#!/bin/sh
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -o) shift; OUTDIR="$1"; shift;;
+    --config) shift; CONFIG="$1"; shift;;
     *) shift;;
   esac
 done
+OUTDIR=$(sed -n 's/.*"output":"\([^"]*\)".*/\1/p' "$CONFIG")
 mkdir -p "$OUTDIR"
 sleep ` + fmt.Sprintf("%d", int(delay.Seconds())) + `
 echo '{"format_version":3,"n_partitions":4}' > "$OUTDIR/meta.json"

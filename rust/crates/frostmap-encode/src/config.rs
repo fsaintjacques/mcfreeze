@@ -8,8 +8,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct WorkerConfig {
     pub source: SourceSpec,
-    #[serde(default)]
-    pub encoding: Option<EncodingSpec>,
     pub output: PathBuf,
     #[serde(default = "default_partitions")]
     pub partitions: u32,
@@ -24,9 +22,27 @@ fn default_index_parallelism() -> usize {
     2
 }
 
-/// Discriminated union: exactly one field is set.
+/// Describes how to produce key-value pairs from a tabular source.
+///
+/// `key_column` and `value_column`/`encoding` sit above the source-type
+/// discriminant because they apply regardless of where the data comes from.
+///
+/// Validation: exactly one of `value_column` or `encoding` must be set.
+/// - `value_column` → raw encoding (take column bytes as-is).
+/// - `encoding`     → transcode non-key columns (e.g. to protobuf).
 #[derive(Debug, Deserialize)]
 pub struct SourceSpec {
+    /// Arrow column name whose bytes become the KV key.
+    pub key_column: String,
+    /// Arrow column name whose bytes become the KV value.
+    /// Required when `encoding` is absent (raw mode); must be absent when
+    /// `encoding` is set.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
+    pub value_column: Option<String>,
+    /// Value encoding. When absent, values are taken raw from `value_column`.
+    #[serde(default)]
+    pub encoding: Option<EncodingSpec>,
+    /// Exactly one source type must be set.
     pub bigquery: Option<BigQuerySource>,
 }
 
@@ -34,11 +50,6 @@ pub struct SourceSpec {
 pub struct BigQuerySource {
     pub project: String,
     pub table: String,
-    pub key_column: String,
-    /// Required when encoding is raw (no encoding spec).
-    /// Empty string is treated as absent.
-    #[serde(default, deserialize_with = "empty_string_as_none")]
-    pub value_column: Option<String>,
     /// Column projection — only read these columns. Empty = all columns.
     #[serde(default)]
     pub selected_fields: Vec<String>,

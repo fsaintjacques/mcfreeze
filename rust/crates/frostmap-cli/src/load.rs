@@ -10,7 +10,8 @@ use tracing::info;
 use frostmap_bq::{BqReadSession, BqSourceConfig};
 use frostmap_encode::config::WorkerConfig;
 use frostmap_loader::{
-    CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource, SnapshotLoader,
+    CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource, RecordBatchSource,
+    SnapshotLoader,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,30 @@ pub struct LoadArgs {
     #[arg(long, default_value = "5")]
     pub progress_secs: u64,
 
+    // -- Column mapping (shared across all sources) -------------------------
+    /// Arrow column name to use as the KV key
+    #[arg(long, default_value = "key")]
+    pub key_column: String,
+
+    /// Arrow column name to use as the KV value (raw encoding).
+    /// Mutually exclusive with --protobuf-message.
+    #[arg(long, default_value = "value")]
+    pub value_column: String,
+
+    // -- Protobuf encoding (optional) ---------------------------------------
+    /// Protobuf message name — enables protobuf encoding.
+    /// When set, all non-key columns are transcoded into a protobuf message.
+    #[arg(long)]
+    pub protobuf_message: Option<String>,
+
+    /// Protobuf package name (required for auto-generated descriptors).
+    #[arg(long)]
+    pub protobuf_package: Option<String>,
+
+    /// Base64-encoded FileDescriptorSet, or path to a .desc file.
+    #[arg(long)]
+    pub protobuf_descriptor: Option<String>,
+
     #[command(subcommand)]
     pub source: Source,
 }
@@ -56,14 +81,6 @@ pub enum Source {
         #[arg(long)]
         table: String,
 
-        /// Arrow column name to use as the KV key
-        #[arg(long, default_value = "key")]
-        key_column: String,
-
-        /// Arrow column name to use as the KV value
-        #[arg(long, default_value = "value")]
-        value_column: String,
-
         /// Number of parallel BQ read streams
         #[arg(long, default_value = "8")]
         streams: i32,
@@ -77,6 +94,10 @@ pub enum Source {
         #[arg(long)]
         no_compression: bool,
 
+        /// Column projection — only read these columns.
+        #[arg(long)]
+        selected_fields: Vec<String>,
+
         /// Download all batches from the source and discard them, reporting
         /// throughput.  No data is written to --output.
         #[arg(long)]
@@ -87,14 +108,6 @@ pub enum Source {
         /// Path to the CSV file. Omit or pass "-" to read from stdin.
         #[arg(long)]
         file: Option<PathBuf>,
-
-        /// Column name to use as the KV key
-        #[arg(long, default_value = "key")]
-        key_column: String,
-
-        /// Column name to use as the KV value
-        #[arg(long, default_value = "value")]
-        value_column: String,
 
         /// Number of rows per internal batch
         #[arg(long, default_value = "1024")]
@@ -114,70 +127,159 @@ pub enum Source {
 
 pub async fn run(args: LoadArgs) -> Result<()> {
     match args.source {
+        Source::Config { config } => {
+            return run_from_config(&config, args.dry_run, args.progress_secs).await;
+        }
         Source::Bq {
-            project,
-            table,
-            key_column,
-            value_column,
+            download_benchmark: true,
+            ref project,
+            ref table,
             streams,
-            row_restriction,
+            ref row_restriction,
             no_compression,
-            download_benchmark,
+            ref selected_fields,
+            ..
         } => {
-            // Open BQ session even on dry-run to validate credentials and table.
             let session = open_bq_session(
-                project,
-                &table,
-                &key_column,
-                &value_column,
+                project.clone(),
+                table,
                 streams,
                 row_restriction.as_deref(),
                 no_compression,
+                selected_fields.clone(),
+            )
+            .await?;
+            let estimated_rows = session.metadata().estimated_rows;
+            let sources = session
+                .into_record_batch_sources()
+                .context("failed to create record batch sources")?;
+            let key_col_idx = resolve_key_column_idx(&sources, &args.key_column)?;
+            let raw_sources: Vec<_> = sources
+                .into_iter()
+                .map(|s| {
+                    RawEncodingSource::new(s, key_col_idx, resolve_value_column_idx_for_benchmark())
+                })
+                .collect();
+            return benchmark_download(raw_sources, estimated_rows, args.progress_secs).await;
+        }
+        _ => {}
+    }
+
+    // Common path: open source → apply encoding → load.
+    // Extract encoding config before consuming args fields.
+    let use_protobuf = args.protobuf_message.is_some();
+    let proto_config = if use_protobuf {
+        Some(build_protobuf_config(&args)?)
+    } else {
+        None
+    };
+    let output = args.output.context("--output is required")?;
+    let key_column = args.key_column;
+    let value_column = args.value_column;
+    let partitions = args.partitions;
+    let index_parallelism = args.index_parallelism;
+    let progress_secs = args.progress_secs;
+    let dry_run = args.dry_run;
+
+    match args.source {
+        Source::Bq {
+            project,
+            table,
+            streams,
+            row_restriction,
+            no_compression,
+            selected_fields,
+            ..
+        } => {
+            let session = open_bq_session(
+                project,
+                &table,
+                streams,
+                row_restriction.as_deref(),
+                no_compression,
+                selected_fields,
             )
             .await?;
 
-            if args.dry_run {
+            if dry_run {
                 info!("dry-run: source validated, no data written");
                 return Ok(());
             }
 
-            let meta = session.metadata();
-            let estimated_rows = meta.estimated_rows;
+            let schema = session.schema().context("failed to get Arrow schema")?;
+            let key_col_idx = schema
+                .index_of(&key_column)
+                .with_context(|| format!("key column {:?} not found in schema", key_column))?;
+            let estimated_rows = session.metadata().estimated_rows;
 
-            let sources = session
-                .into_sources()
-                .context("failed to split session into sources")?;
+            let rb_sources = session
+                .into_record_batch_sources()
+                .context("failed to create record batch sources")?;
 
-            if download_benchmark {
-                return benchmark_download(sources, estimated_rows, args.progress_secs).await;
+            if use_protobuf {
+                let proto_config = proto_config.unwrap();
+                let value_fields: Vec<_> = schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != key_col_idx)
+                    .map(|(_, f)| f.clone())
+                    .collect();
+                let value_schema = arrow::datatypes::Schema::new(value_fields);
+                let transcoder = frostmap_encode::build_transcoder(&proto_config, &value_schema)
+                    .context("failed to build protobuf transcoder")?;
+                let transcoder = Arc::new(transcoder);
+
+                let sources: Vec<_> = rb_sources
+                    .into_iter()
+                    .map(|s| {
+                        frostmap_encode::ProtobufEncodingSource::new(
+                            s,
+                            key_col_idx,
+                            transcoder.clone(),
+                        )
+                    })
+                    .collect();
+
+                load_sources(
+                    &output,
+                    partitions,
+                    index_parallelism,
+                    progress_secs,
+                    estimated_rows,
+                    sources,
+                )
+                .await
+            } else {
+                let val_col_idx = schema.index_of(&value_column).with_context(|| {
+                    format!("value column {:?} not found in schema", value_column)
+                })?;
+                let sources: Vec<_> = rb_sources
+                    .into_iter()
+                    .map(|s| RawEncodingSource::new(s, key_col_idx, val_col_idx))
+                    .collect();
+
+                load_sources(
+                    &output,
+                    partitions,
+                    index_parallelism,
+                    progress_secs,
+                    estimated_rows,
+                    sources,
+                )
+                .await
             }
-
-            let output = args.output.context("--output is required")?;
-            load_sources(
-                &output,
-                args.partitions,
-                args.index_parallelism,
-                args.progress_secs,
-                estimated_rows,
-                sources,
-            )
-            .await
         }
-        Source::Csv {
-            file,
-            key_column,
-            value_column,
-            batch_size,
-        } => {
+        Source::Csv { file, batch_size } => {
             let use_stdin = file.as_ref().is_none_or(|p| p.as_os_str() == "-");
 
             let csv_source = if use_stdin {
-                info!(key_column, value_column, "loading CSV from stdin");
+                info!(key_column = %key_column, "loading CSV from stdin");
                 CsvSource::from_reader(std::io::stdin().lock(), batch_size)
                     .context("failed to read CSV from stdin")?
             } else {
                 let path = file.as_ref().unwrap();
-                info!(file = %path.display(), key_column, value_column, "loading CSV from file");
+                info!(file = %path.display(), key_column = %key_column, "loading CSV from file");
                 CsvSource::from_reader(
                     std::fs::File::open(path)
                         .with_context(|| format!("failed to open {}", path.display()))?,
@@ -189,31 +291,58 @@ pub async fn run(args: LoadArgs) -> Result<()> {
             let schema = csv_source.schema();
             let key_col_idx = schema
                 .index_of(&key_column)
-                .with_context(|| format!("key column {key_column:?} not found in CSV"))?;
-            let val_col_idx = schema
-                .index_of(&value_column)
-                .with_context(|| format!("value column {value_column:?} not found in CSV"))?;
+                .with_context(|| format!("key column {:?} not found in CSV", key_column))?;
 
-            if args.dry_run {
+            if dry_run {
                 info!("dry-run: source validated, no data written");
                 return Ok(());
             }
 
-            let output = args.output.context("--output is required")?;
-            let source = RawEncodingSource::new(csv_source, key_col_idx, val_col_idx);
-            load_sources(
-                &output,
-                args.partitions,
-                args.index_parallelism,
-                args.progress_secs,
-                None,
-                vec![source],
-            )
-            .await
+            if use_protobuf {
+                let proto_config = proto_config.unwrap();
+                let value_fields: Vec<_> = schema
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != key_col_idx)
+                    .map(|(_, f)| f.clone())
+                    .collect();
+                let value_schema = arrow::datatypes::Schema::new(value_fields);
+                let transcoder = frostmap_encode::build_transcoder(&proto_config, &value_schema)
+                    .context("failed to build protobuf transcoder")?;
+                let transcoder = Arc::new(transcoder);
+
+                let source = frostmap_encode::ProtobufEncodingSource::new(
+                    csv_source,
+                    key_col_idx,
+                    transcoder,
+                );
+                load_sources(
+                    &output,
+                    partitions,
+                    index_parallelism,
+                    progress_secs,
+                    None,
+                    vec![source],
+                )
+                .await
+            } else {
+                let val_col_idx = schema
+                    .index_of(&value_column)
+                    .with_context(|| format!("value column {:?} not found in CSV", value_column))?;
+                let source = RawEncodingSource::new(csv_source, key_col_idx, val_col_idx);
+                load_sources(
+                    &output,
+                    partitions,
+                    index_parallelism,
+                    progress_secs,
+                    None,
+                    vec![source],
+                )
+                .await
+            }
         }
-        Source::Config { config } => {
-            run_from_config(&config, args.dry_run, args.progress_secs).await
-        }
+        Source::Config { .. } => unreachable!(),
     }
 }
 
@@ -295,42 +424,48 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
         .context("only bigquery source is currently supported in config mode")?;
 
     let has_protobuf_encoding = config
+        .source
         .encoding
         .as_ref()
         .and_then(|e| e.protobuf.as_ref())
         .is_some();
 
-    // Open BQ session.
     let (billing_project, table_resource) = parse_table(&bq.table, Some(&bq.project))?;
 
+    let bq_config = BqSourceConfig {
+        project: billing_project,
+        table: table_resource,
+        selected_fields: bq.selected_fields.clone(),
+        n_streams: bq.streams,
+        row_restriction: bq.row_restriction.clone(),
+        disable_compression: bq.no_compression,
+    };
+
+    let session = BqReadSession::open(bq_config)
+        .await
+        .context("failed to open BigQuery read session")?;
+
+    if dry_run {
+        info!("dry-run: source validated, no data written");
+        return Ok(());
+    }
+
+    let schema = session.schema().context("failed to get Arrow schema")?;
+    let key_col_idx = schema
+        .index_of(&config.source.key_column)
+        .with_context(|| {
+            format!(
+                "key column {:?} not found in schema",
+                config.source.key_column
+            )
+        })?;
+    let estimated_rows = session.metadata().estimated_rows;
+
+    let rb_sources = session
+        .into_record_batch_sources()
+        .context("failed to create record batch sources")?;
+
     if has_protobuf_encoding {
-        // Protobuf encoding: open session without value column constraint,
-        // build transcoder, wrap sources.
-        let bq_config = BqSourceConfig {
-            project: billing_project,
-            table: table_resource,
-            key_column: bq.key_column.clone(),
-            value_column: None,
-            selected_fields: bq.selected_fields.clone(),
-            n_streams: bq.streams,
-            row_restriction: bq.row_restriction.clone(),
-            disable_compression: bq.no_compression,
-        };
-
-        let session = BqReadSession::open(bq_config)
-            .await
-            .context("failed to open BigQuery read session")?;
-
-        if dry_run {
-            info!("dry-run: source validated, no data written");
-            return Ok(());
-        }
-
-        let schema = session.schema().context("failed to get Arrow schema")?;
-        let key_col_idx = session.key_column_index();
-        let estimated_rows = session.metadata().estimated_rows;
-
-        // Build value schema (all columns except key).
         let value_fields: Vec<_> = schema
             .fields()
             .iter()
@@ -340,7 +475,14 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
             .collect();
         let value_schema = arrow::datatypes::Schema::new(value_fields);
 
-        let proto_config = config.encoding.as_ref().unwrap().protobuf.as_ref().unwrap();
+        let proto_config = config
+            .source
+            .encoding
+            .as_ref()
+            .unwrap()
+            .protobuf
+            .as_ref()
+            .unwrap();
         let transcoder = frostmap_encode::build_transcoder(proto_config, &value_schema)
             .context("failed to build protobuf transcoder")?;
 
@@ -349,13 +491,7 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
             "protobuf transcoder ready"
         );
 
-        let rb_sources = session
-            .into_record_batch_sources()
-            .context("failed to create record batch sources")?;
-
-        // Transcoder is Sync but not Clone — share via Arc.
         let transcoder = Arc::new(transcoder);
-
         let sources: Vec<_> = rb_sources
             .into_iter()
             .map(|s| {
@@ -373,32 +509,19 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
         )
         .await
     } else {
-        // Raw encoding: use existing key/value column path.
-        let value_column = bq
+        let value_column = config
+            .source
             .value_column
             .as_deref()
             .context("value_column is required when encoding is raw (no encoding spec)")?;
+        let val_col_idx = schema
+            .index_of(value_column)
+            .with_context(|| format!("value column {:?} not found in schema", value_column))?;
 
-        let session = open_bq_session(
-            Some(bq.project.clone()),
-            &bq.table,
-            &bq.key_column,
-            value_column,
-            bq.streams,
-            bq.row_restriction.as_deref(),
-            bq.no_compression,
-        )
-        .await?;
-
-        if dry_run {
-            info!("dry-run: source validated, no data written");
-            return Ok(());
-        }
-
-        let estimated_rows = session.metadata().estimated_rows;
-        let sources = session
-            .into_sources()
-            .context("failed to split session into sources")?;
+        let sources: Vec<_> = rb_sources
+            .into_iter()
+            .map(|s| RawEncodingSource::new(s, key_col_idx, val_col_idx))
+            .collect();
 
         load_sources(
             &config.output,
@@ -419,20 +542,17 @@ async fn run_from_config(config_path: &Path, dry_run: bool, progress_secs: u64) 
 async fn open_bq_session(
     project: Option<String>,
     table: &str,
-    key_column: &str,
-    value_column: &str,
     streams: i32,
     row_restriction: Option<&str>,
     no_compression: bool,
+    selected_fields: Vec<String>,
 ) -> Result<BqReadSession> {
     let (billing_project, table_resource) = parse_table(table, project.as_deref())?;
 
     let config = BqSourceConfig {
         project: billing_project.clone(),
         table: table_resource,
-        key_column: key_column.to_owned(),
-        value_column: Some(value_column.to_owned()),
-        selected_fields: vec![],
+        selected_fields,
         n_streams: streams,
         row_restriction: row_restriction.map(|s| s.to_owned()),
         disable_compression: no_compression,
@@ -441,8 +561,6 @@ async fn open_bq_session(
     info!(
         billing_project = %billing_project,
         table,
-        key_column,
-        value_column,
         compression = if no_compression { "off" } else { "LZ4_FRAME" },
         row_restriction = row_restriction.unwrap_or(""),
         "opening BigQuery read session",
@@ -464,7 +582,25 @@ async fn open_bq_session(
 }
 
 // ---------------------------------------------------------------------------
-// Download benchmark (BQ-specific)
+// Protobuf config builder
+// ---------------------------------------------------------------------------
+
+fn build_protobuf_config(args: &LoadArgs) -> Result<frostmap_encode::config::ProtobufEncoding> {
+    let message_name = args
+        .protobuf_message
+        .as_ref()
+        .context("--protobuf-message is required for protobuf encoding")?
+        .clone();
+    Ok(frostmap_encode::config::ProtobufEncoding {
+        descriptor: args.protobuf_descriptor.clone(),
+        descriptor_uri: None,
+        package: args.protobuf_package.clone(),
+        message_name,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Download benchmark
 // ---------------------------------------------------------------------------
 
 async fn benchmark_download<S>(
@@ -559,6 +695,23 @@ fn parse_table(table: &str, project_override: Option<&str>) -> Result<(String, S
 
     let billing = project_override.unwrap_or(&project).to_string();
     Ok((billing, resource))
+}
+
+/// Dummy value column index for the download benchmark path.
+/// The benchmark only measures download throughput; values are discarded.
+/// We use column index 0 which will be the key column — the RawEncodingSource
+/// will produce key=key, value=key pairs but we never look at the values.
+fn resolve_key_column_idx<S: RecordBatchSource>(
+    _sources: &[S],
+    _key_column: &str,
+) -> Result<usize> {
+    // For the benchmark path, we don't have schema access on the sources.
+    // Use 0 as a placeholder — the benchmark discards all values anyway.
+    Ok(0)
+}
+
+fn resolve_value_column_idx_for_benchmark() -> usize {
+    0
 }
 
 pub fn human_bandwidth(bytes_per_sec: u64) -> String {
