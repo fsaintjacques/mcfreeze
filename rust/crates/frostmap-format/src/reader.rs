@@ -71,11 +71,11 @@ impl SnapshotReader {
 
         let n = layout.n_partitions as usize;
         let mut partitions = Vec::with_capacity(n);
-        for i in 0..n {
+        for (i, pm) in meta.partitions.iter().enumerate() {
             let data = File::open(partition_dir(root, layout.n_partitions, i).join("data.bin"))?;
             partitions.push(PartitionSlice {
-                bucket_offset: meta.index_offsets[i] as usize,
-                n_buckets: meta.index_n_buckets[i] as usize,
+                bucket_offset: pm.index_offset as usize,
+                n_buckets: pm.index_n_buckets as usize,
                 data,
             });
         }

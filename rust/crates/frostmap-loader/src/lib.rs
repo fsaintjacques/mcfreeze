@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use frostmap_format::meta::{Layout, Meta, DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM};
+use frostmap_format::meta::{
+    Layout, Meta, PartitionMeta, Stats, DEFAULT_VERIFY_SEED, FORMAT_VERSION, HASH_ALGORITHM,
+};
 
 use build::IndexBuildPhase;
 use scatter::{
@@ -307,19 +309,38 @@ impl SnapshotLoader {
         let index_val: Option<serde_json::Value> = tokio::fs::read_to_string(&index_path)
             .await
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .map(|mut v: serde_json::Value| {
+                // Strip control data already present in meta.partitions.
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("index_offsets");
+                    obj.remove("index_n_buckets");
+                }
+                v
+            });
+
+        let partitions = index_done
+            .index_offsets
+            .into_iter()
+            .zip(index_done.index_n_buckets)
+            .map(|(offset, n_buckets)| PartitionMeta {
+                index_offset: offset,
+                index_n_buckets: n_buckets,
+            })
+            .collect();
 
         let meta = Meta {
             format_version: FORMAT_VERSION,
-            n_partitions: self.config.n_partitions,
             hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys: index_done.n_keys,
             verify_seed: DEFAULT_VERIFY_SEED,
-            created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            index_offsets: index_done.index_offsets,
-            index_n_buckets: index_done.index_n_buckets,
-            scatter: scatter_val,
-            index: index_val,
+            partitions,
+            stats: Some(Stats {
+                n_keys: index_done.n_keys,
+                created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                scatter: scatter_val,
+                index: index_val,
+            }),
+            encoding: None,
         };
         let json = serde_json::to_string_pretty(&meta).map_err(frostmap_format::Error::from)?;
         tokio::fs::write(self.root.join("meta.json"), json).await?;

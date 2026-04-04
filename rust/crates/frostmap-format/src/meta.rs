@@ -91,32 +91,49 @@ pub fn partition_dir(root: &std::path::Path, n_partitions: u32, i: usize) -> std
 /// Size of the value header: 8-byte verify fingerprint + 4-byte length.
 pub const VALUE_HEADER_SIZE: usize = 12;
 
-/// Contents of `meta.json`, written last as the snapshot completion signal.
+/// Per-partition control data needed by the reader.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Meta {
-    pub format_version: u32,
-    pub n_partitions: u32,
-    pub hash_algorithm: String,
-    pub n_keys: u64,
-    /// Seed for the verification fingerprint stored in each value header.
-    /// Must be non-zero in V3 snapshots.
-    pub verify_seed: u64,
-    pub created_at: String,
-    /// Byte offset of each partition's bucket array within `index.all`.
+pub struct PartitionMeta {
+    /// Byte offset of this partition's bucket array within `index.all`.
     /// Each offset is 2 MiB-aligned for huge page backing.
-    pub index_offsets: Vec<u64>,
-    /// Number of logical buckets per partition.
-    pub index_n_buckets: Vec<u64>,
-    /// Embedded contents of `scatter.done` (opaque to kv-format).
+    pub index_offset: u64,
+    /// Number of logical buckets in this partition.
+    pub index_n_buckets: u64,
+}
+
+/// Build-time statistics embedded in `meta.json` for diagnostics.
+/// Opaque to the reader — never needed to open or query a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stats {
+    pub n_keys: u64,
+    pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scatter: Option<serde_json::Value>,
-    /// Embedded contents of `index.done` (opaque to kv-format).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<serde_json::Value>,
 }
 
+/// Contents of `meta.json`, written last as the snapshot completion signal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Meta {
+    pub format_version: u32,
+    pub hash_algorithm: String,
+    /// Seed for the verification fingerprint stored in each value header.
+    /// Must be non-zero in V3 snapshots.
+    pub verify_seed: u64,
+    /// Per-partition control data; length determines the partition count.
+    pub partitions: Vec<PartitionMeta>,
+    /// Build-time statistics (opaque to the reader).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Stats>,
+    /// Encoding metadata (e.g. protobuf descriptor), patched by the CLI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<serde_json::Value>,
+}
+
 impl Meta {
-    /// Validate the format version and return the derived [`Layout`].
+    /// Validate the format version, hash algorithm, and partition count,
+    /// then return the derived [`Layout`].
     pub fn layout(&self) -> Result<Layout> {
         if self.format_version != FORMAT_VERSION {
             return Err(Error::VersionMismatch {
@@ -124,15 +141,10 @@ impl Meta {
                 got: self.format_version,
             });
         }
-        let n = self.n_partitions as usize;
-        if self.index_offsets.len() != n || self.index_n_buckets.len() != n {
-            return Err(Error::InvalidIndexMetadata {
-                expected: n,
-                got_offsets: self.index_offsets.len(),
-                got_buckets: self.index_n_buckets.len(),
-            });
+        if self.hash_algorithm != HASH_ALGORITHM {
+            return Err(Error::UnsupportedHashAlgorithm(self.hash_algorithm.clone()));
         }
-        Layout::new(self.n_partitions)
+        Layout::new(self.partitions.len() as u32)
     }
 }
 
@@ -174,55 +186,40 @@ mod tests {
         assert!(Layout::new(7).is_err());
     }
 
+    fn test_meta(n_partitions: u32) -> Meta {
+        Meta {
+            format_version: FORMAT_VERSION,
+            hash_algorithm: HASH_ALGORITHM.to_string(),
+            verify_seed: DEFAULT_VERIFY_SEED,
+            partitions: (0..n_partitions)
+                .map(|_| PartitionMeta {
+                    index_offset: 0,
+                    index_n_buckets: 0,
+                })
+                .collect(),
+            stats: None,
+            encoding: None,
+        }
+    }
+
     #[test]
     fn meta_layout_roundtrip() {
-        let meta = Meta {
-            format_version: FORMAT_VERSION,
-            n_partitions: 64,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys: 0,
-            verify_seed: DEFAULT_VERIFY_SEED,
-            created_at: "2026-03-27T00:00:00Z".to_string(),
-            index_offsets: vec![0; 64],
-            index_n_buckets: vec![0; 64],
-            scatter: None,
-            index: None,
-        };
+        let meta = test_meta(64);
         let layout = meta.layout().unwrap();
         assert_eq!(layout.n_partitions, 64);
     }
 
     #[test]
     fn meta_rejects_old_format_version() {
-        let meta = Meta {
-            format_version: 2,
-            n_partitions: 64,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys: 0,
-            verify_seed: DEFAULT_VERIFY_SEED,
-            created_at: "2026-03-27T00:00:00Z".to_string(),
-            index_offsets: vec![0; 64],
-            index_n_buckets: vec![0; 64],
-            scatter: None,
-            index: None,
-        };
+        let mut meta = test_meta(64);
+        meta.format_version = 2;
         assert!(meta.layout().is_err());
     }
 
     #[test]
-    fn meta_rejects_mismatched_index_metadata() {
-        let meta = Meta {
-            format_version: FORMAT_VERSION,
-            n_partitions: 4,
-            hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys: 0,
-            verify_seed: DEFAULT_VERIFY_SEED,
-            created_at: "2026-03-27T00:00:00Z".to_string(),
-            index_offsets: vec![0; 4],
-            index_n_buckets: vec![0; 3], // wrong length
-            scatter: None,
-            index: None,
-        };
+    fn meta_rejects_bad_hash_algorithm() {
+        let mut meta = test_meta(4);
+        meta.hash_algorithm = "sha256".to_string();
         assert!(meta.layout().is_err());
     }
 }

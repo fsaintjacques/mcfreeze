@@ -38,7 +38,7 @@ func TestReadDescriptorFromMeta_NoEncoding(t *testing.T) {
 	metaPath := filepath.Join(dir, "meta.json")
 
 	// Raw-encoded snapshot — no encoding section.
-	meta := `{"format_version": 4, "n_partitions": 4}`
+	meta := `{"format_version": 4, "hash_algorithm": "xxhash64", "verify_seed": 0, "partitions": []}`
 	if err := os.WriteFile(metaPath, []byte(meta), 0644); err != nil {
 		t.Fatal(err)
 	}

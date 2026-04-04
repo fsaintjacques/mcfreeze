@@ -243,7 +243,7 @@ done
 # Extract output from JSON config (simple grep/sed, no jq dependency).
 OUTDIR=$(sed -n 's/.*"output":"\([^"]*\)".*/\1/p' "$CONFIG")
 mkdir -p "$OUTDIR"
-echo '{"format_version":3,"n_partitions":4}' > "$OUTDIR/meta.json"
+echo '{"format_version":4,"hash_algorithm":"xxhash64","verify_seed":0,"partitions":[]}' > "$OUTDIR/meta.json"
 `
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
@@ -288,7 +288,7 @@ done
 OUTDIR=$(sed -n 's/.*"output":"\([^"]*\)".*/\1/p' "$CONFIG")
 mkdir -p "$OUTDIR"
 sleep ` + fmt.Sprintf("%d", int(delay.Seconds())) + `
-echo '{"format_version":3,"n_partitions":4}' > "$OUTDIR/meta.json"
+echo '{"format_version":4,"hash_algorithm":"xxhash64","verify_seed":0,"partitions":[]}' > "$OUTDIR/meta.json"
 `
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatal(err)

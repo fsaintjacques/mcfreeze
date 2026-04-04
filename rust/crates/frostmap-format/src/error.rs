@@ -16,12 +16,8 @@ pub enum Error {
         n_buckets: usize,
     },
 
-    #[error("index metadata length mismatch: expected {expected} partitions, got {got_offsets} offsets and {got_buckets} bucket counts")]
-    InvalidIndexMetadata {
-        expected: usize,
-        got_offsets: usize,
-        got_buckets: usize,
-    },
+    #[error("unsupported hash algorithm: {0}")]
+    UnsupportedHashAlgorithm(String),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

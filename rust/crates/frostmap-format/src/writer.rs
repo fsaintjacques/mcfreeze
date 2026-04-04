@@ -7,8 +7,8 @@ use crate::{
     data::AlignedWriter,
     index::{self, fingerprint, Bucket, RawEntry},
     meta::{
-        index_path, partition_dir, Layout, Meta, DEFAULT_VERIFY_SEED, FORMAT_VERSION,
-        HASH_ALGORITHM,
+        index_path, partition_dir, Layout, Meta, PartitionMeta, Stats, DEFAULT_VERIFY_SEED,
+        FORMAT_VERSION, HASH_ALGORITHM,
     },
     Result,
 };
@@ -115,17 +115,28 @@ impl SnapshotWriter {
         // Write unified index.all with 2MB-aligned partitions.
         let info = index::write_unified_index(&index_path(root), &tables)?;
 
+        let partitions = info
+            .offsets
+            .into_iter()
+            .zip(info.n_buckets)
+            .map(|(offset, n_buckets)| PartitionMeta {
+                index_offset: offset,
+                index_n_buckets: n_buckets,
+            })
+            .collect();
+
         let meta = Meta {
             format_version: FORMAT_VERSION,
-            n_partitions,
             hash_algorithm: HASH_ALGORITHM.to_string(),
-            n_keys: n_keys_total,
             verify_seed: self.verify_seed,
-            created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            index_offsets: info.offsets,
-            index_n_buckets: info.n_buckets,
-            scatter: None,
-            index: None,
+            partitions,
+            stats: Some(Stats {
+                n_keys: n_keys_total,
+                created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                scatter: None,
+                index: None,
+            }),
+            encoding: None,
         };
 
         let json = serde_json::to_string_pretty(&meta)?;
@@ -204,11 +215,10 @@ mod tests {
         let raw = fs::read_to_string(dir.path().join("meta.json")).unwrap();
         let meta: Meta = serde_json::from_str(&raw).unwrap();
         assert_eq!(meta.format_version, FORMAT_VERSION);
-        assert_eq!(meta.n_partitions, 4);
-        assert_eq!(meta.n_keys, 1);
+        assert_eq!(meta.partitions.len(), 4);
         assert_eq!(meta.verify_seed, DEFAULT_VERIFY_SEED);
-        assert_eq!(meta.index_offsets.len(), 4);
-        assert_eq!(meta.index_n_buckets.len(), 4);
+        let stats = meta.stats.unwrap();
+        assert_eq!(stats.n_keys, 1);
     }
 
     #[test]
@@ -223,7 +233,7 @@ mod tests {
 
         let raw = fs::read_to_string(dir.path().join("meta.json")).unwrap();
         let meta: Meta = serde_json::from_str(&raw).unwrap();
-        assert_eq!(meta.n_keys, n as u64);
+        assert_eq!(meta.stats.unwrap().n_keys, n as u64);
     }
 
     #[test]
@@ -239,6 +249,6 @@ mod tests {
         let meta: Meta = serde_json::from_str(&raw).unwrap();
 
         let expected = ((n as f64) / FILL_RATE).ceil() as u64;
-        assert_eq!(meta.index_n_buckets[0], expected);
+        assert_eq!(meta.partitions[0].index_n_buckets, expected);
     }
 }

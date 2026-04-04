@@ -160,16 +160,16 @@ async fn meta_json_written_last_and_valid() {
             .unwrap();
 
     assert_eq!(raw["format_version"], 4);
-    assert_eq!(raw["n_partitions"], 4);
-    assert_eq!(raw["n_keys"], 10);
     assert_eq!(raw["hash_algorithm"], "xxhash64");
+    assert_eq!(raw["partitions"].as_array().unwrap().len(), 4);
+    assert_eq!(raw["stats"]["n_keys"], 10);
 
     assert!(
-        raw["scatter"].is_object(),
+        raw["stats"]["scatter"].is_object(),
         "scatter must be embedded in meta.json"
     );
     assert!(
-        raw["index"].is_object(),
+        raw["stats"]["index"].is_object(),
         "index must be embedded in meta.json"
     );
     assert!(

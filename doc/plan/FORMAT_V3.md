@@ -23,25 +23,35 @@ This is a clean break — no backward compatibility with V2.
 
 ```json
 {
-  "format_version": 3,
-  "n_partitions": 64,
-  "n_keys": 1000000000,
+  "format_version": 4,
   "hash_algorithm": "xxhash64",
-  "bucket_size": 8,
-  "fill_rate": 0.95,
-  "value_alignment": 64,
-  "verify_seed": 42,
-  "index_offsets": [0, 134217728, ...],
-  "index_n_buckets": [16777216, 15728640, ...]
+  "verify_seed": 5888146898842593941,
+  "partitions": [
+    { "index_offset": 0, "index_n_buckets": 16777216 },
+    { "index_offset": 134217728, "index_n_buckets": 15728640 }
+  ],
+  "stats": {
+    "n_keys": 1000000000,
+    "created_at": "2026-04-04T12:00:00Z",
+    "scatter": { ... },
+    "index": { ... }
+  },
+  "encoding": { ... }
 }
 ```
 
-- `bucket_size`: always 8
+Control fields (required by reader):
+- `format_version`: must match the reader's expected version
+- `hash_algorithm`: must be `"xxhash64"`
 - `verify_seed`: seed for the value header verification hash (must be != 0)
-- `index_offsets`: byte offset of each partition's buckets in `index.all`
-  (each is 2MB-aligned for huge pages)
-- `index_n_buckets`: bucket count per partition (sized to each partition's
-  actual key count, not uniform)
+- `partitions`: per-partition control data; array length is the partition count
+  - `index_offset`: byte offset of this partition's buckets in `index.all`
+    (2MB-aligned for huge pages)
+  - `index_n_buckets`: bucket count (sized to each partition's actual key count)
+
+Optional fields:
+- `stats`: build-time statistics (opaque to reader)
+- `encoding`: encoding metadata (e.g. protobuf descriptor), patched by CLI
 
 ### Compact bucket (8 bytes)
 
@@ -73,7 +83,7 @@ struct CompactBucket {
 
 ### Read path
 
-1. Compute `partition = xxhash64(key, 0) % n_partitions`
+1. Compute `partition = xxhash64(key, 0) % partitions.len()`
 2. Compute `bucket_fp = xxhash64(key, 0) as u32` (truncate, bias 0→1)
 3. Probe `index.all` at `partition × stride + bucket_index × 8`
    - Fingerprint mismatch or empty → miss (no disk I/O)
@@ -101,8 +111,8 @@ All partition indexes packed into a single contiguous file:
 No file header — the reader looks up offsets from `meta.json`:
 
 ```
-partition_offset = index_offsets[partition_index]
-n_buckets        = index_n_buckets[partition_index]
+partition_offset = partitions[partition_index].index_offset
+n_buckets        = partitions[partition_index].index_n_buckets
 ```
 
 Each partition is sized to its own key count: `ceil(n_keys[i] / FILL_RATE)`.
