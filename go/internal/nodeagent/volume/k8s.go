@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// ComputeDiskManager implements VolumeManager by calling the GCP Compute Engine
+// ComputeDiskManager implements Manager by calling the GCP Compute Engine
 // API directly.  It requires a Kubernetes client to resolve pvName →
 // spec.csi.volumeHandle (the full disk resource URL) before issuing Compute
 // Engine calls.

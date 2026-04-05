@@ -6,9 +6,9 @@ import (
 	"sync"
 )
 
-// FakeVolumeManager is an in-memory VolumeManager for use in tests.
+// FakeManager is an in-memory Manager for use in tests.
 // All methods record their calls so tests can assert on them.
-type FakeVolumeManager struct {
+type FakeManager struct {
 	mu sync.Mutex
 
 	// attached maps pvName → device path for disks that have been attached.
@@ -23,16 +23,16 @@ type FakeVolumeManager struct {
 	errors map[int]error
 }
 
-// VolumeCall records a single VolumeManager method invocation.
+// VolumeCall records a single Manager method invocation.
 type VolumeCall struct {
 	Op     string // "attach", "wait", "detach"
 	Node   string
 	PVName string
 }
 
-// NewFakeVolumeManager returns a ready-to-use FakeVolumeManager.
-func NewFakeVolumeManager() *FakeVolumeManager {
-	return &FakeVolumeManager{
+// NewFakeManager returns a ready-to-use FakeManager.
+func NewFakeManager() *FakeManager {
+	return &FakeManager{
 		attached:   make(map[string]string),
 		DevicePath: "/dev/fake-disk",
 		errors:     make(map[int]error),
@@ -40,13 +40,13 @@ func NewFakeVolumeManager() *FakeVolumeManager {
 }
 
 // InjectError causes the n-th call (0-indexed across all methods) to return err.
-func (f *FakeVolumeManager) InjectError(n int, err error) {
+func (f *FakeManager) InjectError(n int, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.errors[n] = err
 }
 
-func (f *FakeVolumeManager) AttachDisk(ctx context.Context, nodeName, pvName string) error {
+func (f *FakeManager) AttachDisk(ctx context.Context, nodeName, pvName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	call := VolumeCall{Op: "attach", Node: nodeName, PVName: pvName}
@@ -59,7 +59,7 @@ func (f *FakeVolumeManager) AttachDisk(ctx context.Context, nodeName, pvName str
 	return nil
 }
 
-func (f *FakeVolumeManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
+func (f *FakeManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	call := VolumeCall{Op: "wait", PVName: pvName}
@@ -76,7 +76,7 @@ func (f *FakeVolumeManager) WaitForDevice(ctx context.Context, pvName string) (s
 	return dev, nil
 }
 
-func (f *FakeVolumeManager) DetachDisk(ctx context.Context, nodeName, pvName string) error {
+func (f *FakeManager) DetachDisk(ctx context.Context, nodeName, pvName string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	call := VolumeCall{Op: "detach", Node: nodeName, PVName: pvName}
@@ -89,7 +89,7 @@ func (f *FakeVolumeManager) DetachDisk(ctx context.Context, nodeName, pvName str
 	return nil
 }
 
-func (f *FakeVolumeManager) nextError() error {
+func (f *FakeManager) nextError() error {
 	idx := len(f.Calls)
 	if err, ok := f.errors[idx]; ok {
 		return err

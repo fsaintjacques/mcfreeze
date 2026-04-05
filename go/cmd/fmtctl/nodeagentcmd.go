@@ -9,9 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"frostmap.io/fmtctl/internal/mount"
 	"frostmap.io/fmtctl/internal/nodeagent"
-	"frostmap.io/fmtctl/internal/volume"
+	"frostmap.io/fmtctl/internal/nodeagent/assignment"
+	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"frostmap.io/fmtctl/internal/nodeagent/version"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 )
 
 func runNodeAgent(args []string) {
@@ -37,9 +39,9 @@ func runNodeAgent(args []string) {
 
 	disks := volume.NewComputeDiskManager(*project, *zone)
 	mounter := mount.NewLinuxMounter()
-	assignments := nodeagent.NewHTTPAssignmentSource(cfg.ControlPlaneURL, cfg.NodeName)
-	reporter := nodeagent.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
-	versions := nodeagent.NewHTTPVersionChecker("http://localhost:7777")
+	assignments := assignment.NewHTTPSource(cfg.ControlPlaneURL, cfg.NodeName)
+	reporter := assignment.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
+	versions := version.NewHTTPChecker("http://localhost:7777")
 
 	agent := nodeagent.New(cfg, disks, mounter, assignments, reporter, versions)
 	if err := agent.Run(ctx); err != nil {

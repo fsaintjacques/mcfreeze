@@ -11,23 +11,25 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/mount"
-	"frostmap.io/fmtctl/internal/volume"
+	"frostmap.io/fmtctl/internal/nodeagent/assignment"
+	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"frostmap.io/fmtctl/internal/nodeagent/version"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 )
 
 // helpers
 
-func newTestAgent(t *testing.T) (*Agent, *volume.FakeVolumeManager, *mount.FakeMounter, *FakeAssignmentSource, *FakeStateReporter, *FakeVersionChecker) {
+func newTestAgent(t *testing.T) (*Agent, *volume.FakeManager, *mount.FakeMounter, *assignment.FakeSource, *assignment.FakeStateReporter, *version.FakeChecker) {
 	t.Helper()
 
 	mountBase := t.TempDir()
 	catalogDir := t.TempDir()
 
-	disks := volume.NewFakeVolumeManager()
+	disks := volume.NewFakeManager()
 	mounter := mount.NewFakeMounter()
-	assignments := NewFakeAssignmentSource()
-	reporter := &FakeStateReporter{}
-	versions := &FakeVersionChecker{}
+	assignments := assignment.NewFakeSource()
+	reporter := &assignment.FakeStateReporter{}
+	versions := &version.FakeChecker{}
 
 	cfg := Config{
 		NodeName:       "test-node",

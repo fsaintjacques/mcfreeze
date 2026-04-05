@@ -1,4 +1,4 @@
-package nodeagent
+package assignment
 
 import (
 	"context"
@@ -7,22 +7,22 @@ import (
 	"frostmap.io/fmtctl/api"
 )
 
-// FakeAssignmentSource returns pre-configured responses via a channel.
+// FakeSource returns pre-configured responses via a channel.
 // Send an AssignmentsResponse to Responses to unblock FetchAssignments.
-type FakeAssignmentSource struct {
+type FakeSource struct {
 	Responses chan *api.AssignmentsResponse
 
 	mu    sync.Mutex
 	calls int
 }
 
-func NewFakeAssignmentSource() *FakeAssignmentSource {
-	return &FakeAssignmentSource{
+func NewFakeSource() *FakeSource {
+	return &FakeSource{
 		Responses: make(chan *api.AssignmentsResponse, 8),
 	}
 }
 
-func (f *FakeAssignmentSource) FetchAssignments(ctx context.Context, generation int64) (*api.AssignmentsResponse, error) {
+func (f *FakeSource) FetchAssignments(ctx context.Context, generation int64) (*api.AssignmentsResponse, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -35,7 +35,7 @@ func (f *FakeAssignmentSource) FetchAssignments(ctx context.Context, generation 
 	}
 }
 
-func (f *FakeAssignmentSource) CallCount() int {
+func (f *FakeSource) CallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
@@ -68,29 +68,4 @@ func (f *FakeStateReporter) LastState() (api.NodeState, bool) {
 		return api.NodeState{}, false
 	}
 	return f.States[len(f.States)-1], true
-}
-
-// FakeVersionChecker records calls and returns immediately (or an injected error).
-type FakeVersionChecker struct {
-	mu    sync.Mutex
-	Calls []VersionCheckCall
-	err   error
-}
-
-type VersionCheckCall struct {
-	Dataset   string
-	VersionID string
-}
-
-func (f *FakeVersionChecker) WaitForVersion(_ context.Context, dataset, versionID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, VersionCheckCall{Dataset: dataset, VersionID: versionID})
-	return f.err
-}
-
-func (f *FakeVersionChecker) InjectError(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.err = err
 }

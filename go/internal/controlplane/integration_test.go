@@ -17,10 +17,12 @@ import (
 
 	"frostmap.io/fmtctl/api"
 	"frostmap.io/fmtctl/internal/controlplane"
-	"frostmap.io/fmtctl/internal/mount"
 	"frostmap.io/fmtctl/internal/nodeagent"
+	"frostmap.io/fmtctl/internal/nodeagent/assignment"
+	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"frostmap.io/fmtctl/internal/nodeagent/version"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 	"frostmap.io/fmtctl/internal/testutil"
-	"frostmap.io/fmtctl/internal/volume"
 )
 
 // TestFullLoop exercises the entire pipeline:
@@ -67,11 +69,11 @@ func TestFullLoop(t *testing.T) {
 			CatalogDir:     kvSrv.CatalogDir(),
 			ReportInterval: time.Hour,
 		},
-		volume.NewFSVolumeManager(volumeBase),
+		volume.NewFSManager(volumeBase),
 		mount.NewFSMounter(),
-		nodeagent.NewHTTPAssignmentSource(orch.Addr(), nodeName),
-		nodeagent.NewHTTPStateReporter(orch.Addr(), nodeName),
-		nodeagent.NewHTTPVersionChecker(fmt.Sprintf("http://%s", kvSrv.HTTPAddr)),
+		assignment.NewHTTPSource(orch.Addr(), nodeName),
+		assignment.NewHTTPStateReporter(orch.Addr(), nodeName),
+		version.NewHTTPChecker(fmt.Sprintf("http://%s", kvSrv.HTTPAddr)),
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -163,11 +165,11 @@ func TestMultiNodeConvergenceAndRetirement(t *testing.T) {
 				CatalogDir:     catalogDir,
 				ReportInterval: time.Hour,
 			},
-			volume.NewFSVolumeManager(volBase),
+			volume.NewFSManager(volBase),
 			mount.NewFSMounter(),
-			nodeagent.NewHTTPAssignmentSource(orch.Addr(), name),
-			nodeagent.NewHTTPStateReporter(orch.Addr(), name),
-			nodeagent.NewHTTPVersionChecker(fmt.Sprintf("http://%s", kvHTTP)),
+			assignment.NewHTTPSource(orch.Addr(), name),
+			assignment.NewHTTPStateReporter(orch.Addr(), name),
+			version.NewHTTPChecker(fmt.Sprintf("http://%s", kvHTTP)),
 		)
 		done := make(chan error, 1)
 		go func() { done <- agent.Run(ctx) }()
