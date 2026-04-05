@@ -417,16 +417,89 @@ infra/gke/                     (Terraform/Pulumi)
 
 ---
 
+## Phase 7: Auto-Tuned PVC Sizing
+
+### Goal
+
+Build PVCs are right-sized based on historical usage, eliminating both
+over-provisioning waste and ENOSPC failures. No manual `disk_size_gb`
+tuning required after the first build.
+
+### Background
+
+PVC expansion is one-way only — Kubernetes, GKE PD, and ext4/xfs do not
+support shrinking volumes. Mid-build resize is unreliable due to latency
+(GKE PD resize takes 10-30s; the build may hit ENOSPC before the resize
+completes). The right approach is to right-size the *next* PVC based on
+the *previous* build's actual usage.
+
+### Work
+
+- Add `DiskSizeGB` field to `DatasetSpec` for explicit per-dataset
+  override. Zero means auto (the common case).
+- Record actual snapshot size on build completion:
+  - The `fm` binary already writes `meta.json` with snapshot metadata.
+    Add a `size_bytes` field to `meta.json` recording the total snapshot
+    size on disk.
+  - In `Job.Poll` (or the `DatasetVersionReconciler` in Phase 5), read
+    the snapshot size from the completed build and store it in
+    `DatasetVersion.status.snapshotSizeBytes`.
+- Auto-size logic in `CreateBuildPVC`:
+  1. If `DatasetSpec.DiskSizeGB > 0`, use it (explicit override).
+  2. Else if a previous completed version exists for this dataset, use
+     `previousSnapshotSize × 1.5`, rounded up to the nearest GiB, with
+     a floor of 1 GiB.
+  3. Else use the global default (10 GiB for the first build).
+- Add `--disk-size-multiplier` flag (default `1.5`) to the control-plane
+  for tuning the headroom factor.
+
+### Design constraints
+
+- **PVCs cannot shrink.** If a dataset's data shrinks significantly,
+  over-provisioning persists until the version is retired and a new
+  (smaller) PVC is created. The multiplier bounds the waste.
+- **First build is blind.** Without historical data, the first build uses
+  the global default. If the default is too small, the build fails and
+  must be retried with a larger `DiskSizeGB` override. A future
+  `--estimate-size` flag on the `fm` binary (dry-run that queries source
+  metadata without writing data) could eliminate this cold-start problem.
+- **BigQuery size estimation** is possible via the Tables API
+  (`table.numBytes`), but requires adding a BQ client to the Go
+  control-plane. Deferred unless the cold-start problem is common in
+  practice.
+
+### Test gate
+
+1. Build v1 with default size → verify PVC is 10Gi
+2. Build v1 completes, `snapshotSizeBytes` is recorded (e.g. 200MiB)
+3. Build v2 → PVC is `ceil(200MiB × 1.5) = 1Gi` (floor)
+4. Set `DatasetSpec.DiskSizeGB = 5` → build v3 → PVC is 5Gi (override)
+5. Build fails with ENOSPC → retry with larger override → succeeds
+
+### Files
+
+```
+go/api/types.go                          (DiskSizeGB field on DatasetSpec)
+rust/crates/frostmap-cli/src/load.rs     (size_bytes in meta.json)
+go/internal/controlplane/builder/job.go  (auto-size logic in Start)
+go/internal/controlplane/store.go        (snapshotSizeBytes tracking)
+```
+
+---
+
 ## Dependency Graph
 
 ```
 Phase 0 ─── Phase 1 ───┐
                         ├── Phase 3 ─── Phase 4 ─── Phase 5 ─── Phase 6
-         Phase 2 ───────┘
+         Phase 2 ───────┘                                          │
+                                                          Phase 7 ─┘
 ```
 
 Phases 1 and 2 can run in parallel (no dependency). Phase 3 merges them.
 Phase 6 can start infrastructure setup in parallel with Phase 5.
+Phase 7 depends on Phase 6 (needs real PVC sizing to matter; in KIND
+with csi-hostpath-sc, directories have no size limit).
 
 ## Summary
 
@@ -439,3 +512,4 @@ Phase 6 can start infrastructure setup in parallel with Phase 5.
 | 4 | CRDs + CRD Store (kubebuilder) | KIND | `kubectl get datasetspecs`, state persists |
 | 5 | Controllers | KIND | Fully declarative, orchestrator retired |
 | 6 | GCP Hyperdisk ML | GKE | Real multi-attach, production-ready |
+| 7 | Auto-tuned PVC sizing | GKE | Right-sized PVCs, no manual tuning |
