@@ -7,11 +7,11 @@ CARGO_FLAGS ?=
 
 build:
 	cd rust && cargo build $(CARGO_FLAGS)
-	cd go && go build -o bin/fmtctl ./cmd/node-agent
+	cd go && go build -o bin/fmtctl ./cmd/fmtctl
 
 release:
 	cd rust && cargo build --release $(CARGO_FLAGS)
-	cd go && go build -o bin/fmtctl ./cmd/node-agent
+	cd go && go build -o bin/fmtctl ./cmd/fmtctl
 
 # --- Fix ---
 
