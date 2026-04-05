@@ -48,7 +48,9 @@ type AsyncBuilder interface {
 	// locking for idempotency checks.
 	Start(ctx context.Context, spec api.DatasetSpec, versionID string) (BuildHandle, error)
 
-	// Poll checks the current status of a build. Pure read, no side effects.
+	// Poll checks the current status of a build. Implementations may perform
+	// one-time side effects on first completion detection (e.g., finalizing
+	// storage). Callers must tolerate retries — Poll must be idempotent.
 	Poll(ctx context.Context, handle BuildHandle) (BuildStatus, error)
 
 	// Cancel stops a running build and cleans up resources. Best-effort:
