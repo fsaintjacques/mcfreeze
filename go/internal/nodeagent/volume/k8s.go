@@ -2,99 +2,117 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
+
+	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-// ComputeDiskManager implements Manager by calling the GCP Compute Engine
-// API directly.  It requires a Kubernetes client to resolve pvName →
-// spec.csi.volumeHandle (the full disk resource URL) before issuing Compute
-// Engine calls.
-//
-// TODO: add the following dependencies:
-//   - k8s.io/client-go for PV lookup
-//   - cloud.google.com/go/compute/apiv1 for Compute Engine calls
-type ComputeDiskManager struct {
-	// Project is the GCP project that owns the node instance.
-	Project string
-	// Zone is the Compute Engine zone of this node.
-	Zone string
-	// DevicePollInterval controls how often WaitForDevice polls for the block
-	// device to appear under /dev/disk/by-id/.
-	DevicePollInterval time.Duration
-	// DevicePollTimeout is the maximum time WaitForDevice will wait.
-	DevicePollTimeout time.Duration
+// K8sManager implements Manager using the Kubernetes VolumeAttachment API.
+// It works with any CSI driver (csi-driver-host-path in KIND,
+// pd.csi.storage.gke.io on GKE).
+type K8sManager struct {
+	Client    kubernetes.Interface
+	CSIDriver string // e.g. "hostpath.csi.k8s.io" or "pd.csi.storage.gke.io"
+
+	// PollInterval controls how often WaitForDevice polls VolumeAttachment
+	// status.  Defaults to 2s.
+	PollInterval time.Duration
+	// PollTimeout is the maximum time WaitForDevice waits for the attachment
+	// to become ready.  Defaults to 2m.
+	PollTimeout time.Duration
 }
 
-// NewComputeDiskManager creates a ComputeDiskManager with sensible defaults.
-func NewComputeDiskManager(project, zone string) *ComputeDiskManager {
-	return &ComputeDiskManager{
-		Project:            project,
-		Zone:               zone,
-		DevicePollInterval: 2 * time.Second,
-		DevicePollTimeout:  2 * time.Minute,
+func (m *K8sManager) pollInterval() time.Duration {
+	if m.PollInterval > 0 {
+		return m.PollInterval
 	}
+	return 2 * time.Second
 }
 
-// AttachDisk resolves pvName to a disk URL via the Kubernetes PV object, then
-// calls Compute Engine instances.attachDisk in READ_ONLY mode.
-func (m *ComputeDiskManager) AttachDisk(ctx context.Context, nodeName, pvName string) error {
-	diskURL, err := m.diskURLFromPV(ctx, pvName)
+func (m *K8sManager) pollTimeout() time.Duration {
+	if m.PollTimeout > 0 {
+		return m.PollTimeout
+	}
+	return 2 * time.Minute
+}
+
+// vaName returns a deterministic VolumeAttachment name for a PV.
+func vaName(pvName string) string {
+	return "fm-va-" + pvName
+}
+
+// AttachDisk creates a VolumeAttachment for the given PV on the given node.
+// Idempotent: returns nil if the VolumeAttachment already exists.
+func (m *K8sManager) AttachDisk(ctx context.Context, nodeName, pvName string) error {
+	va := &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: vaName(pvName),
+		},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: m.CSIDriver,
+			Source: storagev1.VolumeAttachmentSource{
+				PersistentVolumeName: &pvName,
+			},
+			NodeName: nodeName,
+		},
+	}
+
+	_, err := m.Client.StorageV1().VolumeAttachments().Create(ctx, va, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(err) {
+		return nil
+	}
 	if err != nil {
-		return err
+		return fmt.Errorf("k8s attach %s on %s: %w", pvName, nodeName, err)
 	}
-	// TODO: call Compute Engine instances.attachDisk(nodeName, diskURL, READ_ONLY).
-	_ = diskURL
-	return errors.New("ComputeDiskManager.AttachDisk: not implemented")
+	return nil
 }
 
-// WaitForDevice resolves pvName to a disk name, then polls
-// /dev/disk/by-id/google-<disk-name> until it appears.
-func (m *ComputeDiskManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
-	diskURL, err := m.diskURLFromPV(ctx, pvName)
-	if err != nil {
-		return "", err
-	}
-	diskName := diskNameFromURL(diskURL)
-	deviceLink := fmt.Sprintf("/dev/disk/by-id/google-%s", diskName)
+// WaitForDevice polls the VolumeAttachment until .status.attached is true and
+// returns the device path from .status.attachmentMetadata["devicePath"].
+// If the CSI driver does not populate devicePath, the PV name is returned as
+// a fallback identifier.
+func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
+	name := vaName(pvName)
+	deadline := time.After(m.pollTimeout())
+	ticker := time.NewTicker(m.pollInterval())
+	defer ticker.Stop()
 
-	deadline := time.Now().Add(m.DevicePollTimeout)
-	// TODO: implement device polling loop once wired up.
-	_ = deviceLink
-	_ = deadline
-	return "", errors.New("ComputeDiskManager.WaitForDevice: not implemented")
-}
+	for {
+		va, err := m.Client.StorageV1().VolumeAttachments().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", fmt.Errorf("k8s wait-for-device %s: %w", pvName, err)
+		}
 
-// DetachDisk resolves pvName to a disk URL, then calls Compute Engine
-// instances.detachDisk.
-func (m *ComputeDiskManager) DetachDisk(ctx context.Context, nodeName, pvName string) error {
-	diskURL, err := m.diskURLFromPV(ctx, pvName)
-	if err != nil {
-		return err
-	}
-	// TODO: call Compute Engine instances.detachDisk(nodeName, diskURL).
-	_ = diskURL
-	return errors.New("ComputeDiskManager.DetachDisk: not implemented")
-}
+		if va.Status.Attached {
+			if dp, ok := va.Status.AttachmentMetadata["devicePath"]; ok && dp != "" {
+				return dp, nil
+			}
+			return pvName, nil
+		}
 
-// diskURLFromPV fetches the PersistentVolume by name and extracts
-// spec.csi.volumeHandle, which for the GCP Compute Engine CSI driver contains
-// the full disk resource URL.
-//
-// TODO: implement using a k8s.io/client-go corev1 client.
-func (m *ComputeDiskManager) diskURLFromPV(ctx context.Context, pvName string) (string, error) {
-	_ = ctx
-	return "", fmt.Errorf("diskURLFromPV(%q): not implemented", pvName)
-}
-
-// diskNameFromURL extracts the disk name from a Compute Engine resource URL,
-// e.g. "projects/p/zones/z/disks/my-disk" → "my-disk".
-func diskNameFromURL(diskURL string) string {
-	for i := len(diskURL) - 1; i >= 0; i-- {
-		if diskURL[i] == '/' {
-			return diskURL[i+1:]
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline:
+			return "", fmt.Errorf("k8s wait-for-device %s: timed out after %s", pvName, m.pollTimeout())
+		case <-ticker.C:
 		}
 	}
-	return diskURL
+}
+
+// DetachDisk deletes the VolumeAttachment for the given PV.
+// Idempotent: returns nil if the VolumeAttachment does not exist.
+func (m *K8sManager) DetachDisk(ctx context.Context, nodeName, pvName string) error {
+	err := m.Client.StorageV1().VolumeAttachments().Delete(ctx, vaName(pvName), metav1.DeleteOptions{})
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("k8s detach %s from %s: %w", pvName, nodeName, err)
+	}
+	return nil
 }

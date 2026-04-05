@@ -26,9 +26,17 @@ type Job struct {
 	Client       kubernetes.Interface
 	Volumes      volume.Manager
 	Namespace    string
-	Image        string // fm container image (e.g. "frostmap/fm:dev")
-	StorageClass string // StorageClass for build PVCs
-	DiskSizeGB   int64  // PVC size in GiB (defaults to 10)
+	Image           string                // fm container image (e.g. "frostmap/fm:dev")
+	ImagePullPolicy corev1.PullPolicy     // defaults to IfNotPresent
+	StorageClass    string                // StorageClass for build PVCs
+	DiskSizeGB      int64                 // PVC size in GiB (defaults to 10)
+}
+
+func (b *Job) imagePullPolicy() corev1.PullPolicy {
+	if b.ImagePullPolicy != "" {
+		return b.ImagePullPolicy
+	}
+	return corev1.PullIfNotPresent
 }
 
 func (b *Job) diskSizeGB() int64 {
@@ -144,9 +152,10 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{
 						{
-							Name:    "fm",
-							Image:   b.Image,
-							Command: []string{"fm", "load", "config", "--config", "/config/" + workerConfigFile},
+							Name:            "fm",
+							Image:           b.Image,
+							ImagePullPolicy: b.imagePullPolicy(),
+							Command:         []string{"fm", "load", "config", "--config", "/config/" + workerConfigFile},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "output", MountPath: "/output"},
 								{Name: "config", MountPath: "/config", ReadOnly: true},
@@ -208,6 +217,11 @@ func (b *Job) Poll(ctx context.Context, handle Handle) (Status, error) {
 			}
 
 			// First completion: finalize the build.
+			// Delete the Job's pods first — the pvc-protection
+			// finalizer blocks PVC deletion while any pod (even
+			// completed) references the claim.
+			b.deleteJobPods(ctx, jobName)
+
 			dataset := job.Labels["frostmap.io/dataset"]
 			versionID := job.Labels["frostmap.io/version"]
 			pvcName := b.pvcName(dataset, versionID)
@@ -270,7 +284,10 @@ func (b *Job) Cancel(ctx context.Context, handle Handle) error {
 		versionID = job.Labels["frostmap.io/version"]
 	}
 
-	// Delete Job with background propagation (deletes Pods).
+	// Delete pods first so the pvc-protection finalizer releases the PVC.
+	b.deleteJobPods(ctx, jobName)
+
+	// Delete Job with background propagation.
 	propagation := metav1.DeletePropagationBackground
 	deleteOpts := metav1.DeleteOptions{PropagationPolicy: &propagation}
 	if err := b.Client.BatchV1().Jobs(b.Namespace).Delete(ctx, jobName, deleteOpts); err != nil && !errors.IsNotFound(err) {
@@ -291,4 +308,19 @@ func (b *Job) Cancel(ctx context.Context, handle Handle) error {
 	}
 
 	return nil
+}
+
+// deleteJobPods deletes all pods owned by the given Job. Best-effort: errors
+// are ignored because the only purpose is to unblock the pvc-protection
+// finalizer before FinalizeBuild deletes the PVC.
+func (b *Job) deleteJobPods(ctx context.Context, jobName string) {
+	pods, err := b.Client.CoreV1().Pods(b.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "job-name=" + jobName,
+	})
+	if err != nil {
+		return
+	}
+	for _, p := range pods.Items {
+		b.Client.CoreV1().Pods(b.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{})
+	}
 }

@@ -1,6 +1,6 @@
 CARGO_FLAGS ?=
 
-.PHONY: build release format lint check-format check-lint check test test-unit test-integration clean \
+.PHONY: build release format lint check-format check-lint check test test-unit test-integration test-kind clean \
        docker-build kind-up kind-down kind-load
 
 # --- Build ---
@@ -45,6 +45,10 @@ test-unit:
 
 test-integration: build
 	cd go && FM=$(abspath rust/target/debug/fm) go test -tags integration ./...
+
+test-kind:
+	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
+	cd go && go test -tags kind -count=1 -v ./...
 
 # --- Clean ---
 

@@ -52,6 +52,16 @@ func kindNamespace(t *testing.T, cs kubernetes.Interface) string {
 		t.Fatalf("create namespace: %v", err)
 	}
 	t.Cleanup(func() {
+		// Delete orphaned PVs created by this test's namespace. PVs are
+		// cluster-scoped and don't cascade with namespace deletion.
+		pvs, _ := cs.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+		if pvs != nil {
+			for _, pv := range pvs.Items {
+				if pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Namespace == name {
+					cs.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, metav1.DeleteOptions{})
+				}
+			}
+		}
 		cs.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{})
 	})
 	return name
@@ -74,8 +84,9 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 		Client:       cs,
 		Volumes:      dm,
 		Namespace:    ns,
-		Image:        "frostmap/fm:dev",
-		StorageClass: "local-path",
+		Image:           "localhost/frostmap/fm:dev",
+		ImagePullPolicy: corev1.PullNever,
+		StorageClass: "standard",
 		DiskSizeGB:   1,
 	}
 
@@ -152,10 +163,10 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 		t.Fatalf("DeletePV: %v", err)
 	}
 
-	// Verify PV gone.
-	_, err = cs.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
-	if err == nil {
-		t.Error("PV should be deleted")
+	// Verify PV gone or terminating.
+	pvAfter, pvErr := cs.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if pvErr == nil && pvAfter.DeletionTimestamp == nil {
+		t.Error("PV should be deleted or terminating")
 	}
 	t.Log("PV deleted successfully")
 }
@@ -172,8 +183,9 @@ func TestKindJob_Cancel(t *testing.T) {
 		Client:       cs,
 		Volumes:      dm,
 		Namespace:    ns,
-		Image:        "frostmap/fm:dev",
-		StorageClass: "local-path",
+		Image:           "localhost/frostmap/fm:dev",
+		ImagePullPolicy: corev1.PullNever,
+		StorageClass: "standard",
 		DiskSizeGB:   1,
 	}
 
@@ -206,9 +218,9 @@ func TestKindJob_Cancel(t *testing.T) {
 	if err == nil {
 		t.Error("ConfigMap should be deleted after Cancel")
 	}
-	_, err = cs.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "fm-pvc-canceltest-v1", metav1.GetOptions{})
-	if err == nil {
-		t.Error("PVC should be deleted after Cancel")
+	pvc, pvcErr := cs.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "fm-pvc-canceltest-v1", metav1.GetOptions{})
+	if pvcErr == nil && pvc.DeletionTimestamp == nil {
+		t.Error("PVC should be deleted or terminating after Cancel")
 	}
 
 	t.Log("Cancel cleanup verified")

@@ -9,6 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"frostmap.io/fmtctl/internal/nodeagent"
 	"frostmap.io/fmtctl/internal/nodeagent/assignment"
 	"frostmap.io/fmtctl/internal/nodeagent/mount"
@@ -25,11 +28,10 @@ func runNodeAgent(args []string) {
 	fs.StringVar(&cfg.MountBase, "mount-base", "/mnt/kv", "root directory for version mounts")
 	fs.StringVar(&cfg.CatalogDir, "catalog-dir", "/run/kv", "shared EmptyDir for catalog.json")
 
-	project := fs.String("gcp-project", "", "GCP project ID (required)")
-	zone := fs.String("gcp-zone", "", "Compute Engine zone of this node (required)")
+	csiDriver := fs.String("csi-driver", "pd.csi.storage.gke.io", "CSI driver name for VolumeAttachment")
 	fs.Parse(args)
 
-	if cfg.ControlPlaneURL == "" || cfg.NodeName == "" || *project == "" || *zone == "" {
+	if cfg.ControlPlaneURL == "" || cfg.NodeName == "" {
 		fs.Usage()
 		os.Exit(1)
 	}
@@ -37,7 +39,18 @@ func runNodeAgent(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	disks := volume.NewComputeDiskManager(*project, *zone)
+	kubeConfig, err := rest.InClusterConfig()
+	if err != nil {
+		slog.Error("build in-cluster config", "err", err)
+		os.Exit(1)
+	}
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
+	if err != nil {
+		slog.Error("create kubernetes client", "err", err)
+		os.Exit(1)
+	}
+
+	disks := &volume.K8sManager{Client: kubeClient, CSIDriver: *csiDriver}
 	mounter := mount.NewLinuxMounter()
 	assignments := assignment.NewHTTPSource(cfg.ControlPlaneURL, cfg.NodeName)
 	reporter := assignment.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
