@@ -22,8 +22,10 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/mount"
-	"frostmap.io/fmtctl/internal/volume"
+	"frostmap.io/fmtctl/internal/nodeagent/assignment"
+	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"frostmap.io/fmtctl/internal/nodeagent/version"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 )
 
 // Config holds all parameters needed to run the node-agent.
@@ -47,11 +49,11 @@ type Config struct {
 // Agent is the node-agent main loop.
 type Agent struct {
 	cfg         Config
-	disks       volume.VolumeManager
+	disks       volume.Manager
 	mounter     mount.Mounter
-	assignments AssignmentSource
-	reporter    StateReporter
-	versions    VersionChecker
+	assignments assignment.Source
+	reporter    assignment.StateReporter
+	versions    version.Checker
 	log         *slog.Logger
 
 	mu       sync.Mutex
@@ -62,11 +64,11 @@ type Agent struct {
 // fakes.
 func New(
 	cfg Config,
-	disks volume.VolumeManager,
+	disks volume.Manager,
 	mounter mount.Mounter,
-	assignments AssignmentSource,
-	reporter StateReporter,
-	versions VersionChecker,
+	assignments assignment.Source,
+	reporter assignment.StateReporter,
+	versions version.Checker,
 ) *Agent {
 	if cfg.ReportInterval == 0 {
 		cfg.ReportInterval = 30 * time.Second

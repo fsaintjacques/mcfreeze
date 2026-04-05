@@ -6,10 +6,10 @@ package volume
 
 import "context"
 
-// VolumeManager handles disk attachment lifecycle on behalf of node-agent.
+// Manager handles disk attachment lifecycle on behalf of node-agent.
 // In both implementations pvName is the Kubernetes PersistentVolume name
 // created by the control-plane when the version transitions to ready.
-type VolumeManager interface {
+type Manager interface {
 	// AttachDisk attaches the disk backing pvName to nodeName in read-only
 	// mode.  The call is idempotent — attaching an already-attached disk is
 	// not an error.

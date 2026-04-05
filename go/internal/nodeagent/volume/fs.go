@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// FSVolumeManager implements VolumeManager using the local filesystem.
+// FSManager implements Manager using the local filesystem.
 // Each volume is represented as a directory under BaseDir.  This is useful for
 // local development and integration tests that cannot call the GCP Compute
 // Engine API or require real block devices.
@@ -16,7 +16,7 @@ import (
 //   - AttachDisk  → mkdir <BaseDir>/<pvName>
 //   - WaitForDevice → poll until the directory exists, return its path
 //   - DetachDisk  → rmdir <BaseDir>/<pvName>
-type FSVolumeManager struct {
+type FSManager struct {
 	// BaseDir is the root under which volume directories are created.
 	BaseDir string
 	// PollInterval controls how often WaitForDevice checks for the directory.
@@ -25,9 +25,9 @@ type FSVolumeManager struct {
 	PollTimeout time.Duration
 }
 
-// NewFSVolumeManager returns an FSVolumeManager with sensible defaults.
-func NewFSVolumeManager(baseDir string) *FSVolumeManager {
-	return &FSVolumeManager{
+// NewFSManager returns an FSManager with sensible defaults.
+func NewFSManager(baseDir string) *FSManager {
+	return &FSManager{
 		BaseDir:      baseDir,
 		PollInterval: 100 * time.Millisecond,
 		PollTimeout:  10 * time.Second,
@@ -35,7 +35,7 @@ func NewFSVolumeManager(baseDir string) *FSVolumeManager {
 }
 
 // AttachDisk creates the volume directory, simulating a disk attachment.
-func (m *FSVolumeManager) AttachDisk(_ context.Context, _, pvName string) error {
+func (m *FSManager) AttachDisk(_ context.Context, _, pvName string) error {
 	dir := m.volumeDir(pvName)
 	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("fs attach %s: %w", pvName, err)
@@ -44,7 +44,7 @@ func (m *FSVolumeManager) AttachDisk(_ context.Context, _, pvName string) error 
 }
 
 // WaitForDevice polls until the volume directory exists and returns its path.
-func (m *FSVolumeManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
+func (m *FSManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
 	dir := m.volumeDir(pvName)
 	deadline := time.Now().Add(m.PollTimeout)
 	for {
@@ -63,7 +63,7 @@ func (m *FSVolumeManager) WaitForDevice(ctx context.Context, pvName string) (str
 }
 
 // DetachDisk removes the volume directory, simulating a disk detachment.
-func (m *FSVolumeManager) DetachDisk(_ context.Context, _, pvName string) error {
+func (m *FSManager) DetachDisk(_ context.Context, _, pvName string) error {
 	dir := m.volumeDir(pvName)
 	if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("fs detach %s: %w", pvName, err)
@@ -71,6 +71,6 @@ func (m *FSVolumeManager) DetachDisk(_ context.Context, _, pvName string) error 
 	return nil
 }
 
-func (m *FSVolumeManager) volumeDir(pvName string) string {
+func (m *FSManager) volumeDir(pvName string) string {
 	return filepath.Join(m.BaseDir, pvName)
 }

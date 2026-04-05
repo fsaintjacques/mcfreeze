@@ -7,18 +7,18 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/internal/volume"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 )
 
-func newFS(t *testing.T) *volume.FSVolumeManager {
+func newFS(t *testing.T) *volume.FSManager {
 	t.Helper()
-	m := volume.NewFSVolumeManager(t.TempDir())
+	m := volume.NewFSManager(t.TempDir())
 	m.PollInterval = 5 * time.Millisecond
 	m.PollTimeout = 2 * time.Second
 	return m
 }
 
-func TestFSVolumeManager_AttachCreatesDir(t *testing.T) {
+func TestFSManager_AttachCreatesDir(t *testing.T) {
 	m := newFS(t)
 	if err := m.AttachDisk(context.Background(), "node-1", "pv-foo"); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestFSVolumeManager_AttachCreatesDir(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_AttachIdempotent(t *testing.T) {
+func TestFSManager_AttachIdempotent(t *testing.T) {
 	m := newFS(t)
 	for range 3 {
 		if err := m.AttachDisk(context.Background(), "node-1", "pv-foo"); err != nil {
@@ -38,7 +38,7 @@ func TestFSVolumeManager_AttachIdempotent(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_WaitForDevice_AlreadyAttached(t *testing.T) {
+func TestFSManager_WaitForDevice_AlreadyAttached(t *testing.T) {
 	m := newFS(t)
 	if err := m.AttachDisk(context.Background(), "node-1", "pv-foo"); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestFSVolumeManager_WaitForDevice_AlreadyAttached(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_WaitForDevice_AppearsLate(t *testing.T) {
+func TestFSManager_WaitForDevice_AppearsLate(t *testing.T) {
 	m := newFS(t)
 	ctx := context.Background()
 
@@ -70,7 +70,7 @@ func TestFSVolumeManager_WaitForDevice_AppearsLate(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_WaitForDevice_Timeout(t *testing.T) {
+func TestFSManager_WaitForDevice_Timeout(t *testing.T) {
 	m := newFS(t)
 	m.PollTimeout = 50 * time.Millisecond
 
@@ -80,7 +80,7 @@ func TestFSVolumeManager_WaitForDevice_Timeout(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_WaitForDevice_ContextCancelled(t *testing.T) {
+func TestFSManager_WaitForDevice_ContextCancelled(t *testing.T) {
 	m := newFS(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -91,7 +91,7 @@ func TestFSVolumeManager_WaitForDevice_ContextCancelled(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_DetachRemovesDir(t *testing.T) {
+func TestFSManager_DetachRemovesDir(t *testing.T) {
 	m := newFS(t)
 	ctx := context.Background()
 
@@ -107,7 +107,7 @@ func TestFSVolumeManager_DetachRemovesDir(t *testing.T) {
 	}
 }
 
-func TestFSVolumeManager_DetachIdempotent(t *testing.T) {
+func TestFSManager_DetachIdempotent(t *testing.T) {
 	m := newFS(t)
 	ctx := context.Background()
 

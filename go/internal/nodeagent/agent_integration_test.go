@@ -19,10 +19,12 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/mount"
 	"frostmap.io/fmtctl/internal/nodeagent"
+	"frostmap.io/fmtctl/internal/nodeagent/assignment"
+	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"frostmap.io/fmtctl/internal/nodeagent/version"
+	"frostmap.io/fmtctl/internal/nodeagent/volume"
 	"frostmap.io/fmtctl/internal/testutil"
-	"frostmap.io/fmtctl/internal/volume"
 )
 
 // TestAgentReconcileEndToEnd wires the node-agent with:
@@ -55,9 +57,9 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	srv := testutil.StartEmptyCatalogServer(t)
 
 	// Wire the agent.
-	assignments := nodeagent.NewFakeAssignmentSource()
-	reporter := &nodeagent.FakeStateReporter{}
-	versionChecker := nodeagent.NewHTTPVersionChecker(fmt.Sprintf("http://%s", srv.HTTPAddr))
+	assignments := assignment.NewFakeSource()
+	reporter := &assignment.FakeStateReporter{}
+	versionChecker := version.NewHTTPChecker(fmt.Sprintf("http://%s", srv.HTTPAddr))
 
 	mountBase := t.TempDir()
 	cfg := nodeagent.Config{
@@ -69,7 +71,7 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 
 	agent := nodeagent.New(
 		cfg,
-		volume.NewFSVolumeManager(volumeBase),
+		volume.NewFSManager(volumeBase),
 		mount.NewFSMounter(),
 		assignments,
 		reporter,
@@ -201,7 +203,7 @@ func TestAgentReconcileEndToEnd(t *testing.T) {
 	}
 }
 
-func waitForPhase(t *testing.T, reporter *nodeagent.FakeStateReporter, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
+func waitForPhase(t *testing.T, reporter *assignment.FakeStateReporter, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

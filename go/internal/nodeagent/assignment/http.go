@@ -1,4 +1,4 @@
-package nodeagent
+package assignment
 
 import (
 	"bytes"
@@ -6,22 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
 	"frostmap.io/fmtctl/api"
 )
 
-// HTTPAssignmentSource implements AssignmentSource via the control-plane HTTP API.
-type HTTPAssignmentSource struct {
+// HTTPSource implements Source via the control-plane HTTP API.
+type HTTPSource struct {
 	baseURL  string
 	nodeName string
 	client   *http.Client
 }
 
-func NewHTTPAssignmentSource(baseURL, nodeName string) *HTTPAssignmentSource {
-	return &HTTPAssignmentSource{
+func NewHTTPSource(baseURL, nodeName string) *HTTPSource {
+	return &HTTPSource{
 		baseURL:  baseURL,
 		nodeName: nodeName,
 		// Long timeout: the server holds the request until assignments change.
@@ -29,7 +28,7 @@ func NewHTTPAssignmentSource(baseURL, nodeName string) *HTTPAssignmentSource {
 	}
 }
 
-func (s *HTTPAssignmentSource) FetchAssignments(ctx context.Context, generation int64) (*api.AssignmentsResponse, error) {
+func (s *HTTPSource) FetchAssignments(ctx context.Context, generation int64) (*api.AssignmentsResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/node/%s/assignments?generation=%d", s.baseURL, s.nodeName, generation)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -87,58 +86,4 @@ func (r *HTTPStateReporter) ReportState(ctx context.Context, state api.NodeState
 		return fmt.Errorf("report state: HTTP %d: %s", resp.StatusCode, respBody)
 	}
 	return nil
-}
-
-// HTTPVersionChecker implements VersionChecker by polling the KV server's
-// GET /version endpoint.
-type HTTPVersionChecker struct {
-	baseURL  string
-	client   *http.Client
-	interval time.Duration
-}
-
-func NewHTTPVersionChecker(baseURL string) *HTTPVersionChecker {
-	return &HTTPVersionChecker{
-		baseURL:  baseURL,
-		client:   &http.Client{Timeout: 2 * time.Second},
-		interval: 500 * time.Millisecond,
-	}
-}
-
-func (c *HTTPVersionChecker) WaitForVersion(ctx context.Context, dataset, versionID string) error {
-	url := fmt.Sprintf("%s/version", c.baseURL)
-	var failures int
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := c.client.Do(req)
-		if err != nil {
-			failures++
-			if failures%10 == 1 { // log first failure, then every 10th
-				slog.Warn("version check: KV server unreachable",
-					"dataset", dataset, "version", versionID,
-					"err", err, "consecutive_failures", failures)
-			}
-		} else {
-			var vr api.KVVersionResponse
-			if decErr := json.NewDecoder(resp.Body).Decode(&vr); decErr == nil {
-				for _, ds := range vr.Datasets {
-					if ds.Dataset == dataset && ds.VersionID == versionID {
-						resp.Body.Close()
-						return nil
-					}
-				}
-			}
-			resp.Body.Close()
-			failures = 0
-		}
-
-		select {
-		case <-time.After(c.interval):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
 }
