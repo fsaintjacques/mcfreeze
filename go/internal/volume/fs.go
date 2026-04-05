@@ -37,7 +37,7 @@ func NewFSVolumeManager(baseDir string) *FSVolumeManager {
 // AttachDisk creates the volume directory, simulating a disk attachment.
 func (m *FSVolumeManager) AttachDisk(_ context.Context, _, pvName string) error {
 	dir := m.volumeDir(pvName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("fs attach %s: %w", pvName, err)
 	}
 	return nil
