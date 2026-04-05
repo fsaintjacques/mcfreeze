@@ -1,61 +1,52 @@
-# Frostmap top-level Makefile
-#
-# Targets:
-#   all               Build all binaries (Rust + Go)
-#   check             Run fmt + lint (CI gate)
-#   fmt               Check formatting (rustfmt + gofmt)
-#   lint              Run linters (clippy + go vet)
-#   test              Run all tests (unit + integration)
-#   test-unit         Run unit tests only (no binary prereqs)
-#   test-integration  Run integration tests (builds binaries first)
-#   clean             Remove build artifacts
+CARGO_FLAGS ?=
 
-# Rust binaries (real file targets — Make skips rebuild if up-to-date)
-RUST_RELEASE  := rust/target/release
-FM            := $(RUST_RELEASE)/fm
-
-# Go binaries
-GO_BIN        := go/bin
-FMTCTL        := $(GO_BIN)/fmtctl
-
-.PHONY: all check fmt lint test test-unit test-integration clean
+.PHONY: build release format lint check-format check-lint check test test-unit test-integration clean
 
 # --- Build ---
 
-all: $(FM) $(FMTCTL)
+build:
+	cd rust && cargo build $(CARGO_FLAGS)
+	cd go && go build -o bin/fmtctl ./cmd/node-agent
 
-$(FM): $(shell find rust/crates -name '*.rs' -o -name 'Cargo.toml') rust/Cargo.lock
-	cd rust && cargo build --release
+release:
+	cd rust && cargo build --release $(CARGO_FLAGS)
+	cd go && go build -o bin/fmtctl ./cmd/node-agent
 
-$(FMTCTL): $(shell find go -name '*.go') go/go.mod
-	mkdir -p $(GO_BIN)
-	cd go && go build -o ../$(FMTCTL) ./cmd/node-agent
+# --- Fix ---
 
-# --- Check (lint + format) ---
-
-check: fmt lint
-
-fmt:
-	cd rust && cargo fmt --all
-	@test -z "$$(cd go && gofmt -l .)" || { echo "gofmt: the following files need formatting:"; cd go && gofmt -l .; exit 1; }
+format:
+	cd rust && cargo fmt
+	cd go && gofmt -w -l .
 
 lint:
-	cd rust && cargo clippy --all-targets -- -D warnings
+	cd rust && cargo clippy $(CARGO_FLAGS) --fix --allow-dirty -- -D warnings
 	cd go && go vet ./...
+
+# --- Check (read-only, CI gate) ---
+
+check-format:
+	cd rust && cargo fmt --check
+	@test -z "$$(cd go && gofmt -l .)" || { echo "gofmt: the following files need formatting:"; cd go && gofmt -l .; exit 1; }
+
+check-lint:
+	cd rust && cargo clippy $(CARGO_FLAGS) -- -D warnings
+	cd go && go vet ./...
+
+check: check-format check-lint test
 
 # --- Test ---
 
 test: test-unit test-integration
 
 test-unit:
-	cd rust && cargo test
+	cd rust && cargo test $(CARGO_FLAGS)
 	cd go && go test ./...
 
-test-integration: $(FM)
-	cd go && FM=$(abspath $(FM)) go test -tags integration ./...
+test-integration: build
+	cd go && FM=$(abspath rust/target/debug/fm) go test -tags integration ./...
 
 # --- Clean ---
 
 clean:
 	cd rust && cargo clean
-	rm -rf $(GO_BIN)
+	rm -rf go/bin
