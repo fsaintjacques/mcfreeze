@@ -48,8 +48,7 @@ jobs:
       - name: Smoke test - fm image runs
         run: |
           kubectl run smoke --image=frostmap/fm:dev --restart=Never --image-pull-policy=Never -- fm --version
-          sleep 5
-          kubectl get pod smoke
+          kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/smoke --timeout=30s
           kubectl delete pod smoke --ignore-not-found
 
       - name: Teardown

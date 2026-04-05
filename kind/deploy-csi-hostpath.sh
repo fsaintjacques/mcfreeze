@@ -3,17 +3,17 @@ set -euo pipefail
 
 CSI_HOSTPATH_VERSION="v1.15.0"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "Cloning csi-driver-host-path ${CSI_HOSTPATH_VERSION}..."
 git clone --depth 1 --branch "$CSI_HOSTPATH_VERSION" \
-    https://github.com/kubernetes-csi/csi-driver-host-path.git "$TMPDIR/csi"
+    https://github.com/kubernetes-csi/csi-driver-host-path.git "$WORKDIR/csi"
 
 # The upstream deploy.sh exits non-zero if VolumeSnapshotClass CRDs are
 # missing, but the driver and storage class are created before that point.
 echo "Deploying csi-driver-host-path..."
-"$TMPDIR/csi/deploy/kubernetes-latest/deploy.sh" || true
+"$WORKDIR/csi/deploy/kubernetes-latest/deploy.sh" || true
 
 # Verify the critical resource was created.
 kubectl get csidriver hostpath.csi.k8s.io >/dev/null 2>&1 || {
