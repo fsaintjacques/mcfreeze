@@ -122,14 +122,19 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 
 		case BuildComplete:
 			snapPath := status.Result.SnapshotPath
-			pvName := fmt.Sprintf("pv-%s-%s", v.Dataset, v.ID)
-			pvLink := filepath.Join(o.VolumeBase, pvName)
-			if err := os.Symlink(snapPath, pvLink); err != nil && !os.IsExist(err) {
-				slog.Error("symlink pv", "dataset", v.Dataset, "version", v.ID, "err", err)
-				if mfErr := o.Store.MarkFailed(v.Dataset, v.ID, err.Error()); mfErr != nil {
-					slog.Error("mark failed after symlink error", "dataset", v.Dataset, "version", v.ID, "err", mfErr)
+			pvName := status.Result.PVName
+
+			if pvName == "" {
+				// Local build (ForkBuilder): symlink snapshot into VolumeBase.
+				pvName = fmt.Sprintf("pv-%s-%s", v.Dataset, v.ID)
+				pvLink := filepath.Join(o.VolumeBase, pvName)
+				if err := os.Symlink(snapPath, pvLink); err != nil && !os.IsExist(err) {
+					slog.Error("symlink pv", "dataset", v.Dataset, "version", v.ID, "err", err)
+					if mfErr := o.Store.MarkFailed(v.Dataset, v.ID, err.Error()); mfErr != nil {
+						slog.Error("mark failed after symlink error", "dataset", v.Dataset, "version", v.ID, "err", mfErr)
+					}
+					continue
 				}
-				continue
 			}
 
 			if err := o.Store.MarkReady(v.Dataset, v.ID, snapPath, pvName); err != nil {
@@ -138,9 +143,13 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 			}
 
 			// Extract protobuf descriptor from meta.json if present.
-			if desc, msgName := readDescriptorFromMeta(snapPath); desc != "" && msgName != "" {
-				if err := o.Store.SetDescriptor(v.Dataset, v.ID, desc, msgName); err != nil {
-					slog.Error("set descriptor", "dataset", v.Dataset, "version", v.ID, "err", err)
+			// Only available for local builds (ForkBuilder); K8s builds
+			// store data inside PVCs and skip descriptor extraction.
+			if snapPath != "" {
+				if desc, msgName := readDescriptorFromMeta(snapPath); desc != "" && msgName != "" {
+					if err := o.Store.SetDescriptor(v.Dataset, v.ID, desc, msgName); err != nil {
+						slog.Error("set descriptor", "dataset", v.Dataset, "version", v.ID, "err", err)
+					}
 				}
 			}
 
