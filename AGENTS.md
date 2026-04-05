@@ -25,7 +25,7 @@ frostmap/
 │   │   ├── volume/         # VolumeManager interface (K8s VolumeAttachment, FS simulation)
 │   │   ├── mount/          # Mounter interface (Linux syscall, FS symlink simulation)
 │   │   └── testutil/       # Helpers: BuildSnapshot, StartCatalogServer
-│   └── cmd/node-agent/     # Binary entry point
+│   └── cmd/fmtctl/         # Binary entry point (subcommands: node-agent, control-plane)
 └── doc/
     ├── FORMAT.md           # On-disk snapshot format spec
     ├── HIGHLEVEL.md        # Product overview and architecture
