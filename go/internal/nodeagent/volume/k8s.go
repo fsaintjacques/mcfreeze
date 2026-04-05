@@ -3,6 +3,7 @@ package volume
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	storagev1 "k8s.io/api/storage/v1"
@@ -40,9 +41,29 @@ func (m *K8sManager) pollTimeout() time.Duration {
 	return 2 * time.Minute
 }
 
-// vaName returns a deterministic VolumeAttachment name for a PV.
+// vaName returns a deterministic, DNS-safe VolumeAttachment name for a PV.
 func vaName(pvName string) string {
-	return "fm-va-" + pvName
+	name := "fm-va-" + strings.ToLower(pvName)
+
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else {
+			if !prevHyphen {
+				b.WriteByte('-')
+			}
+			prevHyphen = true
+		}
+	}
+	name = b.String()
+
+	if len(name) > 253 {
+		name = name[:253]
+	}
+	return strings.TrimRight(name, "-")
 }
 
 // AttachDisk creates a VolumeAttachment for the given PV on the given node.
@@ -82,6 +103,10 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 	defer ticker.Stop()
 
 	for {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
 		va, err := m.Client.StorageV1().VolumeAttachments().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return "", fmt.Errorf("k8s wait-for-device %s: %w", pvName, err)

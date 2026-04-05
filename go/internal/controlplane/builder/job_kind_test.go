@@ -81,13 +81,13 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 
 	dm := &volume.LocalPathManager{Client: cs, Namespace: ns}
 	jb := &Job{
-		Client:       cs,
-		Volumes:      dm,
-		Namespace:    ns,
+		Client:          cs,
+		Volumes:         dm,
+		Namespace:       ns,
 		Image:           "localhost/frostmap/fm:dev",
 		ImagePullPolicy: corev1.PullNever,
-		StorageClass: "standard",
-		DiskSizeGB:   1,
+		StorageClass:    "standard",
+		DiskSizeGB:      1,
 	}
 
 	spec := api.DatasetSpec{
@@ -180,13 +180,13 @@ func TestKindJob_Cancel(t *testing.T) {
 
 	dm := &volume.LocalPathManager{Client: cs, Namespace: ns}
 	jb := &Job{
-		Client:       cs,
-		Volumes:      dm,
-		Namespace:    ns,
+		Client:          cs,
+		Volumes:         dm,
+		Namespace:       ns,
 		Image:           "localhost/frostmap/fm:dev",
 		ImagePullPolicy: corev1.PullNever,
-		StorageClass: "standard",
-		DiskSizeGB:   1,
+		StorageClass:    "standard",
+		DiskSizeGB:      1,
 	}
 
 	spec := api.DatasetSpec{

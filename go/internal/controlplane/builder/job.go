@@ -23,13 +23,13 @@ import (
 // (dataset, versionID) pairs. Callers must serialize Start calls for the
 // same (dataset, versionID) — the orchestrator guarantees this.
 type Job struct {
-	Client       kubernetes.Interface
-	Volumes      volume.Manager
-	Namespace    string
-	Image           string                // fm container image (e.g. "frostmap/fm:dev")
-	ImagePullPolicy corev1.PullPolicy     // defaults to IfNotPresent
-	StorageClass    string                // StorageClass for build PVCs
-	DiskSizeGB      int64                 // PVC size in GiB (defaults to 10)
+	Client          kubernetes.Interface
+	Volumes         volume.Manager
+	Namespace       string
+	Image           string            // fm container image (e.g. "frostmap/fm:dev")
+	ImagePullPolicy corev1.PullPolicy // defaults to IfNotPresent
+	StorageClass    string            // StorageClass for build PVCs
+	DiskSizeGB      int64             // PVC size in GiB (defaults to 10)
 }
 
 func (b *Job) imagePullPolicy() corev1.PullPolicy {
