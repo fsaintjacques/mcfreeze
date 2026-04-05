@@ -1,0 +1,6 @@
+rust/target/
+go/bin/
+.git/
+.claude/
+.worktrees/
+doc/

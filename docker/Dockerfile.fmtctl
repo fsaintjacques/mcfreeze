@@ -1,0 +1,14 @@
+# --- Builder ---
+FROM golang:1.26-bookworm AS builder
+WORKDIR /src
+
+COPY go/go.mod go/go.sum* go/
+RUN cd go && go mod download 2>/dev/null || true
+
+COPY go/ go/
+RUN cd go && CGO_ENABLED=0 go build -ldflags="-s -w" -o /fmtctl ./cmd/node-agent
+
+# --- Runtime ---
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /fmtctl /usr/local/bin/fmtctl
+ENTRYPOINT ["fmtctl"]
