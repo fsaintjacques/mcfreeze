@@ -15,7 +15,8 @@ RUN for dir in rust/crates/*/; do \
       mkdir -p "$dir/src" && echo "" > "$dir/src/lib.rs"; \
     done && \
     echo "fn main() {}" > rust/crates/frostmap-cli/src/main.rs
-RUN cd rust && cargo build --release --bin fm 2>/dev/null || true
+# Only frostmap-cli has a binary; all others are library crates.
+RUN cd rust && cargo build --release --bin fm || true
 
 # Copy real source and build.
 COPY rust/ rust/
