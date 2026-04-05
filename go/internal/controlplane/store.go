@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
+	"frostmap.io/fmtctl/internal/controlplane/builder"
 )
 
 // VersionEntry extends api.VersionRecord with the local snapshot path
@@ -16,7 +17,7 @@ import (
 type VersionEntry struct {
 	api.VersionRecord
 	SnapshotPath string
-	BuildHandle  BuildHandle
+	BuildHandle  builder.Handle
 }
 
 // Store holds the control-plane state in memory. All methods are safe for
@@ -420,7 +421,7 @@ func (s *Store) DeleteVersion(dataset, versionID string) error {
 }
 
 // SetBuildHandle sets the build handle for a version in building state.
-func (s *Store) SetBuildHandle(dataset, versionID string, handle BuildHandle) error {
+func (s *Store) SetBuildHandle(dataset, versionID string, handle builder.Handle) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

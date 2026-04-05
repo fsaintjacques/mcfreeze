@@ -1,4 +1,4 @@
-package controlplane
+package builder
 
 import (
 	"context"
@@ -10,13 +10,13 @@ import (
 	"frostmap.io/fmtctl/api"
 )
 
-// FakeBuilder implements AsyncBuilder by running fm load csv synchronously
+// Fake implements Async by running fm load csv synchronously
 // in Start and storing the result. Used for tests where builds are fast.
 //
 // Concurrency: the internal mutex protects the results map only. Callers
 // must serialize Start calls for the same (dataset, versionID) per the
-// AsyncBuilder contract.
-type FakeBuilder struct {
+// Async contract.
+type Fake struct {
 	// Data maps dataset name to key-value pairs to include in the snapshot.
 	Data map[string][][2][]byte
 	// FMBinary is the path to the fm binary. Defaults to "fm".
@@ -28,15 +28,15 @@ type FakeBuilder struct {
 	OutputBase string
 
 	mu      sync.Mutex
-	results map[BuildHandle]BuildStatus
+	results map[Handle]Status
 }
 
-func (b *FakeBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (BuildHandle, error) {
-	handle := BuildHandle(fmt.Sprintf("%s/%s/%s", b.OutputBase, spec.Name, versionID))
+func (b *Fake) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (Handle, error) {
+	handle := Handle(fmt.Sprintf("%s/%s/%s", b.OutputBase, spec.Name, versionID))
 
 	b.mu.Lock()
 	if b.results == nil {
-		b.results = make(map[BuildHandle]BuildStatus)
+		b.results = make(map[Handle]Status)
 	}
 	if _, ok := b.results[handle]; ok {
 		b.mu.Unlock()
@@ -46,7 +46,7 @@ func (b *FakeBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 
 	pairs, ok := b.Data[spec.Name]
 	if !ok {
-		status := BuildStatus{Phase: BuildFailed, Error: fmt.Sprintf("fake builder: no test data for dataset %q", spec.Name)}
+		status := Status{Phase: Failed, Error: fmt.Sprintf("fake builder: no test data for dataset %q", spec.Name)}
 		b.mu.Lock()
 		b.results[handle] = status
 		b.mu.Unlock()
@@ -78,7 +78,7 @@ func (b *FakeBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 	cmd.Stdin = strings.NewReader(csv.String())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		status := BuildStatus{Phase: BuildFailed, Error: fmt.Sprintf("fm load csv failed: %v\n%s", err, out)}
+		status := Status{Phase: Failed, Error: fmt.Sprintf("fm load csv failed: %v\n%s", err, out)}
 		b.mu.Lock()
 		b.results[handle] = status
 		b.mu.Unlock()
@@ -86,30 +86,30 @@ func (b *FakeBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 	}
 
 	b.mu.Lock()
-	b.results[handle] = BuildStatus{
-		Phase:  BuildComplete,
-		Result: BuildResult{SnapshotPath: outDir},
+	b.results[handle] = Status{
+		Phase:  Complete,
+		Result: Result{SnapshotPath: outDir},
 	}
 	b.mu.Unlock()
 
 	return handle, nil
 }
 
-func (b *FakeBuilder) Poll(_ context.Context, handle BuildHandle) (BuildStatus, error) {
+func (b *Fake) Poll(_ context.Context, handle Handle) (Status, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.results == nil {
-		return BuildStatus{Phase: BuildNotFound}, nil
+		return Status{Phase: NotFound}, nil
 	}
 	status, ok := b.results[handle]
 	if !ok {
-		return BuildStatus{Phase: BuildNotFound}, nil
+		return Status{Phase: NotFound}, nil
 	}
 	return status, nil
 }
 
-func (b *FakeBuilder) Cancel(_ context.Context, handle BuildHandle) error {
+func (b *Fake) Cancel(_ context.Context, handle Handle) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

@@ -1,4 +1,4 @@
-package controlplane
+package builder
 
 import (
 	"context"
@@ -13,24 +13,25 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"frostmap.io/fmtctl/api"
+	"frostmap.io/fmtctl/internal/controlplane/volume"
 )
 
-// JobBuilder implements AsyncBuilder by creating Kubernetes Jobs. Each build
+// Job implements Async by creating Kubernetes Jobs. Each build
 // writes to a PVC that is finalized into a read-only PV on completion.
 //
-// Concurrency: JobBuilder is safe for concurrent use across different
+// Concurrency: Job is safe for concurrent use across different
 // (dataset, versionID) pairs. Callers must serialize Start calls for the
 // same (dataset, versionID) — the orchestrator guarantees this.
-type JobBuilder struct {
+type Job struct {
 	Client       kubernetes.Interface
-	DiskManager  DiskManager
+	Volumes      volume.Manager
 	Namespace    string
 	Image        string // fm container image (e.g. "frostmap/fm:dev")
 	StorageClass string // StorageClass for build PVCs
 	DiskSizeGB   int64  // PVC size in GiB (defaults to 10)
 }
 
-func (b *JobBuilder) diskSizeGB() int64 {
+func (b *Job) diskSizeGB() int64 {
 	if b.DiskSizeGB > 0 {
 		return b.DiskSizeGB
 	}
@@ -74,29 +75,29 @@ func resourceName(prefix, dataset, versionID string) string {
 	return name
 }
 
-func (b *JobBuilder) jobName(dataset, versionID string) string {
+func (b *Job) jobName(dataset, versionID string) string {
 	return resourceName("fm-build", dataset, versionID)
 }
 
-func (b *JobBuilder) configMapName(dataset, versionID string) string {
+func (b *Job) configMapName(dataset, versionID string) string {
 	return resourceName("fm-config", dataset, versionID)
 }
 
-func (b *JobBuilder) pvcName(dataset, versionID string) string {
+func (b *Job) pvcName(dataset, versionID string) string {
 	return resourceName("fm-pvc", dataset, versionID)
 }
 
 // Start creates a PVC, ConfigMap, and Job for the build. Idempotent: if the
 // resources already exist, returns the existing handle.
-func (b *JobBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (BuildHandle, error) {
+func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (Handle, error) {
 	dataset := spec.Name
 	jobName := b.jobName(dataset, versionID)
 	cmName := b.configMapName(dataset, versionID)
 	pvcName := b.pvcName(dataset, versionID)
-	handle := BuildHandle(jobName)
+	handle := Handle(jobName)
 
 	// 1. Create PVC for build output.
-	if err := b.DiskManager.CreateBuildPVC(ctx, pvcName, b.StorageClass, b.diskSizeGB()); err != nil {
+	if err := b.Volumes.CreateBuildPVC(ctx, pvcName, b.StorageClass, b.diskSizeGB()); err != nil {
 		return "", fmt.Errorf("job builder: create PVC %q: %w", pvcName, err)
 	}
 
@@ -183,26 +184,26 @@ func (b *JobBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID 
 }
 
 // Poll checks the Job status. On first completion detection, it calls
-// DiskManager.FinalizeBuild and records the PV name as a Job annotation so
+// volume.Manager.FinalizeBuild and records the PV name as a Job annotation so
 // that subsequent calls are idempotent.
-func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus, error) {
+func (b *Job) Poll(ctx context.Context, handle Handle) (Status, error) {
 	jobName := string(handle)
 
 	job, err := b.Client.BatchV1().Jobs(b.Namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		return BuildStatus{Phase: BuildNotFound}, nil
+		return Status{Phase: NotFound}, nil
 	}
 	if err != nil {
-		return BuildStatus{}, fmt.Errorf("job builder: get Job %q: %w", jobName, err)
+		return Status{}, fmt.Errorf("job builder: get Job %q: %w", jobName, err)
 	}
 
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
 			// Check if finalization already ran (idempotency).
 			if pvName, ok := job.Annotations[annotationPVName]; ok {
-				return BuildStatus{
-					Phase:  BuildComplete,
-					Result: BuildResult{PVName: pvName},
+				return Status{
+					Phase:  Complete,
+					Result: Result{PVName: pvName},
 				}, nil
 			}
 
@@ -211,10 +212,10 @@ func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus,
 			versionID := job.Labels["frostmap.io/version"]
 			pvcName := b.pvcName(dataset, versionID)
 
-			pvName, err := b.DiskManager.FinalizeBuild(ctx, pvcName)
+			pvName, err := b.Volumes.FinalizeBuild(ctx, pvcName)
 			if err != nil {
-				return BuildStatus{
-					Phase: BuildFailed,
+				return Status{
+					Phase: Failed,
 					Error: fmt.Sprintf("finalize build: %v", err),
 				}, nil
 			}
@@ -229,15 +230,15 @@ func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus,
 				// Worst case: next Poll re-runs FinalizeBuild which will
 				// fail (PVC gone) and mark the build as failed. Log and
 				// return success anyway.
-				return BuildStatus{
-					Phase:  BuildComplete,
-					Result: BuildResult{PVName: pvName},
+				return Status{
+					Phase:  Complete,
+					Result: Result{PVName: pvName},
 				}, nil
 			}
 
-			return BuildStatus{
-				Phase:  BuildComplete,
-				Result: BuildResult{PVName: pvName},
+			return Status{
+				Phase:  Complete,
+				Result: Result{PVName: pvName},
 			}, nil
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
@@ -248,16 +249,16 @@ func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus,
 			if reason == "" {
 				reason = "job failed"
 			}
-			return BuildStatus{Phase: BuildFailed, Error: reason}, nil
+			return Status{Phase: Failed, Error: reason}, nil
 		}
 	}
 
-	return BuildStatus{Phase: BuildRunning}, nil
+	return Status{Phase: Running}, nil
 }
 
 // Cancel deletes the Job, ConfigMap, and PVC. All operations are best-effort
 // and idempotent.
-func (b *JobBuilder) Cancel(ctx context.Context, handle BuildHandle) error {
+func (b *Job) Cancel(ctx context.Context, handle Handle) error {
 	jobName := string(handle)
 
 	// Extract dataset/versionID from the Job to derive resource names.

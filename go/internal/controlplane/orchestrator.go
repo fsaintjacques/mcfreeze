@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
+	"frostmap.io/fmtctl/internal/controlplane/builder"
 )
 
 // Orchestrator ties the store, builder, and server together. It provides a
 // high-level API for tests to trigger builds and promotions.
 type Orchestrator struct {
 	Store   *Store
-	Builder AsyncBuilder
+	Builder builder.Async
 	Server  *Server
 
 	// VolumeBase is the FSVolumeManager base directory. Snapshots are
@@ -38,7 +39,7 @@ func (o *Orchestrator) RegisterNode(nodeName string) {
 }
 
 // NewOrchestrator creates an Orchestrator with an HTTP server bound to a free port.
-func NewOrchestrator(builder AsyncBuilder, volumeBase string) (*Orchestrator, error) {
+func NewOrchestrator(b builder.Async, volumeBase string) (*Orchestrator, error) {
 	store := NewStore()
 	srv, err := NewServer(store, "127.0.0.1:0")
 	if err != nil {
@@ -48,7 +49,7 @@ func NewOrchestrator(builder AsyncBuilder, volumeBase string) (*Orchestrator, er
 
 	return &Orchestrator{
 		Store:      store,
-		Builder:    builder,
+		Builder:    b,
 		Server:     srv,
 		VolumeBase: volumeBase,
 	}, nil
@@ -117,10 +118,10 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 		}
 
 		switch status.Phase {
-		case BuildRunning:
+		case builder.Running:
 			// Still in progress, nothing to do.
 
-		case BuildComplete:
+		case builder.Complete:
 			snapPath := status.Result.SnapshotPath
 			pvName := status.Result.PVName
 
@@ -159,13 +160,13 @@ func (o *Orchestrator) ReconcileBuilds(ctx context.Context) error {
 				slog.Info("build complete, promoted", "dataset", v.Dataset, "version", v.ID)
 			}
 
-		case BuildFailed:
+		case builder.Failed:
 			slog.Info("build failed", "dataset", v.Dataset, "version", v.ID, "error", status.Error)
 			if err := o.Store.MarkFailed(v.Dataset, v.ID, status.Error); err != nil {
 				slog.Error("mark failed", "dataset", v.Dataset, "version", v.ID, "err", err)
 			}
 
-		case BuildNotFound:
+		case builder.NotFound:
 			slog.Info("build handle not found; orphaned", "dataset", v.Dataset, "version", v.ID)
 			if err := o.Store.MarkFailed(v.Dataset, v.ID, "build handle not found; orphaned"); err != nil {
 				slog.Error("mark orphan failed", "dataset", v.Dataset, "version", v.ID, "err", err)

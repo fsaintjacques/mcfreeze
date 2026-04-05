@@ -1,4 +1,4 @@
-package controlplane
+package builder
 
 import (
 	"context"
@@ -26,11 +26,11 @@ type workerConfig struct {
 
 const workerConfigFile = "worker.json"
 
-// ForkBuilder implements AsyncBuilder by forking an fm subprocess.
+// Fork implements Async by forking an fm subprocess.
 // The build handle is the output directory path, which is deterministic
 // from (OutputBase, dataset, versionID), making Start naturally idempotent.
 //
-// Concurrency: ForkBuilder is safe for concurrent use across different
+// Concurrency: Fork is safe for concurrent use across different
 // (dataset, versionID) pairs. Callers must serialize Start calls for the
 // same (dataset, versionID) — the orchestrator guarantees this.
 //
@@ -38,7 +38,7 @@ const workerConfigFile = "worker.json"
 // could cause Poll to misidentify an unrelated process as the build, or
 // Cancel to kill a wrong process. This is acceptable for the fork builder's
 // expected lifetime (transitional until K8s Job builder).
-type ForkBuilder struct {
+type Fork struct {
 	// FMBinary is the path to the fm binary. Defaults to "fm".
 	FMBinary string
 	// OutputBase is the root directory for build output.
@@ -51,18 +51,18 @@ type ForkBuilder struct {
 
 const pidFile = ".build.pid"
 
-func (b *ForkBuilder) outDir(dataset, versionID string) string {
+func (b *Fork) outDir(dataset, versionID string) string {
 	return filepath.Join(b.OutputBase, dataset, versionID)
 }
 
-func (b *ForkBuilder) gracePeriod() time.Duration {
+func (b *Fork) gracePeriod() time.Duration {
 	if b.GracePeriod > 0 {
 		return b.GracePeriod
 	}
 	return 10 * time.Second
 }
 
-func (b *ForkBuilder) fmBinary() string {
+func (b *Fork) fmBinary() string {
 	if b.FMBinary != "" {
 		return b.FMBinary
 	}
@@ -72,9 +72,9 @@ func (b *ForkBuilder) fmBinary() string {
 // Start kicks off an fm subprocess. Idempotent: if the build already
 // completed (meta.json exists) or is still running (pid alive), returns
 // the existing handle.
-func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (BuildHandle, error) {
+func (b *Fork) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (Handle, error) {
 	dir := b.outDir(spec.Name, versionID)
-	handle := BuildHandle(dir)
+	handle := Handle(dir)
 
 	// Already complete?
 	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err == nil {
@@ -137,35 +137,35 @@ func (b *ForkBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID
 }
 
 // Poll checks the build status by inspecting the output directory.
-func (b *ForkBuilder) Poll(_ context.Context, handle BuildHandle) (BuildStatus, error) {
+func (b *Fork) Poll(_ context.Context, handle Handle) (Status, error) {
 	dir := string(handle)
 
 	// Completed?
 	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err == nil {
-		return BuildStatus{
-			Phase:  BuildComplete,
-			Result: BuildResult{SnapshotPath: dir},
+		return Status{
+			Phase:  Complete,
+			Result: Result{SnapshotPath: dir},
 		}, nil
 	}
 
 	// Read pid.
 	pid, err := b.readPid(dir)
 	if err != nil {
-		return BuildStatus{Phase: BuildNotFound}, nil
+		return Status{Phase: NotFound}, nil
 	}
 
 	// Process alive?
 	if processAlive(pid) {
-		return BuildStatus{Phase: BuildRunning}, nil
+		return Status{Phase: Running}, nil
 	}
 
 	// Dead process, no meta.json.
-	return BuildStatus{Phase: BuildFailed, Error: "process exited without producing meta.json"}, nil
+	return Status{Phase: Failed, Error: "process exited without producing meta.json"}, nil
 }
 
 // Cancel sends SIGTERM, waits up to GracePeriod, then SIGKILL, then
 // removes the output directory.
-func (b *ForkBuilder) Cancel(_ context.Context, handle BuildHandle) error {
+func (b *Fork) Cancel(_ context.Context, handle Handle) error {
 	dir := string(handle)
 
 	pid, err := b.readPid(dir)
@@ -215,7 +215,7 @@ func (b *ForkBuilder) Cancel(_ context.Context, handle BuildHandle) error {
 }
 
 // readPid reads the pid from the .build.pid file in dir.
-func (b *ForkBuilder) readPid(dir string) (int, error) {
+func (b *Fork) readPid(dir string) (int, error) {
 	data, err := os.ReadFile(filepath.Join(dir, pidFile))
 	if err != nil {
 		return 0, err

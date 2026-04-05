@@ -1,4 +1,4 @@
-package controlplane
+package volume
 
 import (
 	"context"
@@ -12,13 +12,13 @@ import (
 
 const testNamespace = "default"
 
-func newTestDiskManager() (*LocalPathDiskManager, *fake.Clientset) {
+func newTestManager() (*LocalPathManager, *fake.Clientset) {
 	cs := fake.NewSimpleClientset()
-	return &LocalPathDiskManager{Client: cs, Namespace: testNamespace}, cs
+	return &LocalPathManager{Client: cs, Namespace: testNamespace}, cs
 }
 
 func TestCreateBuildPVC(t *testing.T) {
-	dm, cs := newTestDiskManager()
+	dm, cs := newTestManager()
 	ctx := context.Background()
 
 	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10); err != nil {
@@ -44,7 +44,7 @@ func TestCreateBuildPVC(t *testing.T) {
 }
 
 func TestCreateBuildPVC_Idempotent(t *testing.T) {
-	dm, _ := newTestDiskManager()
+	dm, _ := newTestManager()
 	ctx := context.Background()
 
 	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10); err != nil {
@@ -56,7 +56,7 @@ func TestCreateBuildPVC_Idempotent(t *testing.T) {
 }
 
 func TestDeletePV(t *testing.T) {
-	dm, cs := newTestDiskManager()
+	dm, cs := newTestManager()
 	ctx := context.Background()
 
 	pv := &corev1.PersistentVolume{
@@ -78,7 +78,7 @@ func TestDeletePV(t *testing.T) {
 }
 
 func TestDeletePV_Idempotent(t *testing.T) {
-	dm, _ := newTestDiskManager()
+	dm, _ := newTestManager()
 	ctx := context.Background()
 
 	if err := dm.DeletePV(ctx, "nonexistent-pv"); err != nil {
@@ -90,7 +90,7 @@ func TestDeletePV_Idempotent(t *testing.T) {
 // The fake clientset doesn't run a provisioner, so we manually create the
 // PV and set the PVC to Bound state.
 func TestFinalizeBuild(t *testing.T) {
-	dm, cs := newTestDiskManager()
+	dm, cs := newTestManager()
 	ctx := context.Background()
 
 	pvName := "pv-test"
