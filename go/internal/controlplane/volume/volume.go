@@ -1,11 +1,11 @@
-package controlplane
+package volume
 
 import "context"
 
-// DiskManager manages PersistentVolumeClaim and PersistentVolume lifecycle for
-// build output. Implementations handle the storage-class-specific details of
-// creating build storage, finalizing it into a read-only PV, and cleaning up.
-type DiskManager interface {
+// Manager manages PVC and PV lifecycle for build output. Implementations
+// handle the storage-class-specific details of creating build storage,
+// finalizing it into a read-only PV, and cleaning up.
+type Manager interface {
 	// CreateBuildPVC creates a RWO PersistentVolumeClaim for a build to write
 	// its output to. Idempotent: if the PVC already exists, returns nil.
 	CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64) error

@@ -1,4 +1,4 @@
-package controlplane
+package builder
 
 import (
 	"context"
@@ -13,7 +13,10 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 
 	"frostmap.io/fmtctl/api"
+	"frostmap.io/fmtctl/internal/controlplane/volume"
 )
+
+const testNamespace = "default"
 
 var testSpec = api.DatasetSpec{
 	Name:       "users",
@@ -26,12 +29,12 @@ var testSpec = api.DatasetSpec{
 	},
 }
 
-func newTestJobBuilder() (*JobBuilder, *fake.Clientset) {
+func newTestJob() (*Job, *fake.Clientset) {
 	cs := fake.NewSimpleClientset()
-	dm := &LocalPathDiskManager{Client: cs, Namespace: testNamespace}
-	return &JobBuilder{
+	dm := &volume.LocalPathManager{Client: cs, Namespace: testNamespace}
+	return &Job{
 		Client:       cs,
-		DiskManager:  dm,
+		Volumes:      dm,
 		Namespace:    testNamespace,
 		Image:        "frostmap/fm:dev",
 		StorageClass: "local-path",
@@ -39,8 +42,8 @@ func newTestJobBuilder() (*JobBuilder, *fake.Clientset) {
 	}, cs
 }
 
-func TestJobBuilder_Start(t *testing.T) {
-	jb, cs := newTestJobBuilder()
+func TestJob_Start(t *testing.T) {
+	jb, cs := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -48,7 +51,7 @@ func TestJobBuilder_Start(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	wantHandle := BuildHandle("fm-build-users-v1")
+	wantHandle := Handle("fm-build-users-v1")
 	if handle != wantHandle {
 		t.Errorf("handle = %q, want %q", handle, wantHandle)
 	}
@@ -129,8 +132,8 @@ func TestJobBuilder_Start(t *testing.T) {
 	}
 }
 
-func TestJobBuilder_Start_Idempotent(t *testing.T) {
-	jb, _ := newTestJobBuilder()
+func TestJob_Start_Idempotent(t *testing.T) {
+	jb, _ := newTestJob()
 	ctx := context.Background()
 
 	h1, err := jb.Start(ctx, testSpec, "v1")
@@ -148,8 +151,8 @@ func TestJobBuilder_Start_Idempotent(t *testing.T) {
 	}
 }
 
-func TestJobBuilder_Poll_Running(t *testing.T) {
-	jb, _ := newTestJobBuilder()
+func TestJob_Poll_Running(t *testing.T) {
+	jb, _ := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -161,13 +164,13 @@ func TestJobBuilder_Poll_Running(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if status.Phase != BuildRunning {
-		t.Errorf("phase = %v, want %v", status.Phase, BuildRunning)
+	if status.Phase != Running {
+		t.Errorf("phase = %v, want %v", status.Phase, Running)
 	}
 }
 
-func TestJobBuilder_Poll_Complete(t *testing.T) {
-	jb, cs := newTestJobBuilder()
+func TestJob_Poll_Complete(t *testing.T) {
+	jb, cs := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -214,8 +217,8 @@ func TestJobBuilder_Poll_Complete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if status.Phase != BuildComplete {
-		t.Errorf("phase = %v, want %v", status.Phase, BuildComplete)
+	if status.Phase != Complete {
+		t.Errorf("phase = %v, want %v", status.Phase, Complete)
 	}
 	if status.Result.PVName != pvName {
 		t.Errorf("PVName = %q, want %q", status.Result.PVName, pvName)
@@ -231,8 +234,8 @@ func TestJobBuilder_Poll_Complete(t *testing.T) {
 	}
 }
 
-func TestJobBuilder_Poll_Failed(t *testing.T) {
-	jb, cs := newTestJobBuilder()
+func TestJob_Poll_Failed(t *testing.T) {
+	jb, cs := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -251,29 +254,29 @@ func TestJobBuilder_Poll_Failed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if status.Phase != BuildFailed {
-		t.Errorf("phase = %v, want %v", status.Phase, BuildFailed)
+	if status.Phase != Failed {
+		t.Errorf("phase = %v, want %v", status.Phase, Failed)
 	}
 	if status.Error != "OOMKilled" {
 		t.Errorf("error = %q, want %q", status.Error, "OOMKilled")
 	}
 }
 
-func TestJobBuilder_Poll_NotFound(t *testing.T) {
-	jb, _ := newTestJobBuilder()
+func TestJob_Poll_NotFound(t *testing.T) {
+	jb, _ := newTestJob()
 	ctx := context.Background()
 
-	status, err := jb.Poll(ctx, BuildHandle("nonexistent-job"))
+	status, err := jb.Poll(ctx, Handle("nonexistent-job"))
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if status.Phase != BuildNotFound {
-		t.Errorf("phase = %v, want %v", status.Phase, BuildNotFound)
+	if status.Phase != NotFound {
+		t.Errorf("phase = %v, want %v", status.Phase, NotFound)
 	}
 }
 
-func TestJobBuilder_Cancel(t *testing.T) {
-	jb, cs := newTestJobBuilder()
+func TestJob_Cancel(t *testing.T) {
+	jb, cs := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -304,18 +307,18 @@ func TestJobBuilder_Cancel(t *testing.T) {
 	}
 }
 
-func TestJobBuilder_Cancel_Idempotent(t *testing.T) {
-	jb, _ := newTestJobBuilder()
+func TestJob_Cancel_Idempotent(t *testing.T) {
+	jb, _ := newTestJob()
 	ctx := context.Background()
 
 	// Cancel a non-existent build — should not error.
-	if err := jb.Cancel(ctx, BuildHandle("nonexistent-job")); err != nil {
+	if err := jb.Cancel(ctx, Handle("nonexistent-job")); err != nil {
 		t.Fatalf("Cancel on nonexistent: %v", err)
 	}
 }
 
-func TestJobBuilder_Poll_Complete_Idempotent(t *testing.T) {
-	jb, cs := newTestJobBuilder()
+func TestJob_Poll_Complete_Idempotent(t *testing.T) {
+	jb, cs := newTestJob()
 	ctx := context.Background()
 
 	handle, err := jb.Start(ctx, testSpec, "v1")
@@ -363,8 +366,8 @@ func TestJobBuilder_Poll_Complete_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Poll: %v", err)
 	}
-	if s1.Phase != BuildComplete {
-		t.Fatalf("first Poll phase = %v, want %v", s1.Phase, BuildComplete)
+	if s1.Phase != Complete {
+		t.Fatalf("first Poll phase = %v, want %v", s1.Phase, Complete)
 	}
 	if s1.Result.PVName != pvName {
 		t.Errorf("first Poll PVName = %q, want %q", s1.Result.PVName, pvName)
@@ -375,8 +378,8 @@ func TestJobBuilder_Poll_Complete_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Poll: %v", err)
 	}
-	if s2.Phase != BuildComplete {
-		t.Errorf("second Poll phase = %v, want %v (should be idempotent)", s2.Phase, BuildComplete)
+	if s2.Phase != Complete {
+		t.Errorf("second Poll phase = %v, want %v (should be idempotent)", s2.Phase, Complete)
 	}
 	if s2.Result.PVName != pvName {
 		t.Errorf("second Poll PVName = %q, want %q", s2.Result.PVName, pvName)

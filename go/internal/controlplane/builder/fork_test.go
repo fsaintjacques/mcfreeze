@@ -1,6 +1,6 @@
 //go:build integration
 
-package controlplane_test
+package builder_test
 
 import (
 	"context"
@@ -11,14 +11,14 @@ import (
 	"time"
 
 	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane"
+	"frostmap.io/fmtctl/internal/controlplane/builder"
 )
 
 func TestForkBuilder_StartPollComplete(t *testing.T) {
 	outBase := t.TempDir()
 	script := createFMScript(t, outBase)
 
-	b := &controlplane.ForkBuilder{
+	b := &builder.Fork{
 		FMBinary:   script,
 		OutputBase: outBase,
 	}
@@ -48,13 +48,13 @@ func TestForkBuilder_StartPollComplete(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Poll: %v", err)
 		}
-		if status.Phase == controlplane.BuildComplete {
+		if status.Phase == builder.Complete {
 			if status.Result.SnapshotPath != string(handle) {
 				t.Fatalf("SnapshotPath = %q, want %q", status.Result.SnapshotPath, string(handle))
 			}
 			break
 		}
-		if status.Phase == controlplane.BuildFailed {
+		if status.Phase == builder.Failed {
 			t.Fatalf("build failed: %s", status.Error)
 		}
 		select {
@@ -69,7 +69,7 @@ func TestForkBuilder_StartIdempotent(t *testing.T) {
 	outBase := t.TempDir()
 	script := createFMScript(t, outBase)
 
-	b := &controlplane.ForkBuilder{
+	b := &builder.Fork{
 		FMBinary:   script,
 		OutputBase: outBase,
 	}
@@ -109,7 +109,7 @@ func TestForkBuilder_Cancel(t *testing.T) {
 	// Create a script that sleeps forever.
 	script := createSleeperScript(t, outBase)
 
-	b := &controlplane.ForkBuilder{
+	b := &builder.Fork{
 		FMBinary:    script,
 		OutputBase:  outBase,
 		GracePeriod: 1 * time.Second,
@@ -134,7 +134,7 @@ func TestForkBuilder_Cancel(t *testing.T) {
 
 	// Verify it's running.
 	status, _ := b.Poll(ctx, handle)
-	if status.Phase != controlplane.BuildRunning {
+	if status.Phase != builder.Running {
 		t.Fatalf("expected running, got %s", status.Phase)
 	}
 
@@ -150,7 +150,7 @@ func TestForkBuilder_Cancel(t *testing.T) {
 
 	// Poll should return not_found.
 	status, _ = b.Poll(ctx, handle)
-	if status.Phase != controlplane.BuildNotFound {
+	if status.Phase != builder.NotFound {
 		t.Fatalf("expected not_found after cancel, got %s", status.Phase)
 	}
 }
@@ -173,7 +173,7 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 	defer cancel()
 
 	// Start a build with builder instance 1.
-	b1 := &controlplane.ForkBuilder{
+	b1 := &builder.Fork{
 		FMBinary:   script,
 		OutputBase: outBase,
 	}
@@ -185,20 +185,20 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 
 	// Verify running.
 	status, _ := b1.Poll(ctx, handle)
-	if status.Phase != controlplane.BuildRunning {
+	if status.Phase != builder.Running {
 		t.Fatalf("expected running, got %s", status.Phase)
 	}
 
 	// "Restart": create a new ForkBuilder with the same OutputBase (simulating
 	// control-plane restart). The old builder instance is dropped.
-	b2 := &controlplane.ForkBuilder{
+	b2 := &builder.Fork{
 		FMBinary:   script,
 		OutputBase: outBase,
 	}
 
 	// Poll with the new instance — should detect the running process.
 	status, _ = b2.Poll(ctx, handle)
-	if status.Phase != controlplane.BuildRunning {
+	if status.Phase != builder.Running {
 		t.Fatalf("after restart, expected running, got %s", status.Phase)
 	}
 
@@ -206,21 +206,21 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 	waitForBuild(t, b2, ctx, handle, 15*time.Second)
 
 	status, _ = b2.Poll(ctx, handle)
-	if status.Phase != controlplane.BuildComplete {
+	if status.Phase != builder.Complete {
 		t.Fatalf("expected complete, got %s", status.Phase)
 	}
 }
 
 func TestForkBuilder_PollNotFound(t *testing.T) {
-	b := &controlplane.ForkBuilder{
+	b := &builder.Fork{
 		OutputBase: t.TempDir(),
 	}
 
-	status, err := b.Poll(context.Background(), controlplane.BuildHandle("/nonexistent/path"))
+	status, err := b.Poll(context.Background(), builder.Handle("/nonexistent/path"))
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
-	if status.Phase != controlplane.BuildNotFound {
+	if status.Phase != builder.NotFound {
 		t.Fatalf("expected not_found, got %s", status.Phase)
 	}
 }
@@ -296,7 +296,7 @@ echo '{"format_version":4,"hash_algorithm":"xxhash64","verify_seed":0,"partition
 	return script
 }
 
-func waitForBuild(t *testing.T, b *controlplane.ForkBuilder, ctx context.Context, handle controlplane.BuildHandle, timeout time.Duration) {
+func waitForBuild(t *testing.T, b *builder.Fork, ctx context.Context, handle builder.Handle, timeout time.Duration) {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -304,10 +304,10 @@ func waitForBuild(t *testing.T, b *controlplane.ForkBuilder, ctx context.Context
 		if err != nil {
 			t.Fatalf("Poll: %v", err)
 		}
-		if status.Phase == controlplane.BuildComplete {
+		if status.Phase == builder.Complete {
 			return
 		}
-		if status.Phase == controlplane.BuildFailed {
+		if status.Phase == builder.Failed {
 			t.Fatalf("build failed: %s", status.Error)
 		}
 		select {

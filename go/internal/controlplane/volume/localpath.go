@@ -1,4 +1,4 @@
-package controlplane
+package volume
 
 import (
 	"context"
@@ -12,13 +12,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// LocalPathDiskManager implements DiskManager for KIND's local-path
+// LocalPathManager implements Manager for KIND's local-path
 // StorageClass. It manages PVC/PV lifecycle using the Kubernetes API.
 //
 // On a single-node KIND cluster, ReadOnlyMany access mode doesn't enable
 // real multi-attach, but it validates the full finalization flow that
 // production implementations (Hyperdisk ML) rely on.
-type LocalPathDiskManager struct {
+type LocalPathManager struct {
 	Client    kubernetes.Interface
 	Namespace string
 }
@@ -32,7 +32,7 @@ const pvcPollTimeout = 2 * time.Minute
 // pvcDeleteTimeout is the maximum time FinalizeBuild waits for PVC deletion.
 const pvcDeleteTimeout = 30 * time.Second
 
-func (m *LocalPathDiskManager) CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64) error {
+func (m *LocalPathManager) CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64) error {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -56,7 +56,7 @@ func (m *LocalPathDiskManager) CreateBuildPVC(ctx context.Context, name, storage
 	return err
 }
 
-func (m *LocalPathDiskManager) FinalizeBuild(ctx context.Context, pvcName string) (string, error) {
+func (m *LocalPathManager) FinalizeBuild(ctx context.Context, pvcName string) (string, error) {
 	// Wait for PVC to be bound.
 	pvName, err := m.waitForBound(ctx, pvcName)
 	if err != nil {
@@ -86,7 +86,7 @@ func (m *LocalPathDiskManager) FinalizeBuild(ctx context.Context, pvcName string
 	return pvName, nil
 }
 
-func (m *LocalPathDiskManager) DeletePV(ctx context.Context, pvName string) error {
+func (m *LocalPathManager) DeletePV(ctx context.Context, pvName string) error {
 	err := m.Client.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{})
 	if errors.IsNotFound(err) {
 		return nil
@@ -95,7 +95,7 @@ func (m *LocalPathDiskManager) DeletePV(ctx context.Context, pvName string) erro
 }
 
 // waitForBound polls until the PVC is bound and returns the backing PV name.
-func (m *LocalPathDiskManager) waitForBound(ctx context.Context, pvcName string) (string, error) {
+func (m *LocalPathManager) waitForBound(ctx context.Context, pvcName string) (string, error) {
 	deadline := time.After(pvcPollTimeout)
 	ticker := time.NewTicker(pvcPollInterval)
 	defer ticker.Stop()
@@ -120,7 +120,7 @@ func (m *LocalPathDiskManager) waitForBound(ctx context.Context, pvcName string)
 }
 
 // setRetainPolicy patches the PV's reclaimPolicy to Retain.
-func (m *LocalPathDiskManager) setRetainPolicy(ctx context.Context, pvName string) error {
+func (m *LocalPathManager) setRetainPolicy(ctx context.Context, pvName string) error {
 	pv, err := m.Client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -134,7 +134,7 @@ func (m *LocalPathDiskManager) setRetainPolicy(ctx context.Context, pvName strin
 }
 
 // waitForPVCDeleted polls until the PVC no longer exists.
-func (m *LocalPathDiskManager) waitForPVCDeleted(ctx context.Context, pvcName string) error {
+func (m *LocalPathManager) waitForPVCDeleted(ctx context.Context, pvcName string) error {
 	deadline := time.After(pvcDeleteTimeout)
 	ticker := time.NewTicker(pvcPollInterval)
 	defer ticker.Stop()
@@ -159,7 +159,7 @@ func (m *LocalPathDiskManager) waitForPVCDeleted(ctx context.Context, pvcName st
 }
 
 // finalizePV clears the claimRef and sets accessModes to ReadOnlyMany.
-func (m *LocalPathDiskManager) finalizePV(ctx context.Context, pvName string) error {
+func (m *LocalPathManager) finalizePV(ctx context.Context, pvName string) error {
 	pv, err := m.Client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
 		return err

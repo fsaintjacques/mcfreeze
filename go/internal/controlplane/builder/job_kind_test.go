@@ -1,6 +1,6 @@
 //go:build kind
 
-package controlplane
+package builder
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"frostmap.io/fmtctl/api"
+	"frostmap.io/fmtctl/internal/controlplane/volume"
 )
 
 // kindClientset creates a Kubernetes clientset from the default kubeconfig.
@@ -56,22 +57,22 @@ func kindNamespace(t *testing.T, cs kubernetes.Interface) string {
 	return name
 }
 
-// TestKindJobBuilder_FullLifecycle runs a build Job in a KIND cluster and
+// TestKindJob_FullLifecycle runs a build Job in a KIND cluster and
 // validates the full PVC → finalize → PV → delete lifecycle.
 //
 // Prerequisites:
 //   - KIND cluster running with fm image loaded (make kind-up kind-load)
 //   - local-path StorageClass available (default in KIND)
-func TestKindJobBuilder_FullLifecycle(t *testing.T) {
+func TestKindJob_FullLifecycle(t *testing.T) {
 	cs := kindClientset(t)
 	ns := kindNamespace(t, cs)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	dm := &LocalPathDiskManager{Client: cs, Namespace: ns}
-	jb := &JobBuilder{
+	dm := &volume.LocalPathManager{Client: cs, Namespace: ns}
+	jb := &Job{
 		Client:       cs,
-		DiskManager:  dm,
+		Volumes:      dm,
 		Namespace:    ns,
 		Image:        "frostmap/fm:dev",
 		StorageClass: "local-path",
@@ -97,7 +98,7 @@ func TestKindJobBuilder_FullLifecycle(t *testing.T) {
 	t.Logf("started build, handle=%s", handle)
 
 	// Poll until complete or failed.
-	var status BuildStatus
+	var status Status
 	deadline := time.After(4 * time.Minute)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -107,7 +108,7 @@ func TestKindJobBuilder_FullLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Poll: %v", err)
 		}
-		if status.Phase == BuildComplete || status.Phase == BuildFailed {
+		if status.Phase == Complete || status.Phase == Failed {
 			break
 		}
 		t.Logf("build phase: %s", status.Phase)
@@ -119,7 +120,7 @@ func TestKindJobBuilder_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	if status.Phase != BuildComplete {
+	if status.Phase != Complete {
 		t.Fatalf("build failed: %s", status.Error)
 	}
 
@@ -159,17 +160,17 @@ func TestKindJobBuilder_FullLifecycle(t *testing.T) {
 	t.Log("PV deleted successfully")
 }
 
-// TestKindJobBuilder_Cancel verifies Cancel cleans up resources in KIND.
-func TestKindJobBuilder_Cancel(t *testing.T) {
+// TestKindJob_Cancel verifies Cancel cleans up resources in KIND.
+func TestKindJob_Cancel(t *testing.T) {
 	cs := kindClientset(t)
 	ns := kindNamespace(t, cs)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	dm := &LocalPathDiskManager{Client: cs, Namespace: ns}
-	jb := &JobBuilder{
+	dm := &volume.LocalPathManager{Client: cs, Namespace: ns}
+	jb := &Job{
 		Client:       cs,
-		DiskManager:  dm,
+		Volumes:      dm,
 		Namespace:    ns,
 		Image:        "frostmap/fm:dev",
 		StorageClass: "local-path",

@@ -17,6 +17,7 @@ import (
 
 	"frostmap.io/fmtctl/api"
 	"frostmap.io/fmtctl/internal/controlplane"
+	"frostmap.io/fmtctl/internal/controlplane/builder"
 	"frostmap.io/fmtctl/internal/nodeagent"
 	"frostmap.io/fmtctl/internal/nodeagent/assignment"
 	"frostmap.io/fmtctl/internal/nodeagent/mount"
@@ -37,7 +38,7 @@ func TestFullLoop(t *testing.T) {
 	buildBase := t.TempDir()
 
 	// --- control-plane ---
-	builder := &controlplane.FakeBuilder{
+	builder := &builder.Fake{
 		FMBinary:   testutil.FMBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,
@@ -125,7 +126,7 @@ func TestFullLoop(t *testing.T) {
 func TestMultiNodeConvergenceAndRetirement(t *testing.T) {
 	buildBase := t.TempDir()
 
-	builder := &controlplane.FakeBuilder{
+	builder := &builder.Fake{
 		FMBinary:   testutil.FMBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,
