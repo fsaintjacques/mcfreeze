@@ -3,6 +3,7 @@ package volume
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -134,17 +135,24 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 // resolveDevicePath looks up the PV to derive a usable device path when the
 // VolumeAttachment metadata does not include one. For CSI volumes provisioned
 // by csi-driver-host-path, the data lives at /var/lib/csi-hostpath-data/<volumeHandle>.
+//
+// This heuristic is KIND-specific. In production (GKE), the CSI driver
+// populates attachmentMetadata["devicePath"] and this function is not called.
 func (m *K8sManager) resolveDevicePath(ctx context.Context, pvName string) (string, error) {
 	pv, err := m.Client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
-		return pvName, nil // best-effort fallback
+		slog.Warn("resolveDevicePath: PV lookup failed, using PV name as fallback", "pv", pvName, "err", err)
+		return pvName, nil
 	}
 	if pv.Spec.CSI != nil && pv.Spec.CSI.VolumeHandle != "" {
-		return "/var/lib/csi-hostpath-data/" + pv.Spec.CSI.VolumeHandle, nil
+		path := "/var/lib/csi-hostpath-data/" + pv.Spec.CSI.VolumeHandle
+		slog.Info("resolveDevicePath: resolved CSI hostpath volume", "pv", pvName, "path", path)
+		return path, nil
 	}
 	if pv.Spec.HostPath != nil {
 		return pv.Spec.HostPath.Path, nil
 	}
+	slog.Warn("resolveDevicePath: no CSI or hostPath spec, using PV name as fallback", "pv", pvName)
 	return pvName, nil
 }
 

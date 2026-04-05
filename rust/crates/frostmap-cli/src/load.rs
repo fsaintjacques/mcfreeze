@@ -236,27 +236,25 @@ impl Pipeline {
 // ---------------------------------------------------------------------------
 
 pub async fn run(mut args: LoadArgs) -> Result<()> {
-    // In config mode, extract output/partitions/index_parallelism from the
-    // config file before building the pipeline. These override the CLI defaults
-    // so the config is self-contained.
-    if let Source::Config { ref config } = args.source {
+    // In config mode, the WorkerConfig is authoritative for output,
+    // partitions, and index_parallelism. Parse it once and pass it through
+    // to build_pipeline to avoid double-reading the file.
+    let worker_config = if let Source::Config { ref config } = args.source {
         let config_bytes = std::fs::read(config)
             .with_context(|| format!("failed to read config file {}", config.display()))?;
         let wc: WorkerConfig = serde_json::from_slice(&config_bytes)
             .with_context(|| format!("failed to parse config file {}", config.display()))?;
         if args.output.is_none() {
-            args.output = Some(wc.output);
+            args.output = Some(wc.output.clone());
         }
-        if args.partitions == 64 {
-            // Only override if the user didn't explicitly set --partitions.
-            args.partitions = wc.partitions;
-        }
-        if args.index_parallelism == 2 {
-            args.index_parallelism = wc.index_parallelism;
-        }
-    }
+        args.partitions = wc.partitions;
+        args.index_parallelism = wc.index_parallelism;
+        Some(wc)
+    } else {
+        None
+    };
 
-    let pipeline = build_pipeline(&args).await?;
+    let pipeline = build_pipeline(&args, worker_config).await?;
 
     if args.dry_run {
         info!("dry-run: source validated, no data written");
@@ -277,7 +275,7 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
 // Source construction — single function for all source types
 // ---------------------------------------------------------------------------
 
-async fn build_pipeline(args: &LoadArgs) -> Result<Pipeline> {
+async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) -> Result<Pipeline> {
     let encoding = if args.protobuf_message.is_some() {
         Some(build_protobuf_config(args)?)
     } else {
@@ -352,11 +350,8 @@ async fn build_pipeline(args: &LoadArgs) -> Result<Pipeline> {
                 progress_secs: args.progress_secs,
             })
         }
-        Source::Config { config } => {
-            let config_bytes = std::fs::read(config)
-                .with_context(|| format!("failed to read config file {}", config.display()))?;
-            let wc: WorkerConfig = serde_json::from_slice(&config_bytes)
-                .with_context(|| format!("failed to parse config file {}", config.display()))?;
+        Source::Config { .. } => {
+            let wc = worker_config.expect("worker_config must be set for Source::Config");
 
             let encoding = wc.source.encoding.as_ref().and_then(|e| e.protobuf.clone());
             let value_column = wc.source.value_column.unwrap_or_else(|| "value".into());
