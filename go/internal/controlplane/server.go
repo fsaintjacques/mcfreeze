@@ -125,6 +125,11 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !isValidName(name) {
+		http.Error(w, "invalid dataset name", http.StatusBadRequest)
+		return
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -137,6 +142,11 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !isValidName(req.VersionID) {
+		http.Error(w, "invalid version_id", http.StatusBadRequest)
 		return
 	}
 
@@ -185,4 +195,18 @@ func (s *Server) handleAdminRetired(w http.ResponseWriter, r *http.Request) {
 	eligible := s.store.CheckRetirement(name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(eligible)
+}
+
+// isValidName returns true if s is non-empty and contains only lowercase
+// alphanumeric characters, hyphens, underscores, and dots.
+func isValidName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }

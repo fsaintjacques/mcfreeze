@@ -150,15 +150,17 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					SecurityContext: &corev1.PodSecurityContext{
+						// distroless runs as nonroot (65534); fsGroup grants
+						// group-write on PVC mounts without running as root.
+						FSGroup: ptrInt64(65534),
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "fm",
 							Image:           b.Image,
 							ImagePullPolicy: b.imagePullPolicy(),
 							Command:         []string{"fmtctl", "job", "--config", "/config/" + workerConfigFile},
-							SecurityContext: &corev1.SecurityContext{
-								RunAsUser: ptrInt64(0), // PVC mounts are root-owned; build needs write access
-							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "output", MountPath: "/output"},
 								{Name: "config", MountPath: "/config", ReadOnly: true},
