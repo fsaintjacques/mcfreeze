@@ -94,8 +94,10 @@ func (m *K8sManager) AttachDisk(ctx context.Context, nodeName, pvName string) er
 
 // WaitForDevice polls the VolumeAttachment until .status.attached is true and
 // returns the device path from .status.attachmentMetadata["devicePath"].
-// If the CSI driver does not populate devicePath, the PV name is returned as
-// a fallback identifier.
+// If the CSI driver does not populate devicePath, the PV's CSI volumeHandle
+// is resolved to a host path (e.g. /var/lib/csi-hostpath-data/<handle> for
+// csi-driver-host-path). If the PV has no CSI spec, the PV name is returned
+// as a fallback identifier.
 func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, error) {
 	name := vaName(pvName)
 	deadline := time.After(m.pollTimeout())
@@ -116,7 +118,7 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 			if dp, ok := va.Status.AttachmentMetadata["devicePath"]; ok && dp != "" {
 				return dp, nil
 			}
-			return pvName, nil
+			return m.resolveDevicePath(ctx, pvName)
 		}
 
 		select {
@@ -127,6 +129,23 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 		case <-ticker.C:
 		}
 	}
+}
+
+// resolveDevicePath looks up the PV to derive a usable device path when the
+// VolumeAttachment metadata does not include one. For CSI volumes provisioned
+// by csi-driver-host-path, the data lives at /var/lib/csi-hostpath-data/<volumeHandle>.
+func (m *K8sManager) resolveDevicePath(ctx context.Context, pvName string) (string, error) {
+	pv, err := m.Client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		return pvName, nil // best-effort fallback
+	}
+	if pv.Spec.CSI != nil && pv.Spec.CSI.VolumeHandle != "" {
+		return "/var/lib/csi-hostpath-data/" + pv.Spec.CSI.VolumeHandle, nil
+	}
+	if pv.Spec.HostPath != nil {
+		return pv.Spec.HostPath.Path, nil
+	}
+	return pvName, nil
 }
 
 // DetachDisk deletes the VolumeAttachment for the given PV.

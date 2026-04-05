@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frostmap-control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frostmap-control-plane
+  template:
+    metadata:
+      labels:
+        app: frostmap-control-plane
+    spec:
+      serviceAccountName: frostmap-control-plane
+      containers:
+        - name: control-plane
+          image: frostmap:dev
+          args:
+            - control-plane
+            - --listen=:8080
+            - --image=frostmap:dev
+            - --storage-class=csi-hostpath-sc
+            - --disk-size-gb=1
+          ports:
+            - containerPort: 8080

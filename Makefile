@@ -61,18 +61,16 @@ clean:
 KIND_CLUSTER_NAME ?= frostmap
 KIND_PROVIDER     ?= $(shell [ -n "$$GITHUB_ACTIONS" ] && echo docker || \
                        (command -v podman >/dev/null 2>&1 && echo podman || echo docker))
-FM_IMAGE          ?= frostmap/fm:dev
-FMTCTL_IMAGE      ?= frostmap/fmtctl:dev
+FROSTMAP_IMAGE    ?= frostmap:dev
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
 docker-build:
-	$(KIND_PROVIDER) build -t $(FM_IMAGE) -f docker/Dockerfile.fm .
-	$(KIND_PROVIDER) build -t $(FMTCTL_IMAGE) -f docker/Dockerfile.fmtctl .
+	$(KIND_PROVIDER) build -t $(FROSTMAP_IMAGE) -f docker/Dockerfile .
 
 kind-up:
-	kind create cluster --name $(KIND_CLUSTER_NAME) --config kind/cluster.yaml
-	bash kind/deploy-csi-hostpath.sh
+	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
+	bash k8s/kind/deploy-csi-hostpath.sh
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
@@ -83,12 +81,9 @@ kind-down:
 # tarball and loading via `kind load image-archive`.
 kind-load: docker-build
 ifeq ($(KIND_PROVIDER),podman)
-	podman save $(FM_IMAGE) -o /tmp/fm-kind.tar
-	kind load image-archive /tmp/fm-kind.tar --name $(KIND_CLUSTER_NAME)
-	rm -f /tmp/fm-kind.tar
-	podman save $(FMTCTL_IMAGE) -o /tmp/fmtctl-kind.tar
-	kind load image-archive /tmp/fmtctl-kind.tar --name $(KIND_CLUSTER_NAME)
-	rm -f /tmp/fmtctl-kind.tar
+	podman save $(FROSTMAP_IMAGE) -o /tmp/frostmap-kind.tar
+	kind load image-archive /tmp/frostmap-kind.tar --name $(KIND_CLUSTER_NAME)
+	rm -f /tmp/frostmap-kind.tar
 else
-	kind load docker-image $(FM_IMAGE) $(FMTCTL_IMAGE) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(FROSTMAP_IMAGE) --name $(KIND_CLUSTER_NAME)
 endif
