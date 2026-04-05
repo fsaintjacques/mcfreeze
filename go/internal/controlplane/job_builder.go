@@ -37,14 +37,40 @@ func (b *JobBuilder) diskSizeGB() int64 {
 	return 10
 }
 
+// annotationPVName is the Job annotation key that records the finalized PV
+// name. Its presence means FinalizeBuild already ran successfully, making
+// Poll idempotent across retries.
+const annotationPVName = "frostmap.io/pv-name"
+
 // resourceName returns a deterministic, DNS-safe name for a build resource.
+// Non-alphanumeric characters (except hyphens) are replaced with hyphens,
+// consecutive hyphens are collapsed, and trailing hyphens are trimmed.
 func resourceName(prefix, dataset, versionID string) string {
-	// K8s names must be <= 253 chars and DNS-safe. Truncate if needed.
 	name := fmt.Sprintf("%s-%s-%s", prefix, dataset, versionID)
 	name = strings.ToLower(name)
+
+	// Replace non-DNS characters with hyphens.
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else {
+			if !prevHyphen {
+				b.WriteByte('-')
+			}
+			prevHyphen = true
+		}
+	}
+	name = b.String()
+
+	// Truncate and trim trailing hyphens.
 	if len(name) > 253 {
 		name = name[:253]
 	}
+	name = strings.TrimRight(name, "-")
+
 	return name
 }
 
@@ -156,8 +182,9 @@ func (b *JobBuilder) Start(ctx context.Context, spec api.DatasetSpec, versionID 
 	return handle, nil
 }
 
-// Poll checks the Job status. When complete, calls DiskManager.FinalizeBuild
-// and returns the PV name in BuildResult.PVName.
+// Poll checks the Job status. On first completion detection, it calls
+// DiskManager.FinalizeBuild and records the PV name as a Job annotation so
+// that subsequent calls are idempotent.
 func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus, error) {
 	jobName := string(handle)
 
@@ -171,7 +198,15 @@ func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus,
 
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
-			// Extract dataset/versionID from labels to derive PVC name.
+			// Check if finalization already ran (idempotency).
+			if pvName, ok := job.Annotations[annotationPVName]; ok {
+				return BuildStatus{
+					Phase:  BuildComplete,
+					Result: BuildResult{PVName: pvName},
+				}, nil
+			}
+
+			// First completion: finalize the build.
 			dataset := job.Labels["frostmap.io/dataset"]
 			versionID := job.Labels["frostmap.io/version"]
 			pvcName := b.pvcName(dataset, versionID)
@@ -181,6 +216,22 @@ func (b *JobBuilder) Poll(ctx context.Context, handle BuildHandle) (BuildStatus,
 				return BuildStatus{
 					Phase: BuildFailed,
 					Error: fmt.Sprintf("finalize build: %v", err),
+				}, nil
+			}
+
+			// Record PV name on the Job so retries skip FinalizeBuild.
+			if job.Annotations == nil {
+				job.Annotations = make(map[string]string)
+			}
+			job.Annotations[annotationPVName] = pvName
+			if _, err := b.Client.BatchV1().Jobs(b.Namespace).Update(ctx, job, metav1.UpdateOptions{}); err != nil {
+				// Annotation failure is not fatal — the PV is finalized.
+				// Worst case: next Poll re-runs FinalizeBuild which will
+				// fail (PVC gone) and mark the build as failed. Log and
+				// return success anyway.
+				return BuildStatus{
+					Phase:  BuildComplete,
+					Result: BuildResult{PVName: pvName},
 				}, nil
 			}
 

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -310,5 +311,105 @@ func TestJobBuilder_Cancel_Idempotent(t *testing.T) {
 	// Cancel a non-existent build — should not error.
 	if err := jb.Cancel(ctx, BuildHandle("nonexistent-job")); err != nil {
 		t.Fatalf("Cancel on nonexistent: %v", err)
+	}
+}
+
+func TestJobBuilder_Poll_Complete_Idempotent(t *testing.T) {
+	jb, cs := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Simulate Job completion.
+	job, _ := cs.BatchV1().Jobs(testNamespace).Get(ctx, string(handle), metav1.GetOptions{})
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+	}
+	cs.BatchV1().Jobs(testNamespace).UpdateStatus(ctx, job, metav1.UpdateOptions{})
+
+	// Simulate PVC bound.
+	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	pvName := "pv-users-v1"
+	pvc.Spec.VolumeName = pvName
+	pvc.Status.Phase = corev1.ClaimBound
+	cs.CoreV1().PersistentVolumeClaims(testNamespace).Update(ctx, pvc, metav1.UpdateOptions{})
+	cs.CoreV1().PersistentVolumeClaims(testNamespace).UpdateStatus(ctx, pvc, metav1.UpdateOptions{})
+
+	// Create backing PV.
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: pvName},
+		Spec: corev1.PersistentVolumeSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			},
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef: &corev1.ObjectReference{
+				Name:      "fm-pvc-users-v1",
+				Namespace: testNamespace,
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/test"},
+			},
+		},
+	}
+	cs.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
+
+	// First Poll — triggers FinalizeBuild.
+	s1, err := jb.Poll(ctx, handle)
+	if err != nil {
+		t.Fatalf("first Poll: %v", err)
+	}
+	if s1.Phase != BuildComplete {
+		t.Fatalf("first Poll phase = %v, want %v", s1.Phase, BuildComplete)
+	}
+	if s1.Result.PVName != pvName {
+		t.Errorf("first Poll PVName = %q, want %q", s1.Result.PVName, pvName)
+	}
+
+	// Second Poll — PVC is gone, but annotation makes it idempotent.
+	s2, err := jb.Poll(ctx, handle)
+	if err != nil {
+		t.Fatalf("second Poll: %v", err)
+	}
+	if s2.Phase != BuildComplete {
+		t.Errorf("second Poll phase = %v, want %v (should be idempotent)", s2.Phase, BuildComplete)
+	}
+	if s2.Result.PVName != pvName {
+		t.Errorf("second Poll PVName = %q, want %q", s2.Result.PVName, pvName)
+	}
+}
+
+func TestResourceName_DNSSanitization(t *testing.T) {
+	tests := []struct {
+		prefix, dataset, version string
+		want                     string
+	}{
+		{"fm-build", "users", "v1", "fm-build-users-v1"},
+		{"fm-build", "user_events", "v1", "fm-build-user-events-v1"},
+		{"fm-pvc", "my.dataset", "v2", "fm-pvc-my-dataset-v2"},
+		{"fm-config", "UPPER", "V1", "fm-config-upper-v1"},
+		{"fm-build", "a__b", "v1", "fm-build-a-b-v1"},
+		{"fm-build", "trailing-", "v1", "fm-build-trailing-v1"},
+	}
+	for _, tt := range tests {
+		got := resourceName(tt.prefix, tt.dataset, tt.version)
+		if got != tt.want {
+			t.Errorf("resourceName(%q, %q, %q) = %q, want %q", tt.prefix, tt.dataset, tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestResourceName_TruncateNoTrailingHyphen(t *testing.T) {
+	long := strings.Repeat("a", 250)
+	name := resourceName("fm", long, "v1")
+	if len(name) > 253 {
+		t.Errorf("name length = %d, want <= 253", len(name))
+	}
+	if strings.HasSuffix(name, "-") {
+		t.Errorf("name %q ends with hyphen", name)
 	}
 }
