@@ -44,6 +44,16 @@ pub struct SourceSpec {
     pub encoding: Option<EncodingSpec>,
     /// Exactly one source type must be set.
     pub bigquery: Option<BigQuerySource>,
+    pub csv: Option<CsvSource>,
+}
+
+/// CSV source — either inline data or a file path.
+#[derive(Debug, Deserialize)]
+pub struct CsvSource {
+    /// Inline CSV data (including header row).
+    pub data: Option<String>,
+    /// Path to a CSV file on disk.
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]

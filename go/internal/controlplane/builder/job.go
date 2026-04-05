@@ -26,7 +26,7 @@ type Job struct {
 	Client          kubernetes.Interface
 	Volumes         volume.Manager
 	Namespace       string
-	Image           string            // fm container image (e.g. "frostmap/fm:dev")
+	Image           string            // frostmap container image (must contain both fm and fmtctl)
 	ImagePullPolicy corev1.PullPolicy // defaults to IfNotPresent
 	StorageClass    string            // StorageClass for build PVCs
 	DiskSizeGB      int64             // PVC size in GiB (defaults to 10)
@@ -155,7 +155,10 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 							Name:            "fm",
 							Image:           b.Image,
 							ImagePullPolicy: b.imagePullPolicy(),
-							Command:         []string{"fm", "load", "config", "--config", "/config/" + workerConfigFile},
+							Command:         []string{"fmtctl", "job", "--config", "/config/" + workerConfigFile},
+							SecurityContext: &corev1.SecurityContext{
+								RunAsUser: ptrInt64(0), // PVC mounts are root-owned; build needs write access
+							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "output", MountPath: "/output"},
 								{Name: "config", MountPath: "/config", ReadOnly: true},
@@ -324,3 +327,5 @@ func (b *Job) deleteJobPods(ctx context.Context, jobName string) {
 		b.Client.CoreV1().Pods(b.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{})
 	}
 }
+
+func ptrInt64(v int64) *int64 { return &v }

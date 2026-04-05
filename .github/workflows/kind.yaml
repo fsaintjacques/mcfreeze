@@ -45,9 +45,9 @@ jobs:
       - name: Smoke test - CSI driver
         run: kubectl get csidriver hostpath.csi.k8s.io
 
-      - name: Smoke test - fm image runs
+      - name: Smoke test - frostmap image runs
         run: |
-          kubectl run smoke --image=frostmap/fm:dev --restart=Never --image-pull-policy=Never -- fm --version
+          kubectl run smoke --image=frostmap:dev --restart=Never --image-pull-policy=Never -- fm --version
           kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/smoke --timeout=30s
           kubectl delete pod smoke --ignore-not-found
 

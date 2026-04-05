@@ -84,7 +84,7 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 		Client:          cs,
 		Volumes:         dm,
 		Namespace:       ns,
-		Image:           "localhost/frostmap/fm:dev",
+		Image:           "localhost/frostmap:dev",
 		ImagePullPolicy: corev1.PullNever,
 		StorageClass:    "standard",
 		DiskSizeGB:      1,
@@ -98,6 +98,7 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 		Source: api.SourceSpec{
 			KeyColumn:   "key",
 			ValueColumn: "value",
+			CSV:         &api.CsvSource{Data: "key,value\nk1,v1\nk2,v2"},
 		},
 	}
 
@@ -183,7 +184,7 @@ func TestKindJob_Cancel(t *testing.T) {
 		Client:          cs,
 		Volumes:         dm,
 		Namespace:       ns,
-		Image:           "localhost/frostmap/fm:dev",
+		Image:           "localhost/frostmap:dev",
 		ImagePullPolicy: corev1.PullNever,
 		StorageClass:    "standard",
 		DiskSizeGB:      1,
@@ -197,6 +198,7 @@ func TestKindJob_Cancel(t *testing.T) {
 		Source: api.SourceSpec{
 			KeyColumn:   "key",
 			ValueColumn: "value",
+			CSV:         &api.CsvSource{Data: "key,value\nk1,v1\nk2,v2"},
 		},
 	}
 

@@ -16,6 +16,8 @@ func main() {
 		runNodeAgent(os.Args[2:])
 	case "control-plane":
 		runControlPlane(os.Args[2:])
+	case "job":
+		runJob(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "fmtctl: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -29,5 +31,6 @@ func usage() {
 Commands:
   node-agent      Run the node-side dataset lifecycle agent
   control-plane   Run the control-plane server
+  job             Run an fm build job (wrapper for fm load config)
 `)
 }

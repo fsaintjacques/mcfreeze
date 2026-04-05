@@ -107,8 +107,8 @@ func TestJob_Start(t *testing.T) {
 	if container.Image != "frostmap/fm:dev" {
 		t.Errorf("container image = %q, want %q", container.Image, "frostmap/fm:dev")
 	}
-	if container.Command[0] != "fm" {
-		t.Errorf("container command[0] = %q, want %q", container.Command[0], "fm")
+	if container.Command[0] != "fmtctl" || container.Command[1] != "job" {
+		t.Errorf("container command = %v, want [fmtctl job ...]", container.Command)
 	}
 
 	// Verify volume mounts.

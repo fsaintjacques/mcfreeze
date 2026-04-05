@@ -34,6 +34,15 @@ type SourceSpec struct {
 	Encoding *EncodingSpec `json:"encoding,omitempty"`
 	// Exactly one source type must be set.
 	BigQuery *BigQuerySource `json:"bigquery,omitempty"`
+	CSV      *CsvSource      `json:"csv,omitempty"`
+}
+
+// CsvSource describes a CSV data source — either inline data or a file path.
+type CsvSource struct {
+	// Data is inline CSV content (including the header row).
+	Data string `json:"data,omitempty"`
+	// Path is a filesystem path to a CSV file.
+	Path string `json:"path,omitempty"`
 }
 
 // BigQuerySource describes a BigQuery Storage Read API source.

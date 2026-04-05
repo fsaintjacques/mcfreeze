@@ -374,7 +374,7 @@ func (a *Agent) setPhaseWithMount(dataset, keyPrefix, versionID, pvName string, 
 }
 
 func (a *Agent) mountPath(dataset, versionID string) string {
-	return filepath.Join(a.cfg.MountBase, dataset, "v"+versionID)
+	return filepath.Join(a.cfg.MountBase, dataset, versionID)
 }
 
 // writeCatalog atomically writes catalog.json to the shared EmptyDir using a

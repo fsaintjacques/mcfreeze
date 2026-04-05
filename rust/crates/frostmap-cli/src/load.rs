@@ -235,7 +235,27 @@ impl Pipeline {
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(args: LoadArgs) -> Result<()> {
+pub async fn run(mut args: LoadArgs) -> Result<()> {
+    // In config mode, extract output/partitions/index_parallelism from the
+    // config file before building the pipeline. These override the CLI defaults
+    // so the config is self-contained.
+    if let Source::Config { ref config } = args.source {
+        let config_bytes = std::fs::read(config)
+            .with_context(|| format!("failed to read config file {}", config.display()))?;
+        let wc: WorkerConfig = serde_json::from_slice(&config_bytes)
+            .with_context(|| format!("failed to parse config file {}", config.display()))?;
+        if args.output.is_none() {
+            args.output = Some(wc.output);
+        }
+        if args.partitions == 64 {
+            // Only override if the user didn't explicitly set --partitions.
+            args.partitions = wc.partitions;
+        }
+        if args.index_parallelism == 2 {
+            args.index_parallelism = wc.index_parallelism;
+        }
+    }
+
     let pipeline = build_pipeline(&args).await?;
 
     if args.dry_run {
@@ -338,13 +358,44 @@ async fn build_pipeline(args: &LoadArgs) -> Result<Pipeline> {
             let wc: WorkerConfig = serde_json::from_slice(&config_bytes)
                 .with_context(|| format!("failed to parse config file {}", config.display()))?;
 
+            let encoding = wc.source.encoding.as_ref().and_then(|e| e.protobuf.clone());
+            let value_column = wc.source.value_column.unwrap_or_else(|| "value".into());
+
+            if let Some(csv) = &wc.source.csv {
+                let csv_source = if let Some(data) = &csv.data {
+                    info!(key_column = %wc.source.key_column, "loading CSV from inline data");
+                    CsvSource::from_reader(std::io::Cursor::new(data.as_bytes()), 8192)
+                        .context("failed to read inline CSV data")?
+                } else if let Some(path) = &csv.path {
+                    info!(file = %path.display(), key_column = %wc.source.key_column, "loading CSV from file");
+                    CsvSource::from_reader(
+                        std::fs::File::open(path)
+                            .with_context(|| format!("failed to open {}", path.display()))?,
+                        8192,
+                    )
+                    .context("failed to read CSV")?
+                } else {
+                    anyhow::bail!("csv source requires either 'data' or 'path'");
+                };
+
+                let schema = csv_source.schema().as_ref().clone();
+
+                return Ok(Pipeline {
+                    sources: vec![BoxedRecordBatchSource::new(csv_source)],
+                    schema,
+                    estimated_rows: None,
+                    key_column: wc.source.key_column,
+                    value_column,
+                    encoding,
+                    progress_secs: args.progress_secs,
+                });
+            }
+
             let bq = wc
                 .source
                 .bigquery
                 .as_ref()
-                .context("only bigquery source is currently supported in config mode")?;
-
-            let encoding = wc.source.encoding.as_ref().and_then(|e| e.protobuf.clone());
+                .context("source must specify either 'csv' or 'bigquery'")?;
 
             let (billing_project, table_resource) = parse_table(&bq.table, Some(&bq.project))?;
             let bq_config = BqSourceConfig {
@@ -374,7 +425,7 @@ async fn build_pipeline(args: &LoadArgs) -> Result<Pipeline> {
                 schema,
                 estimated_rows,
                 key_column: wc.source.key_column,
-                value_column: wc.source.value_column.unwrap_or_else(|| "value".into()),
+                value_column,
                 encoding,
                 progress_secs: args.progress_secs,
             })

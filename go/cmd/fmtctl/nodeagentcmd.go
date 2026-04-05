@@ -29,6 +29,7 @@ func runNodeAgent(args []string) {
 	fs.StringVar(&cfg.CatalogDir, "catalog-dir", "/run/kv", "shared EmptyDir for catalog.json")
 
 	csiDriver := fs.String("csi-driver", "pd.csi.storage.gke.io", "CSI driver name for VolumeAttachment")
+	mounterType := fs.String("mounter", "linux", "mount implementation: linux (real mount syscall) or fs (symlinks, for KIND)")
 	fs.Parse(args)
 
 	if cfg.ControlPlaneURL == "" || cfg.NodeName == "" {
@@ -51,7 +52,13 @@ func runNodeAgent(args []string) {
 	}
 
 	disks := &volume.K8sManager{Client: kubeClient, CSIDriver: *csiDriver}
-	mounter := mount.NewLinuxMounter()
+	var mounter mount.Mounter
+	switch *mounterType {
+	case "fs":
+		mounter = mount.NewFSMounter()
+	default:
+		mounter = mount.NewLinuxMounter()
+	}
 	assignments := assignment.NewHTTPSource(cfg.ControlPlaneURL, cfg.NodeName)
 	reporter := assignment.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
 	versions := version.NewHTTPChecker("http://localhost:7777")

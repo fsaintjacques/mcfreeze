@@ -1,0 +1,91 @@
+# --- Control-plane ServiceAccount + RBAC ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frostmap-control-plane
+---
+# Namespaced resources: Jobs, ConfigMaps, PVCs, Pods (for deleteJobPods).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: frostmap-control-plane
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "update", "delete", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "update", "delete", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frostmap-control-plane
+subjects:
+  - kind: ServiceAccount
+    name: frostmap-control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: frostmap-control-plane
+---
+# Cluster-scoped: PersistentVolumes (create, get, update, delete, list).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: frostmap-control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["create", "get", "update", "delete", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: frostmap-control-plane
+subjects:
+  - kind: ServiceAccount
+    name: frostmap-control-plane
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: frostmap-control-plane
+---
+# --- Node-agent ServiceAccount + RBAC ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frostmap-node-agent
+---
+# Cluster-scoped: VolumeAttachments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: frostmap-node-agent
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["create", "get", "delete", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: frostmap-node-agent
+subjects:
+  - kind: ServiceAccount
+    name: frostmap-node-agent
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: frostmap-node-agent

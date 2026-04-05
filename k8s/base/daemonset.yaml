@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: frostmap-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: frostmap-node-agent
+  template:
+    metadata:
+      labels:
+        app: frostmap-node-agent
+    spec:
+      serviceAccountName: frostmap-node-agent
+      containers:
+        - name: node-agent
+          image: frostmap:dev
+          args:
+            - node-agent
+            - --control-plane-url=http://frostmap-control-plane:8080
+            - --csi-driver=hostpath.csi.k8s.io
+            - --mounter=fs
+            - --mount-base=/mnt/kv
+            - --catalog-dir=/run/kv
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: catalog
+              mountPath: /run/kv
+            - name: mounts
+              mountPath: /mnt/kv
+              mountPropagation: Bidirectional
+            - name: csi-data
+              mountPath: /var/lib/csi-hostpath-data
+              readOnly: true
+          securityContext:
+            privileged: true
+        - name: kv-server
+          image: frostmap:dev
+          command: ["fm"]
+          args:
+            - serve
+            - catalog
+            - --catalog=/run/kv/catalog.json
+            - --tcp=0.0.0.0:11211
+            - --metrics=0.0.0.0:7777
+          ports:
+            - containerPort: 11211
+              name: memcache
+            - containerPort: 7777
+              name: metrics
+          volumeMounts:
+            - name: catalog
+              mountPath: /run/kv
+              readOnly: true
+            - name: mounts
+              mountPath: /mnt/kv
+              mountPropagation: HostToContainer
+            - name: csi-data
+              mountPath: /var/lib/csi-hostpath-data
+              readOnly: true
+      volumes:
+        - name: catalog
+          emptyDir: {}
+        - name: mounts
+          emptyDir: {}
+        - name: csi-data
+          hostPath:
+            path: /var/lib/csi-hostpath-data
+            type: DirectoryOrCreate
