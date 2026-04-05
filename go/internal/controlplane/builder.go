@@ -24,7 +24,8 @@ const (
 
 // BuildResult holds the output of a completed build.
 type BuildResult struct {
-	SnapshotPath string // on-disk location of the snapshot
+	SnapshotPath string // on-disk location of the snapshot (ForkBuilder)
+	PVName       string // Kubernetes PersistentVolume name (JobBuilder)
 	Descriptor   string // base64-encoded FileDescriptorSet (empty for raw encoding)
 	MessageName  string // fully-qualified protobuf message name (empty for raw encoding)
 }

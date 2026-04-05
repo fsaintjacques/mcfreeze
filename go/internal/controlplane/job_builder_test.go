@@ -1,0 +1,314 @@
+package controlplane
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"frostmap.io/fmtctl/api"
+)
+
+var testSpec = api.DatasetSpec{
+	Name:       "users",
+	KeyPrefix:  "users",
+	ShardCount: 4,
+	Retention:  2,
+	Source: api.SourceSpec{
+		KeyColumn:   "id",
+		ValueColumn: "payload",
+	},
+}
+
+func newTestJobBuilder() (*JobBuilder, *fake.Clientset) {
+	cs := fake.NewSimpleClientset()
+	dm := &LocalPathDiskManager{Client: cs, Namespace: testNamespace}
+	return &JobBuilder{
+		Client:       cs,
+		DiskManager:  dm,
+		Namespace:    testNamespace,
+		Image:        "frostmap/fm:dev",
+		StorageClass: "local-path",
+		DiskSizeGB:   10,
+	}, cs
+}
+
+func TestJobBuilder_Start(t *testing.T) {
+	jb, cs := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	wantHandle := BuildHandle("fm-build-users-v1")
+	if handle != wantHandle {
+		t.Errorf("handle = %q, want %q", handle, wantHandle)
+	}
+
+	// Verify PVC created.
+	pvc, err := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PVC: %v", err)
+	}
+	if pvc.Spec.AccessModes[0] != corev1.ReadWriteOnce {
+		t.Errorf("PVC access mode = %v, want ReadWriteOnce", pvc.Spec.AccessModes[0])
+	}
+	wantSize := resource.MustParse("10Gi")
+	gotSize := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if gotSize.Cmp(wantSize) != 0 {
+		t.Errorf("PVC size = %v, want %v", gotSize.String(), wantSize.String())
+	}
+
+	// Verify ConfigMap created with correct worker.json.
+	cm, err := cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "fm-config-users-v1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get ConfigMap: %v", err)
+	}
+	var wc workerConfig
+	if err := json.Unmarshal([]byte(cm.Data[workerConfigFile]), &wc); err != nil {
+		t.Fatalf("unmarshal worker.json: %v", err)
+	}
+	if wc.Output != "/output" {
+		t.Errorf("workerConfig.Output = %q, want %q", wc.Output, "/output")
+	}
+	if wc.Partitions != 4 {
+		t.Errorf("workerConfig.Partitions = %d, want %d", wc.Partitions, 4)
+	}
+	if wc.Source.KeyColumn != "id" {
+		t.Errorf("workerConfig.Source.KeyColumn = %q, want %q", wc.Source.KeyColumn, "id")
+	}
+
+	// Verify Job created with correct spec.
+	job, err := cs.BatchV1().Jobs(testNamespace).Get(ctx, "fm-build-users-v1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	if job.Labels["frostmap.io/dataset"] != "users" {
+		t.Errorf("Job label dataset = %q, want %q", job.Labels["frostmap.io/dataset"], "users")
+	}
+	if job.Labels["frostmap.io/version"] != "v1" {
+		t.Errorf("Job label version = %q, want %q", job.Labels["frostmap.io/version"], "v1")
+	}
+	if *job.Spec.BackoffLimit != 0 {
+		t.Errorf("backoffLimit = %d, want 0", *job.Spec.BackoffLimit)
+	}
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Image != "frostmap/fm:dev" {
+		t.Errorf("container image = %q, want %q", container.Image, "frostmap/fm:dev")
+	}
+	if container.Command[0] != "fm" {
+		t.Errorf("container command[0] = %q, want %q", container.Command[0], "fm")
+	}
+
+	// Verify volume mounts.
+	if len(container.VolumeMounts) != 2 {
+		t.Fatalf("volume mounts = %d, want 2", len(container.VolumeMounts))
+	}
+	var outputMount, configMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		switch container.VolumeMounts[i].Name {
+		case "output":
+			outputMount = &container.VolumeMounts[i]
+		case "config":
+			configMount = &container.VolumeMounts[i]
+		}
+	}
+	if outputMount == nil || outputMount.MountPath != "/output" {
+		t.Errorf("output mount = %+v, want /output", outputMount)
+	}
+	if configMount == nil || configMount.MountPath != "/config" || !configMount.ReadOnly {
+		t.Errorf("config mount = %+v, want /config read-only", configMount)
+	}
+}
+
+func TestJobBuilder_Start_Idempotent(t *testing.T) {
+	jb, _ := newTestJobBuilder()
+	ctx := context.Background()
+
+	h1, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+
+	h2, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("second Start: %v", err)
+	}
+
+	if h1 != h2 {
+		t.Errorf("handles differ: %q vs %q", h1, h2)
+	}
+}
+
+func TestJobBuilder_Poll_Running(t *testing.T) {
+	jb, _ := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	status, err := jb.Poll(ctx, handle)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if status.Phase != BuildRunning {
+		t.Errorf("phase = %v, want %v", status.Phase, BuildRunning)
+	}
+}
+
+func TestJobBuilder_Poll_Complete(t *testing.T) {
+	jb, cs := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Simulate Job completion by setting the condition.
+	job, _ := cs.BatchV1().Jobs(testNamespace).Get(ctx, string(handle), metav1.GetOptions{})
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+	}
+	cs.BatchV1().Jobs(testNamespace).UpdateStatus(ctx, job, metav1.UpdateOptions{})
+
+	// Simulate PVC bound (so FinalizeBuild works).
+	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	pvName := "pv-users-v1"
+	pvc.Spec.VolumeName = pvName
+	pvc.Status.Phase = corev1.ClaimBound
+	cs.CoreV1().PersistentVolumeClaims(testNamespace).Update(ctx, pvc, metav1.UpdateOptions{})
+	cs.CoreV1().PersistentVolumeClaims(testNamespace).UpdateStatus(ctx, pvc, metav1.UpdateOptions{})
+
+	// Create the backing PV.
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: pvName},
+		Spec: corev1.PersistentVolumeSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("10Gi"),
+			},
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef: &corev1.ObjectReference{
+				Name:      "fm-pvc-users-v1",
+				Namespace: testNamespace,
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/test"},
+			},
+		},
+	}
+	cs.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
+
+	status, err := jb.Poll(ctx, handle)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if status.Phase != BuildComplete {
+		t.Errorf("phase = %v, want %v", status.Phase, BuildComplete)
+	}
+	if status.Result.PVName != pvName {
+		t.Errorf("PVName = %q, want %q", status.Result.PVName, pvName)
+	}
+
+	// Verify PV was finalized.
+	finalPV, _ := cs.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if finalPV.Spec.ClaimRef != nil {
+		t.Errorf("PV claimRef should be nil after finalize")
+	}
+	if finalPV.Spec.AccessModes[0] != corev1.ReadOnlyMany {
+		t.Errorf("PV accessMode = %v, want ReadOnlyMany", finalPV.Spec.AccessModes[0])
+	}
+}
+
+func TestJobBuilder_Poll_Failed(t *testing.T) {
+	jb, cs := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Simulate Job failure.
+	job, _ := cs.BatchV1().Jobs(testNamespace).Get(ctx, string(handle), metav1.GetOptions{})
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "OOMKilled"},
+	}
+	cs.BatchV1().Jobs(testNamespace).UpdateStatus(ctx, job, metav1.UpdateOptions{})
+
+	status, err := jb.Poll(ctx, handle)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if status.Phase != BuildFailed {
+		t.Errorf("phase = %v, want %v", status.Phase, BuildFailed)
+	}
+	if status.Error != "OOMKilled" {
+		t.Errorf("error = %q, want %q", status.Error, "OOMKilled")
+	}
+}
+
+func TestJobBuilder_Poll_NotFound(t *testing.T) {
+	jb, _ := newTestJobBuilder()
+	ctx := context.Background()
+
+	status, err := jb.Poll(ctx, BuildHandle("nonexistent-job"))
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if status.Phase != BuildNotFound {
+		t.Errorf("phase = %v, want %v", status.Phase, BuildNotFound)
+	}
+}
+
+func TestJobBuilder_Cancel(t *testing.T) {
+	jb, cs := newTestJobBuilder()
+	ctx := context.Background()
+
+	handle, err := jb.Start(ctx, testSpec, "v1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if err := jb.Cancel(ctx, handle); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	// Verify Job deleted.
+	_, err = cs.BatchV1().Jobs(testNamespace).Get(ctx, string(handle), metav1.GetOptions{})
+	if err == nil {
+		t.Error("Job should be deleted after Cancel")
+	}
+
+	// Verify ConfigMap deleted.
+	_, err = cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "fm-config-users-v1", metav1.GetOptions{})
+	if err == nil {
+		t.Error("ConfigMap should be deleted after Cancel")
+	}
+
+	// Verify PVC deleted.
+	_, err = cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	if err == nil {
+		t.Error("PVC should be deleted after Cancel")
+	}
+}
+
+func TestJobBuilder_Cancel_Idempotent(t *testing.T) {
+	jb, _ := newTestJobBuilder()
+	ctx := context.Background()
+
+	// Cancel a non-existent build — should not error.
+	if err := jb.Cancel(ctx, BuildHandle("nonexistent-job")); err != nil {
+		t.Fatalf("Cancel on nonexistent: %v", err)
+	}
+}
