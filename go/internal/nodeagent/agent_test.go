@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/nodeagent/assignment"
-	"frostmap.io/fmtctl/internal/nodeagent/mount"
-	"frostmap.io/fmtctl/internal/nodeagent/version"
-	"frostmap.io/fmtctl/internal/nodeagent/volume"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 )
 
 // helpers

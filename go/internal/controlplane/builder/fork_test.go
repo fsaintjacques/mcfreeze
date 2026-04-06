@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 )
 
 func TestForkBuilder_StartPollComplete(t *testing.T) {

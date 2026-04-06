@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // TestCatalogHotSwap verifies that writing a new catalog.json triggers the

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // workerConfig is the JSON config consumed by `fm load config --config`.

@@ -1,4 +1,4 @@
-module frostmap.io/fmtctl
+module github.com/fsaintjacques/frostmap/go
 
 go 1.26.1
 

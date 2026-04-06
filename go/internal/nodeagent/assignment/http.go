@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // HTTPSource implements Source via the control-plane HTTP API.

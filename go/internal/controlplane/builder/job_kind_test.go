@@ -14,8 +14,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane/volume"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
 )
 
 // kindClientset creates a Kubernetes clientset from the default kubeconfig.

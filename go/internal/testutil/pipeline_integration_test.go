@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // TestMemcachePipeline sends multiple mg commands in a single TCP write and

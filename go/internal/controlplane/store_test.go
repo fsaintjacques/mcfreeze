@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // --- version state machine tests ---

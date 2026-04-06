@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 func startTestServer(t *testing.T) (*Server, *Store) {

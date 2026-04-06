@@ -13,9 +13,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"frostmap.io/fmtctl/internal/controlplane"
-	"frostmap.io/fmtctl/internal/controlplane/builder"
-	"frostmap.io/fmtctl/internal/controlplane/volume"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
 )
 
 func runControlPlane(args []string) {

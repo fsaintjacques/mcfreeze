@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 )
 
 // VersionEntry extends api.VersionRecord with the local snapshot path
