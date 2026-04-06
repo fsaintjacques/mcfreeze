@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/internal/nodeagent/volume"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 )
 
 func newFS(t *testing.T) *volume.FSManager {

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"frostmap.io/fmtctl/internal/nodeagent/mount"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
 )
 
 func newFS(t *testing.T) (*mount.FSMounter, string) {

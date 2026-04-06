@@ -244,7 +244,7 @@ contains the canonical type definitions:
 
 ```
 go/
-  go.mod                          module frostmap.io/fmtctl
+  go.mod                          module github.com/fsaintjacques/frostmap/go
   api/types.go                    shared wire types
   internal/
     volume/

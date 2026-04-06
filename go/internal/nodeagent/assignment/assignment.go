@@ -5,7 +5,7 @@ package assignment
 import (
 	"context"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // Source provides dataset assignments for a node.

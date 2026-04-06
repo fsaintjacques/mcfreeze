@@ -12,11 +12,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"frostmap.io/fmtctl/internal/nodeagent"
-	"frostmap.io/fmtctl/internal/nodeagent/assignment"
-	"frostmap.io/fmtctl/internal/nodeagent/mount"
-	"frostmap.io/fmtctl/internal/nodeagent/version"
-	"frostmap.io/fmtctl/internal/nodeagent/volume"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 )
 
 func runNodeAgent(args []string) {

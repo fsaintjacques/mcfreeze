@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // FakeSource returns pre-configured responses via a channel.

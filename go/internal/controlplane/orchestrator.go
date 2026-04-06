@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 )
 
 // Orchestrator ties the store, builder, and server together. It provides a

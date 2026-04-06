@@ -15,15 +15,15 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane"
-	"frostmap.io/fmtctl/internal/controlplane/builder"
-	"frostmap.io/fmtctl/internal/nodeagent"
-	"frostmap.io/fmtctl/internal/nodeagent/assignment"
-	"frostmap.io/fmtctl/internal/nodeagent/mount"
-	"frostmap.io/fmtctl/internal/nodeagent/version"
-	"frostmap.io/fmtctl/internal/nodeagent/volume"
-	"frostmap.io/fmtctl/internal/testutil"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
+	"github.com/fsaintjacques/frostmap/go/internal/testutil"
 )
 
 // TestFullLoop exercises the entire pipeline:

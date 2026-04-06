@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // Server is a running frostmap-server in catalog mode.

@@ -28,8 +28,8 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 
-	"frostmap.io/fmtctl/api"
-	"frostmap.io/fmtctl/internal/controlplane"
+	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
 )
 
 const (

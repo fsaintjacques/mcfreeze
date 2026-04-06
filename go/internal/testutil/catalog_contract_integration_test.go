@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // TestCatalogContract verifies the full Go → Rust contract:

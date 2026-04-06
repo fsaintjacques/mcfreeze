@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 const maxBodySize = 1 << 20 // 1 MiB

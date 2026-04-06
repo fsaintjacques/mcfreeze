@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"frostmap.io/fmtctl/api"
+	"github.com/fsaintjacques/frostmap/go/api"
 )
 
 // Fake implements Async by running fm load csv synchronously
