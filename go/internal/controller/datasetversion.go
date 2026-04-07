@@ -1,0 +1,293 @@
+// Package controller hosts the controller-runtime reconcilers introduced in
+// Phase 5 of the Kubernetes-native control plane. They replace the
+// imperative Orchestrator/Store/CRDStore stack with a declarative,
+// level-triggered reconciliation model.
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/fsaintjacques/frostmap/go/api"
+	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// DefaultBuildTimeout is the maximum duration a DatasetVersion may stay in
+// state=building before the reconciler cancels the build and marks it failed.
+const DefaultBuildTimeout = 30 * time.Minute
+
+// DatasetVersionReconciler drives a single DatasetVersion through its
+// lifecycle: building → ready → active → retired → (deleted), or
+// building → failed (terminal).
+//
+// State transitions are level-triggered: each Reconcile call observes the
+// current CR state, advances it at most one step, and either patches the
+// status or returns a RequeueAfter to keep polling.
+type DatasetVersionReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+
+	// Builder kicks off and polls underlying snapshot builds (Job, fork, fake).
+	Builder builder.Async
+
+	// Volume manages PV deletion when a retired version is fully drained.
+	Volume volume.Manager
+
+	// Broker is the in-memory state shared with the HTTP server. The
+	// reconciler reads it to gate retirement on node convergence.
+	Broker *controlplane.AssignmentBroker
+
+	// VolumeBase is the FSVolumeManager base directory used by the legacy
+	// fork builder; snapshots are symlinked into it so the node-agent can
+	// find them. Empty when running with the K8s Job builder.
+	VolumeBase string
+
+	// BuildTimeout overrides DefaultBuildTimeout when non-zero.
+	BuildTimeout time.Duration
+}
+
+// Reconcile implements the state machine.
+func (r *DatasetVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var v v1alpha1.DatasetVersion
+	if err := r.Get(ctx, req.NamespacedName, &v); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Treat empty state as "just created, transition to building".
+	state := v.Status.State
+	if state == "" {
+		state = string(api.StateBuilding)
+	}
+
+	switch state {
+	case string(api.StateBuilding):
+		return r.reconcileBuilding(ctx, &v)
+	case string(api.StateReady):
+		return r.reconcileReady(ctx, &v)
+	case string(api.StateActive):
+		// NodeAssignmentReconciler owns rollout state; nothing to do here.
+		return ctrl.Result{}, nil
+	case string(api.StateRetired):
+		return r.reconcileRetired(ctx, &v)
+	case string(api.StateFailed):
+		return ctrl.Result{}, nil
+	default:
+		return ctrl.Result{}, fmt.Errorf("unknown state %q", state)
+	}
+}
+
+// reconcileBuilding starts the underlying build (if not already started),
+// polls it, and transitions on completion/failure/timeout.
+func (r *DatasetVersionReconciler) reconcileBuilding(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
+	// First reconcile: kick off the build.
+	if v.Status.BuildJob == "" {
+		// Fetch parent Dataset for the spec.
+		var ds v1alpha1.Dataset
+		if err := r.Get(ctx, client.ObjectKey{Namespace: v.Namespace, Name: v.Spec.Dataset}, &ds); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.markFailed(ctx, v, fmt.Sprintf("parent Dataset %q not found", v.Spec.Dataset))
+			}
+			return ctrl.Result{}, err
+		}
+		spec := v1alpha1.ToAPIDatasetSpec(&ds)
+		spec.Name = ds.Name
+
+		handle, err := r.Builder.Start(ctx, spec, v.Spec.VersionID)
+		if err != nil {
+			return r.markFailed(ctx, v, fmt.Sprintf("start build: %v", err))
+		}
+
+		// Persist the handle and mark explicitly as building (covers the
+		// empty-state case where we treated it as building implicitly).
+		patch := client.MergeFrom(v.DeepCopy())
+		v.Status.State = string(api.StateBuilding)
+		v.Status.BuildJob = string(handle)
+		if err := r.Status().Patch(ctx, v, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// Build timeout?
+	timeout := r.BuildTimeout
+	if timeout == 0 {
+		timeout = DefaultBuildTimeout
+	}
+	if !v.CreationTimestamp.IsZero() && time.Since(v.CreationTimestamp.Time) > timeout {
+		slog.Info("build timeout exceeded", "dataset", v.Spec.Dataset, "version", v.Spec.VersionID)
+		_ = r.Builder.Cancel(ctx, builder.Handle(v.Status.BuildJob))
+		return r.markFailed(ctx, v, "build timeout exceeded")
+	}
+
+	status, err := r.Builder.Poll(ctx, builder.Handle(v.Status.BuildJob))
+	if err != nil {
+		// Transient error: requeue.
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+	}
+
+	switch status.Phase {
+	case builder.Running:
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+
+	case builder.Complete:
+		snapPath := status.Result.SnapshotPath
+		pvName := status.Result.PVName
+
+		// Local fork builder: symlink the snapshot into VolumeBase under a
+		// synthetic PV name so the node-agent can find it.
+		if pvName == "" {
+			pvName = fmt.Sprintf("pv-%s-%s", v.Spec.Dataset, v.Spec.VersionID)
+			if r.VolumeBase != "" {
+				pvLink := filepath.Join(r.VolumeBase, pvName)
+				if err := os.Symlink(snapPath, pvLink); err != nil && !os.IsExist(err) {
+					return r.markFailed(ctx, v, fmt.Sprintf("symlink pv: %v", err))
+				}
+			}
+		}
+
+		// Optional descriptor extraction (local builds only).
+		var descriptor, msgName string
+		if snapPath != "" {
+			descriptor, msgName = readDescriptorFromMeta(snapPath)
+		}
+
+		patch := client.MergeFrom(v.DeepCopy())
+		v.Status.State = string(api.StateReady)
+		v.Status.PVName = pvName
+		v.Status.SnapshotPath = snapPath
+		if descriptor != "" {
+			v.Status.Descriptor = descriptor
+		}
+		if msgName != "" {
+			v.Status.MessageName = msgName
+		}
+		if err := r.Status().Patch(ctx, v, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Immediately requeue so reconcileReady runs and promotes.
+		return ctrl.Result{Requeue: true}, nil
+
+	case builder.Failed:
+		return r.markFailed(ctx, v, status.Error)
+
+	case builder.NotFound:
+		return r.markFailed(ctx, v, "build handle not found; orphaned")
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// reconcileReady auto-promotes a ready version to active and demotes any
+// existing active sibling to retired.
+func (r *DatasetVersionReconciler) reconcileReady(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
+	// List sibling versions for this dataset.
+	var siblings v1alpha1.DatasetVersionList
+	if err := r.List(ctx, &siblings,
+		client.InNamespace(v.Namespace),
+		client.MatchingLabels{v1alpha1.DatasetLabel: v.Spec.Dataset},
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Demote any current active sibling.
+	for i := range siblings.Items {
+		s := &siblings.Items[i]
+		if s.Name == v.Name || s.Status.State != string(api.StateActive) {
+			continue
+		}
+		patch := client.MergeFrom(s.DeepCopy())
+		s.Status.State = string(api.StateRetired)
+		if err := r.Status().Patch(ctx, s, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Promote self.
+	patch := client.MergeFrom(v.DeepCopy())
+	v.Status.State = string(api.StateActive)
+	if err := r.Status().Patch(ctx, v, patch); err != nil {
+		return ctrl.Result{}, err
+	}
+	slog.Info("promoted to active", "dataset", v.Spec.Dataset, "version", v.Spec.VersionID)
+	return ctrl.Result{}, nil
+}
+
+// reconcileRetired waits for the version to be drained from every node, then
+// deletes the PV and the CR.
+func (r *DatasetVersionReconciler) reconcileRetired(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
+	if r.Broker == nil || !r.Broker.IsDrained(v.Spec.Dataset, v.Spec.VersionID) {
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	if v.Status.PVName != "" && r.Volume != nil {
+		if err := r.Volume.DeletePV(ctx, v.Status.PVName); err != nil {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, err
+		}
+	}
+
+	if err := r.Delete(ctx, v); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	slog.Info("retired and deleted", "dataset", v.Spec.Dataset, "version", v.Spec.VersionID)
+	return ctrl.Result{}, nil
+}
+
+// markFailed transitions the version to failed with an error message.
+// Always returns no requeue.
+func (r *DatasetVersionReconciler) markFailed(ctx context.Context, v *v1alpha1.DatasetVersion, reason string) (ctrl.Result, error) {
+	patch := client.MergeFrom(v.DeepCopy())
+	v.Status.State = string(api.StateFailed)
+	v.Status.Error = reason
+	if err := r.Status().Patch(ctx, v, patch); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// SetupWithManager registers the reconciler with a controller-runtime manager.
+func (r *DatasetVersionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha1.DatasetVersion{}).
+		Named("datasetversion").
+		Complete(r)
+}
+
+// readDescriptorFromMeta reads the protobuf descriptor and message name from
+// a snapshot's meta.json. Returns empty strings if the file is missing, the
+// encoding section is absent, or any parse error occurs.
+func readDescriptorFromMeta(snapshotPath string) (descriptor, messageName string) {
+	data, err := os.ReadFile(filepath.Join(snapshotPath, "meta.json"))
+	if err != nil {
+		return "", ""
+	}
+	var meta struct {
+		Encoding *struct {
+			Protobuf *struct {
+				Descriptor  string `json:"descriptor"`
+				MessageName string `json:"message_name"`
+			} `json:"protobuf"`
+		} `json:"encoding"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", ""
+	}
+	if meta.Encoding == nil || meta.Encoding.Protobuf == nil {
+		return "", ""
+	}
+	return meta.Encoding.Protobuf.Descriptor, meta.Encoding.Protobuf.MessageName
+}
