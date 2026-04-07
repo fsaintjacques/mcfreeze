@@ -23,7 +23,13 @@ type VersionEntry struct {
 // Store is the control-plane state interface. Implementations must be safe
 // for concurrent use.
 type Store interface {
-	// Assignment management
+	// Broker returns the AssignmentBroker that owns ephemeral per-node state
+	// (assignments, generation, notify channels, nodeStates). Reconcilers
+	// and the HTTP server share the same broker instance.
+	Broker() *AssignmentBroker
+
+	// Assignment management (delegated to Broker; kept on Store for backwards
+	// compatibility with the existing Server and Orchestrator).
 	SetAssignments(nodeName string, assignments []api.NodeAssignment)
 	GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{})
 	MergeAssignment(nodeName string, assignment api.NodeAssignment)
@@ -53,116 +59,40 @@ type Store interface {
 	GetBuildingVersions() []VersionEntry
 }
 
-// MemStore holds the control-plane state in memory. All methods are safe for
+// MemStore holds the control-plane state in memory. The ephemeral per-node
+// state (assignments, generation, notify channels, nodeStates, registered
+// nodes) lives in an embedded *AssignmentBroker so the HTTP server and the
+// reconcilers introduced in Phase 5 can share it. All methods are safe for
 // concurrent use.
 type MemStore struct {
+	*AssignmentBroker
+
 	mu sync.Mutex
 
 	// Dataset specs keyed by dataset name.
 	specs map[string]api.DatasetSpec
 	// Versions per dataset, ordered by creation time.
 	versions map[string][]VersionEntry
-	// Registered node names (assignments are pushed to all registered nodes).
-	nodes map[string]struct{}
-
-	// assignments keyed by node name.
-	assignments map[string][]api.NodeAssignment
-	// generation per node; incremented on every assignment change.
-	generation map[string]int64
-	// notify channels per node; closed and replaced when assignments change
-	// to wake blocked long-poll requests.
-	notify map[string]chan struct{}
-
-	// nodeStates keyed by node name; last reported state.
-	nodeStates map[string]api.NodeState
 }
 
-// NewMemStore creates an empty MemStore.
+// NewMemStore creates an empty MemStore backed by a fresh AssignmentBroker.
 func NewMemStore() *MemStore {
+	return NewMemStoreWithBroker(NewAssignmentBroker())
+}
+
+// NewMemStoreWithBroker creates a MemStore that shares the given broker.
+// Useful when the broker must be wired into multiple components (HTTP server,
+// reconcilers) that all need the same in-memory state.
+func NewMemStoreWithBroker(broker *AssignmentBroker) *MemStore {
 	return &MemStore{
-		specs:       make(map[string]api.DatasetSpec),
-		versions:    make(map[string][]VersionEntry),
-		nodes:       make(map[string]struct{}),
-		assignments: make(map[string][]api.NodeAssignment),
-		generation:  make(map[string]int64),
-		notify:      make(map[string]chan struct{}),
-		nodeStates:  make(map[string]api.NodeState),
+		AssignmentBroker: broker,
+		specs:            make(map[string]api.DatasetSpec),
+		versions:         make(map[string][]VersionEntry),
 	}
 }
 
-// SetAssignments replaces the assignments for a node, bumps the generation,
-// and wakes any blocked long-poll.
-func (s *MemStore) SetAssignments(nodeName string, assignments []api.NodeAssignment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.assignments[nodeName] = assignments
-	s.generation[nodeName]++
-
-	// Wake blocked long-poll by closing the old channel and creating a new one.
-	if ch, ok := s.notify[nodeName]; ok {
-		close(ch)
-	}
-	s.notify[nodeName] = make(chan struct{})
-}
-
-// GetAssignments returns the current assignments and generation for a node.
-// If the store's generation is greater than afterGeneration, it returns
-// immediately. Otherwise it returns a channel that will be closed when the
-// assignments change — the caller should select on it.
-func (s *MemStore) GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	gen := s.generation[nodeName]
-	resp := api.AssignmentsResponse{
-		Generation:  gen,
-		Assignments: s.assignments[nodeName],
-	}
-
-	if gen > afterGeneration {
-		return resp, nil // caller should return immediately
-	}
-
-	// Ensure a notify channel exists for long-poll blocking.
-	ch, ok := s.notify[nodeName]
-	if !ok {
-		ch = make(chan struct{})
-		s.notify[nodeName] = ch
-	}
-
-	return resp, ch
-}
-
-// ReportState stores the latest NodeState for a node.
-func (s *MemStore) ReportState(nodeName string, state api.NodeState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nodeStates[nodeName] = state
-}
-
-// GetNodeState returns the last reported state for a node.
-func (s *MemStore) GetNodeState(nodeName string) (api.NodeState, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, ok := s.nodeStates[nodeName]
-	return state, ok
-}
-
-// MergeAssignment atomically updates or adds an assignment for a single
-// dataset on a node. Existing assignments for other datasets are preserved.
-func (s *MemStore) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mergeAssignmentLocked(nodeName, assignment)
-}
-
-// Generation returns the current generation for a node.
-func (s *MemStore) Generation(nodeName string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.generation[nodeName]
-}
+// Broker returns the underlying AssignmentBroker.
+func (s *MemStore) Broker() *AssignmentBroker { return s.AssignmentBroker }
 
 // ---------------------------------------------------------------------------
 // Dataset and version lifecycle
@@ -173,13 +103,6 @@ func (s *MemStore) RegisterDataset(spec api.DatasetSpec) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.specs[spec.Name] = spec
-}
-
-// RegisterNode registers a node name so Promote can push assignments to it.
-func (s *MemStore) RegisterNode(nodeName string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nodes[nodeName] = struct{}{}
 }
 
 // GetDatasetSpec returns the spec for a dataset.
@@ -301,14 +224,14 @@ func (s *MemStore) Promote(dataset, versionID string) error {
 
 	v.State = api.StateActive
 
-	// Push assignment to all registered nodes.
+	// Push assignment to all registered nodes via the broker.
 	assignment := api.NodeAssignment{
 		Dataset:   dataset,
 		KeyPrefix: spec.KeyPrefix,
 		Version:   v.VersionRecord,
 	}
-	for nodeName := range s.nodes {
-		s.mergeAssignmentLocked(nodeName, assignment)
+	for _, nodeName := range s.AssignmentBroker.Nodes() {
+		s.AssignmentBroker.MergeAssignment(nodeName, assignment)
 	}
 
 	return nil
@@ -352,6 +275,10 @@ type RolloutStatus struct {
 // RolloutStatus returns the convergence status for a dataset by diffing the
 // active assignment against reported NodeStates.
 func (s *MemStore) RolloutStatus(dataset string) RolloutStatus {
+	// Snapshot broker state without holding s.mu (lock order: s.mu → broker.mu).
+	nodes := s.AssignmentBroker.Nodes()
+	nodeStates := s.AssignmentBroker.SnapshotNodeStates()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -368,8 +295,8 @@ func (s *MemStore) RolloutStatus(dataset string) RolloutStatus {
 		}
 	}
 
-	for nodeName := range s.nodes {
-		ns, ok := s.nodeStates[nodeName]
+	for _, nodeName := range nodes {
+		ns, ok := nodeStates[nodeName]
 		if !ok {
 			status.PendingNodes = append(status.PendingNodes, nodeName)
 			continue
@@ -403,20 +330,23 @@ func (s *MemStore) RolloutStatus(dataset string) RolloutStatus {
 // registered nodes have reported state AND none of them report the
 // retired version.
 func (s *MemStore) CheckRetirement(dataset string) []VersionEntry {
+	nodes := s.AssignmentBroker.Nodes()
+	nodeStates := s.AssignmentBroker.SnapshotNodeStates()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// If any registered node has never reported, no version is eligible —
 	// we can't know what that node is still serving.
-	for nodeName := range s.nodes {
-		if _, ok := s.nodeStates[nodeName]; !ok {
+	for _, nodeName := range nodes {
+		if _, ok := nodeStates[nodeName]; !ok {
 			return nil
 		}
 	}
 
 	// Build set of versions still reported by any node.
 	reportedVersions := make(map[string]bool)
-	for _, ns := range s.nodeStates {
+	for _, ns := range nodeStates {
 		for _, ds := range ns.Datasets {
 			if ds.Dataset == dataset {
 				reportedVersions[ds.VersionID] = true
@@ -492,24 +422,4 @@ func (s *MemStore) findVersion(dataset, versionID string) (*VersionEntry, error)
 		}
 	}
 	return nil, fmt.Errorf("version %q not found for dataset %q", versionID, dataset)
-}
-
-// mergeAssignmentLocked updates or adds an assignment for a node (caller must hold mu).
-func (s *MemStore) mergeAssignmentLocked(nodeName string, assignment api.NodeAssignment) {
-	existing := s.assignments[nodeName]
-	merged := make([]api.NodeAssignment, 0, len(existing)+1)
-	for _, a := range existing {
-		if a.Dataset != assignment.Dataset {
-			merged = append(merged, a)
-		}
-	}
-	merged = append(merged, assignment)
-
-	s.assignments[nodeName] = merged
-	s.generation[nodeName]++
-
-	if ch, ok := s.notify[nodeName]; ok {
-		close(ch)
-	}
-	s.notify[nodeName] = make(chan struct{})
 }
