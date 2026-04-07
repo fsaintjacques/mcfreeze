@@ -8,8 +8,8 @@ import (
 )
 
 // AssignmentBroker owns the ephemeral per-node state shared between the HTTP
-// long-poll handlers and the components that compute desired assignments
-// (today: MemStore.Promote; tomorrow: NodeAssignmentReconciler).
+// long-poll handlers and the NodeAssignmentReconciler that computes desired
+// assignments from active DatasetVersion CRs.
 //
 // It is the only piece of state that crosses the boundary between the HTTP
 // server and the reconcilers introduced in Phase 5. All methods are safe for

@@ -84,9 +84,8 @@ func resourceName(prefix, dataset, versionID string) string {
 }
 
 // JobName returns the deterministic Kubernetes Job name used by the Job
-// builder for a (dataset, versionID) pair. Exported so other packages
-// (e.g. CRDStore) can patch ownerReferences without coupling to a Job
-// builder instance.
+// builder for a (dataset, versionID) pair. Exported so reconcilers can
+// patch ownerReferences without coupling to a Job builder instance.
 func JobName(dataset, versionID string) string {
 	return resourceName("fm-build", dataset, versionID)
 }
