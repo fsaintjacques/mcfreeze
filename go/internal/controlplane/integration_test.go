@@ -247,7 +247,7 @@ func symlinkPV(t *testing.T, snapPath, volBase, pvName string) {
 
 // --- helpers ---
 
-func waitForNodePhase(t *testing.T, store *controlplane.Store, nodeName, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
+func waitForNodePhase(t *testing.T, store controlplane.Store, nodeName, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

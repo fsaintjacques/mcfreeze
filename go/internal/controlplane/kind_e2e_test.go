@@ -225,6 +225,8 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 			{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "get", "delete"}},
 			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"create", "get", "update", "delete", "list"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list", "delete"}},
+			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets", "datasetversions"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
+			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets/status", "datasetversions/status"}, Verbs: []string{"get", "update", "patch"}},
 		},
 	}, metav1.CreateOptions{})
 

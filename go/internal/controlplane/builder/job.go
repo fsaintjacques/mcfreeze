@@ -83,17 +83,31 @@ func resourceName(prefix, dataset, versionID string) string {
 	return name
 }
 
-func (b *Job) jobName(dataset, versionID string) string {
+// JobName returns the deterministic Kubernetes Job name used by the Job
+// builder for a (dataset, versionID) pair. Exported so other packages
+// (e.g. CRDStore) can patch ownerReferences without coupling to a Job
+// builder instance.
+func JobName(dataset, versionID string) string {
 	return resourceName("fm-build", dataset, versionID)
 }
 
-func (b *Job) configMapName(dataset, versionID string) string {
+// ConfigMapName returns the deterministic ConfigMap name used by the Job
+// builder for a (dataset, versionID) pair.
+func ConfigMapName(dataset, versionID string) string {
 	return resourceName("fm-config", dataset, versionID)
 }
 
-func (b *Job) pvcName(dataset, versionID string) string {
+// PVCName returns the deterministic PersistentVolumeClaim name used by the
+// Job builder for a (dataset, versionID) pair.
+func PVCName(dataset, versionID string) string {
 	return resourceName("fm-pvc", dataset, versionID)
 }
+
+func (b *Job) jobName(dataset, versionID string) string { return JobName(dataset, versionID) }
+func (b *Job) configMapName(dataset, versionID string) string {
+	return ConfigMapName(dataset, versionID)
+}
+func (b *Job) pvcName(dataset, versionID string) string { return PVCName(dataset, versionID) }
 
 // Start creates a PVC, ConfigMap, and Job for the build. Idempotent: if the
 // resources already exist, returns the existing handle.

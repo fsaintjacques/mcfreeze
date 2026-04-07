@@ -20,10 +20,42 @@ type VersionEntry struct {
 	BuildHandle  builder.Handle
 }
 
-// Store holds the control-plane state in memory. All methods are safe for
-// concurrent use. Tests manipulate it directly; production (Phase 4) will
-// back it with Kubernetes CRDs.
-type Store struct {
+// Store is the control-plane state interface. Implementations must be safe
+// for concurrent use.
+type Store interface {
+	// Assignment management
+	SetAssignments(nodeName string, assignments []api.NodeAssignment)
+	GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{})
+	MergeAssignment(nodeName string, assignment api.NodeAssignment)
+	Generation(nodeName string) int64
+	ReportState(nodeName string, state api.NodeState)
+	GetNodeState(nodeName string) (api.NodeState, bool)
+
+	// Dataset and version lifecycle
+	RegisterDataset(spec api.DatasetSpec)
+	RegisterNode(nodeName string)
+	GetDatasetSpec(name string) (api.DatasetSpec, bool)
+	CreateVersion(dataset, versionID string) error
+	MarkReady(dataset, versionID, snapshotPath, pvName string) error
+	SetDescriptor(dataset, versionID, descriptor, messageName string) error
+	MarkFailed(dataset, versionID, reason string) error
+	Promote(dataset, versionID string) error
+	GetVersions(dataset string) []VersionEntry
+	GetActiveVersion(dataset string) (VersionEntry, bool)
+
+	// Rollout and retirement
+	RolloutStatus(dataset string) RolloutStatus
+	CheckRetirement(dataset string) []VersionEntry
+	DeleteVersion(dataset, versionID string) error
+
+	// Build tracking
+	SetBuildHandle(dataset, versionID string, handle builder.Handle) error
+	GetBuildingVersions() []VersionEntry
+}
+
+// MemStore holds the control-plane state in memory. All methods are safe for
+// concurrent use.
+type MemStore struct {
 	mu sync.Mutex
 
 	// Dataset specs keyed by dataset name.
@@ -45,9 +77,9 @@ type Store struct {
 	nodeStates map[string]api.NodeState
 }
 
-// NewStore creates an empty Store.
-func NewStore() *Store {
-	return &Store{
+// NewMemStore creates an empty MemStore.
+func NewMemStore() *MemStore {
+	return &MemStore{
 		specs:       make(map[string]api.DatasetSpec),
 		versions:    make(map[string][]VersionEntry),
 		nodes:       make(map[string]struct{}),
@@ -60,7 +92,7 @@ func NewStore() *Store {
 
 // SetAssignments replaces the assignments for a node, bumps the generation,
 // and wakes any blocked long-poll.
-func (s *Store) SetAssignments(nodeName string, assignments []api.NodeAssignment) {
+func (s *MemStore) SetAssignments(nodeName string, assignments []api.NodeAssignment) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -78,7 +110,7 @@ func (s *Store) SetAssignments(nodeName string, assignments []api.NodeAssignment
 // If the store's generation is greater than afterGeneration, it returns
 // immediately. Otherwise it returns a channel that will be closed when the
 // assignments change — the caller should select on it.
-func (s *Store) GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{}) {
+func (s *MemStore) GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -103,14 +135,14 @@ func (s *Store) GetAssignments(nodeName string, afterGeneration int64) (api.Assi
 }
 
 // ReportState stores the latest NodeState for a node.
-func (s *Store) ReportState(nodeName string, state api.NodeState) {
+func (s *MemStore) ReportState(nodeName string, state api.NodeState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nodeStates[nodeName] = state
 }
 
 // GetNodeState returns the last reported state for a node.
-func (s *Store) GetNodeState(nodeName string) (api.NodeState, bool) {
+func (s *MemStore) GetNodeState(nodeName string) (api.NodeState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, ok := s.nodeStates[nodeName]
@@ -119,14 +151,14 @@ func (s *Store) GetNodeState(nodeName string) (api.NodeState, bool) {
 
 // MergeAssignment atomically updates or adds an assignment for a single
 // dataset on a node. Existing assignments for other datasets are preserved.
-func (s *Store) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
+func (s *MemStore) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mergeAssignmentLocked(nodeName, assignment)
 }
 
 // Generation returns the current generation for a node.
-func (s *Store) Generation(nodeName string) int64 {
+func (s *MemStore) Generation(nodeName string) int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.generation[nodeName]
@@ -137,21 +169,21 @@ func (s *Store) Generation(nodeName string) int64 {
 // ---------------------------------------------------------------------------
 
 // RegisterDataset registers a dataset spec. Idempotent.
-func (s *Store) RegisterDataset(spec api.DatasetSpec) {
+func (s *MemStore) RegisterDataset(spec api.DatasetSpec) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.specs[spec.Name] = spec
 }
 
 // RegisterNode registers a node name so Promote can push assignments to it.
-func (s *Store) RegisterNode(nodeName string) {
+func (s *MemStore) RegisterNode(nodeName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nodes[nodeName] = struct{}{}
 }
 
 // GetDatasetSpec returns the spec for a dataset.
-func (s *Store) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
+func (s *MemStore) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spec, ok := s.specs[name]
@@ -160,7 +192,7 @@ func (s *Store) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
 
 // CreateVersion creates a new VersionRecord in building state.
 // Returns an error if a building version already exists for this dataset.
-func (s *Store) CreateVersion(dataset, versionID string) error {
+func (s *MemStore) CreateVersion(dataset, versionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -189,7 +221,7 @@ func (s *Store) CreateVersion(dataset, versionID string) error {
 }
 
 // MarkReady transitions a version from building to ready.
-func (s *Store) MarkReady(dataset, versionID, snapshotPath, pvName string) error {
+func (s *MemStore) MarkReady(dataset, versionID, snapshotPath, pvName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -208,7 +240,7 @@ func (s *Store) MarkReady(dataset, versionID, snapshotPath, pvName string) error
 
 // SetDescriptor sets the protobuf descriptor and message name on a version.
 // No-op if both values are empty. Safe to call at any lifecycle state.
-func (s *Store) SetDescriptor(dataset, versionID, descriptor, messageName string) error {
+func (s *MemStore) SetDescriptor(dataset, versionID, descriptor, messageName string) error {
 	if descriptor == "" && messageName == "" {
 		return nil
 	}
@@ -225,7 +257,7 @@ func (s *Store) SetDescriptor(dataset, versionID, descriptor, messageName string
 }
 
 // MarkFailed transitions a version from building to failed.
-func (s *Store) MarkFailed(dataset, versionID, reason string) error {
+func (s *MemStore) MarkFailed(dataset, versionID, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -243,7 +275,7 @@ func (s *Store) MarkFailed(dataset, versionID, reason string) error {
 // Promote transitions a version from ready to active. The previously active
 // version (if any) moves to retired. Assignments are updated for all
 // registered nodes.
-func (s *Store) Promote(dataset, versionID string) error {
+func (s *MemStore) Promote(dataset, versionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -283,7 +315,7 @@ func (s *Store) Promote(dataset, versionID string) error {
 }
 
 // GetVersions returns all versions for a dataset.
-func (s *Store) GetVersions(dataset string) []VersionEntry {
+func (s *MemStore) GetVersions(dataset string) []VersionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]VersionEntry, len(s.versions[dataset]))
@@ -292,7 +324,7 @@ func (s *Store) GetVersions(dataset string) []VersionEntry {
 }
 
 // GetActiveVersion returns the active version for a dataset, if any.
-func (s *Store) GetActiveVersion(dataset string) (VersionEntry, bool) {
+func (s *MemStore) GetActiveVersion(dataset string) (VersionEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, v := range s.versions[dataset] {
@@ -319,7 +351,7 @@ type RolloutStatus struct {
 
 // RolloutStatus returns the convergence status for a dataset by diffing the
 // active assignment against reported NodeStates.
-func (s *Store) RolloutStatus(dataset string) RolloutStatus {
+func (s *MemStore) RolloutStatus(dataset string) RolloutStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -370,7 +402,7 @@ func (s *Store) RolloutStatus(dataset string) RolloutStatus {
 // CheckRetirement returns retired versions eligible for cleanup: all
 // registered nodes have reported state AND none of them report the
 // retired version.
-func (s *Store) CheckRetirement(dataset string) []VersionEntry {
+func (s *MemStore) CheckRetirement(dataset string) []VersionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -403,7 +435,7 @@ func (s *Store) CheckRetirement(dataset string) []VersionEntry {
 
 // DeleteVersion removes a retired version from the store. Returns an error
 // if the version is not in retired state.
-func (s *Store) DeleteVersion(dataset, versionID string) error {
+func (s *MemStore) DeleteVersion(dataset, versionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -421,7 +453,7 @@ func (s *Store) DeleteVersion(dataset, versionID string) error {
 }
 
 // SetBuildHandle sets the build handle for a version in building state.
-func (s *Store) SetBuildHandle(dataset, versionID string, handle builder.Handle) error {
+func (s *MemStore) SetBuildHandle(dataset, versionID string, handle builder.Handle) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -437,7 +469,7 @@ func (s *Store) SetBuildHandle(dataset, versionID string, handle builder.Handle)
 }
 
 // GetBuildingVersions returns all versions in building state across all datasets.
-func (s *Store) GetBuildingVersions() []VersionEntry {
+func (s *MemStore) GetBuildingVersions() []VersionEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -453,7 +485,7 @@ func (s *Store) GetBuildingVersions() []VersionEntry {
 }
 
 // findVersion returns a pointer to the version entry (caller must hold mu).
-func (s *Store) findVersion(dataset, versionID string) (*VersionEntry, error) {
+func (s *MemStore) findVersion(dataset, versionID string) (*VersionEntry, error) {
 	for i := range s.versions[dataset] {
 		if s.versions[dataset][i].ID == versionID {
 			return &s.versions[dataset][i], nil
@@ -463,7 +495,7 @@ func (s *Store) findVersion(dataset, versionID string) (*VersionEntry, error) {
 }
 
 // mergeAssignmentLocked updates or adds an assignment for a node (caller must hold mu).
-func (s *Store) mergeAssignmentLocked(nodeName string, assignment api.NodeAssignment) {
+func (s *MemStore) mergeAssignmentLocked(nodeName string, assignment api.NodeAssignment) {
 	existing := s.assignments[nodeName]
 	merged := make([]api.NodeAssignment, 0, len(existing)+1)
 	for _, a := range existing {
