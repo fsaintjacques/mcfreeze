@@ -8,8 +8,8 @@ import (
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -88,6 +88,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := storagev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -154,7 +157,7 @@ func TestReconcile_BuildingStartsBuilder(t *testing.T) {
 	v := newDatasetVersion("users", "v1")
 	c := newFakeClient(t, ds, v)
 	b := newStubBuilder()
-	r := &DatasetVersionReconciler{Client: c, Builder: b, Broker: controlplane.NewAssignmentBroker()}
+	r := &DatasetVersionReconciler{Client: c, Builder: b}
 
 	reconcileN(t, r, v, 1)
 
@@ -172,7 +175,7 @@ func TestReconcile_BuildingPollsAndPromotes(t *testing.T) {
 	v := newDatasetVersion("users", "v1")
 	c := newFakeClient(t, ds, v)
 	b := newStubBuilder()
-	r := &DatasetVersionReconciler{Client: c, Builder: b, Broker: controlplane.NewAssignmentBroker()}
+	r := &DatasetVersionReconciler{Client: c, Builder: b}
 
 	// 1: kick off build (status=building, BuildJob set, builder phase=Running).
 	reconcileN(t, r, v, 1)
@@ -201,7 +204,7 @@ func TestReconcile_BuildingFailedTransitionsToFailed(t *testing.T) {
 	v := newDatasetVersion("users", "v1")
 	c := newFakeClient(t, ds, v)
 	b := newStubBuilder()
-	r := &DatasetVersionReconciler{Client: c, Builder: b, Broker: controlplane.NewAssignmentBroker()}
+	r := &DatasetVersionReconciler{Client: c, Builder: b}
 
 	reconcileN(t, r, v, 1)
 	b.setStatus(builder.Handle("job-users/v1"), builder.Status{Phase: builder.Failed, Error: "boom"})
@@ -224,7 +227,7 @@ func TestReconcile_PromoteRetiresPreviousActive(t *testing.T) {
 	v2.Status = v1alpha1.DatasetVersionStatus{State: string(api.StateReady), PVName: "pv-users-v2"}
 
 	c := newFakeClient(t, ds, v1, v2)
-	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder(), Broker: controlplane.NewAssignmentBroker()}
+	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder()}
 
 	if _, err := r.Reconcile(context.Background(), reqFor(v2)); err != nil {
 		t.Fatal(err)
@@ -240,16 +243,15 @@ func TestReconcile_PromoteRetiresPreviousActive(t *testing.T) {
 	}
 }
 
-func TestReconcile_RetiredDeletesPVAndCRWhenDrained(t *testing.T) {
+func TestReconcile_RetiredDeletesPVAndCRWhenNoVolumeAttachments(t *testing.T) {
 	ds := newDataset("users")
 	v := newDatasetVersion("users", "v1")
 	v.Status = v1alpha1.DatasetVersionStatus{State: string(api.StateRetired), PVName: "pv-users-v1"}
 	c := newFakeClient(t, ds, v)
 	vol := &stubVolume{}
-	br := controlplane.NewAssignmentBroker()
-	// No nodes registered → IsDrained returns true (vacuously).
-	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder(), Volume: vol, Broker: br}
+	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder(), Volume: vol}
 
+	// No VolumeAttachments → drained → reconciler deletes the PV and CR.
 	if _, err := r.Reconcile(context.Background(), reqFor(v)); err != nil {
 		t.Fatal(err)
 	}
@@ -264,22 +266,33 @@ func TestReconcile_RetiredDeletesPVAndCRWhenDrained(t *testing.T) {
 	}
 }
 
-func TestReconcile_RetiredRequeueWhenNotDrained(t *testing.T) {
+func TestReconcile_RetiredRequeueWhenVolumeAttachmentExists(t *testing.T) {
 	ds := newDataset("users")
 	v := newDatasetVersion("users", "v1")
 	v.Status = v1alpha1.DatasetVersionStatus{State: string(api.StateRetired), PVName: "pv-users-v1"}
-	c := newFakeClient(t, ds, v)
 
-	br := controlplane.NewAssignmentBroker()
-	br.RegisterNode("node-a") // a registered node that has not yet reported state
-	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder(), Volume: &stubVolume{}, Broker: br}
+	pvName := "pv-users-v1"
+	va := &storagev1.VolumeAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "va-node-a"},
+		Spec: storagev1.VolumeAttachmentSpec{
+			Attacher: "test.csi",
+			NodeName: "node-a",
+			Source:   storagev1.VolumeAttachmentSource{PersistentVolumeName: &pvName},
+		},
+	}
+	c := newFakeClient(t, ds, v, va)
+	vol := &stubVolume{}
+	r := &DatasetVersionReconciler{Client: c, Builder: newStubBuilder(), Volume: vol}
 
 	res, err := r.Reconcile(context.Background(), reqFor(v))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.RequeueAfter == 0 {
-		t.Fatal("expected RequeueAfter > 0 when not drained")
+		t.Fatal("expected RequeueAfter > 0 when VolumeAttachment still exists")
+	}
+	if len(vol.deleted) != 0 {
+		t.Fatalf("DeletePV called while attachment still present: %v", vol.deleted)
 	}
 	// CR must still exist.
 	out := getVersion(t, c, v)
@@ -301,7 +314,6 @@ func TestReconcile_BuildingTimeoutMarksFailed(t *testing.T) {
 	r := &DatasetVersionReconciler{
 		Client:       c,
 		Builder:      b,
-		Broker:       controlplane.NewAssignmentBroker(),
 		BuildTimeout: time.Hour,
 	}
 

@@ -90,7 +90,6 @@ func NewControlPlane(t *testing.T, b builder.Async, volumeBase string) *ControlP
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		Builder:    b,
-		Broker:     broker,
 		VolumeBase: volumeBase,
 	}).SetupWithManager(mgr); err != nil {
 		_ = env.Stop()

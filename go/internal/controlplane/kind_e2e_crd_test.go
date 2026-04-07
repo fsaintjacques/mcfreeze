@@ -32,6 +32,7 @@ var (
 //     (and via ownerRefs, the Job/ConfigMap/PVC).
 func TestKindE2E_CRDStore(t *testing.T) {
 	cs, config := kindClientAndConfig(t)
+	kc := kindCRClient(t, config)
 	dyn, err := dynamic.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("create dynamic client: %v", err)
@@ -50,8 +51,8 @@ func TestKindE2E_CRDStore(t *testing.T) {
 	cpLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
 	cpURL := fmt.Sprintf("http://127.0.0.1:%d", cpLocalPort)
 
-	// 2. Trigger v1 build.
-	triggerBuild(t, cpURL, "users", "v1", api.DatasetSpec{
+	// 2. Apply Dataset CR (configuration), then trigger v1 build (instance).
+	usersSpec := api.DatasetSpec{
 		Name:       "users",
 		KeyPrefix:  "users",
 		ShardCount: 2,
@@ -61,11 +62,13 @@ func TestKindE2E_CRDStore(t *testing.T) {
 			ValueColumn: "value",
 			CSV:         &api.CsvSource{Data: "key,value\nuser-1,Alice"},
 		},
-	})
+	}
+	applyDataset(t, ctx, kc, ns, usersSpec)
+	triggerBuild(t, cpURL, "users", "v1", usersSpec)
 
-	waitForActiveVersion(t, ctx, cpURL, "users", "v1", 5*time.Minute)
+	waitForActiveVersion(t, ctx, kc, ns, "users", "v1", 5*time.Minute)
 	waitForDaemonSetReady(t, ctx, cs, ns, "frostmap-node-agent", 2*time.Minute)
-	waitForRolloutConverged(t, ctx, cpURL, "users", "v1", 3*time.Minute)
+	waitForRolloutConverged(t, ctx, kc, ns, "users", "v1", 3*time.Minute)
 
 	// 3. Assert Dataset CR exists.
 	if _, err := dyn.Resource(gvrDatasets).Namespace(ns).Get(ctx, "users", metav1.GetOptions{}); err != nil {
@@ -93,11 +96,11 @@ func TestKindE2E_CRDStore(t *testing.T) {
 	// 5. Restart the control-plane and verify state is preserved.
 	restartControlPlane(t, ctx, cs, ns)
 	waitForDeploymentReady(t, ctx, cs, ns, "frostmap-control-plane", 2*time.Minute)
-	cpLocalPort2 := portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
-	cpURL2 := fmt.Sprintf("http://127.0.0.1:%d", cpLocalPort2)
+	_ = portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
 
-	// State should be reconstructed from CRDs.
-	waitForActiveVersion(t, ctx, cpURL2, "users", "v1", 2*time.Minute)
+	// State is reconstructed by the controller-manager from CRDs in the
+	// apiserver — no need to talk to the new pod's HTTP endpoint.
+	waitForActiveVersion(t, ctx, kc, ns, "users", "v1", 2*time.Minute)
 	t.Log("control-plane restart preserved active version")
 
 	// 6. Delete the Dataset CR → cascade should remove DatasetVersion.

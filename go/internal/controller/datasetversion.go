@@ -11,13 +11,16 @@ import (
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // DatasetVersion state machine driven by DatasetVersionReconciler.Reconcile.
@@ -54,11 +57,12 @@ import (
 //	            │ another version becomes active → demoted here
 //	            ▼
 //	   ┌───────────────────┐
-//	   │     retired       │──── Broker.IsDrained == false ──┐
-//	   │ rq: 10s if not    │                                 │
-//	   │   yet drained     │◀────────────────────────────────┘
+//	   │     retired       │──── VolumeAttachment exists ────┐
+//	   │ rq: 30s safety    │     for status.pvName            │
+//	   │   net; watch on   │◀─────────────────────────────────┘
+//	   │   VA delete fires │
 //	   └────────┬──────────┘
-//	            │ Broker.IsDrained == true
+//	            │ no more VolumeAttachments for this PV
 //	            ▼
 //	   Volume.DeletePV  +  client.Delete(CR)   ── end of life ──
 //
@@ -88,10 +92,6 @@ type DatasetVersionReconciler struct {
 
 	// Volume manages PV deletion when a retired version is fully drained.
 	Volume volume.Manager
-
-	// Broker is the in-memory state shared with the HTTP server. The
-	// reconciler reads it to gate retirement on node convergence.
-	Broker *controlplane.AssignmentBroker
 
 	// VolumeBase is the FSVolumeManager base directory used by the legacy
 	// fork builder; snapshots are symlinked into it so the node-agent can
@@ -271,11 +271,29 @@ func (r *DatasetVersionReconciler) reconcileReady(ctx context.Context, v *v1alph
 	return ctrl.Result{}, nil
 }
 
-// reconcileRetired waits for the version to be drained from every node, then
-// deletes the PV and the CR.
+// reconcileRetired waits for the version's PV to have no remaining
+// VolumeAttachments, then deletes the PV and the CR.
+//
+// VolumeAttachments are the K8s-native source of truth for "is this disk
+// attached to a node": etcd-backed, kubelet-managed, and visible to every
+// control-plane replica without depending on in-memory broker state. The
+// reconciler watches them so retirement happens within milliseconds of the
+// last detach instead of polling.
 func (r *DatasetVersionReconciler) reconcileRetired(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
-	if r.Broker == nil || !r.Broker.IsDrained(v.Spec.Dataset, v.Spec.VersionID) {
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	if v.Status.PVName != "" {
+		var vas storagev1.VolumeAttachmentList
+		if err := r.List(ctx, &vas); err != nil {
+			return ctrl.Result{}, err
+		}
+		for i := range vas.Items {
+			src := vas.Items[i].Spec.Source.PersistentVolumeName
+			if src != nil && *src == v.Status.PVName {
+				// Still attached somewhere — wait for the watch event on
+				// VolumeAttachment delete to wake us. The RequeueAfter is a
+				// safety fallback for the watch missing an event.
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
 	}
 
 	if v.Status.PVName != "" && r.Volume != nil {
@@ -304,11 +322,46 @@ func (r *DatasetVersionReconciler) markFailed(ctx context.Context, v *v1alpha1.D
 }
 
 // SetupWithManager registers the reconciler with a controller-runtime manager.
+//
+// Watches VolumeAttachment as a secondary source so retirement (which gates
+// on "no more attachments to this PV") wakes immediately when the last
+// VolumeAttachment for a retired version's PV is deleted.
 func (r *DatasetVersionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DatasetVersion{}).
 		Named("datasetversion").
+		Watches(
+			&storagev1.VolumeAttachment{},
+			handler.EnqueueRequestsFromMapFunc(r.mapVolumeAttachmentToRetired),
+		).
 		Complete(r)
+}
+
+// mapVolumeAttachmentToRetired returns reconcile requests for every retired
+// DatasetVersion whose PV matches the VolumeAttachment's source. The mapping
+// runs on every VA event (create/update/delete) but the reconciler itself is
+// idempotent, so churn during normal attach/detach is harmless.
+func (r *DatasetVersionReconciler) mapVolumeAttachmentToRetired(ctx context.Context, obj client.Object) []reconcile.Request {
+	va, ok := obj.(*storagev1.VolumeAttachment)
+	if !ok || va.Spec.Source.PersistentVolumeName == nil {
+		return nil
+	}
+	pvName := *va.Spec.Source.PersistentVolumeName
+
+	var versions v1alpha1.DatasetVersionList
+	if err := r.List(ctx, &versions); err != nil {
+		return nil
+	}
+	var out []reconcile.Request
+	for i := range versions.Items {
+		v := &versions.Items[i]
+		if v.Status.State == string(api.StateRetired) && v.Status.PVName == pvName {
+			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{
+				Namespace: v.Namespace, Name: v.Name,
+			}})
+		}
+	}
+	return out
 }
 
 // readDescriptorFromMeta reads the protobuf descriptor and message name from

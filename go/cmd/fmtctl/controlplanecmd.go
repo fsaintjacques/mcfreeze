@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
@@ -114,7 +117,6 @@ func runControlPlane(args []string) {
 		Scheme:       mgr.GetScheme(),
 		Builder:      jb,
 		Volume:       volumes,
-		Broker:       broker,
 		VolumeBase:   *volumeBase,
 		BuildTimeout: *buildTimeout,
 	}).SetupWithManager(mgr); err != nil {
@@ -122,10 +124,11 @@ func runControlPlane(args []string) {
 		os.Exit(1)
 	}
 
-	if err := (&controller.NodeAssignmentReconciler{
+	nar := &controller.NodeAssignmentReconciler{
 		Client: mgr.GetClient(),
 		Broker: broker,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := nar.SetupWithManager(mgr); err != nil {
 		log.Error(err, "setup NodeAssignmentReconciler")
 		os.Exit(1)
 	}
@@ -148,11 +151,12 @@ func runControlPlane(args []string) {
 
 	// HTTP long-poll server: leader-only for Phase 5 single-replica scope.
 	if err := mgr.Add(&httpServerRunnable{
-		listen:    *listen,
-		broker:    broker,
-		client:    mgr.GetClient(),
-		namespace: *namespace,
-		log:       log.WithName("http"),
+		listen:        *listen,
+		broker:        broker,
+		client:        mgr.GetClient(),
+		namespace:     *namespace,
+		onStateReport: nar.OnStateReport,
+		log:           log.WithName("http"),
 	}); err != nil {
 		log.Error(err, "add HTTP server runnable")
 		os.Exit(1)
@@ -183,11 +187,12 @@ func runControlPlane(args []string) {
 // leader-elected because the in-memory AssignmentBroker only exists in the
 // leader pod.
 type httpServerRunnable struct {
-	listen    string
-	broker    *controlplane.AssignmentBroker
-	client    client.Client
-	namespace string
-	log       logr.Logger
+	listen        string
+	broker        *controlplane.AssignmentBroker
+	client        client.Client
+	namespace     string
+	onStateReport controlplane.StateReportCallback
+	log           logr.Logger
 }
 
 func (h *httpServerRunnable) NeedLeaderElection() bool { return true }
@@ -198,6 +203,9 @@ func (h *httpServerRunnable) Start(ctx context.Context) error {
 		return err
 	}
 	srv.SetBuildStarter(&crdBuildStarter{client: h.client, namespace: h.namespace})
+	if h.onStateReport != nil {
+		srv.SetStateReportCallback(h.onStateReport)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -210,27 +218,46 @@ func (h *httpServerRunnable) Start(ctx context.Context) error {
 	return nil
 }
 
-// crdBuildStarter implements controlplane.BuildStarter by creating a
-// DatasetVersion CR. The reconciler picks it up and runs the build.
+// crdBuildStarter implements controlplane.BuildStarter as a pure trigger:
+// it reads the parent Dataset CR (errors if missing) and creates a
+// DatasetVersion CR. The Dataset CR itself must be applied separately —
+// configuration is declarative and is never mutated by build triggers.
 type crdBuildStarter struct {
 	client    client.Client
 	namespace string
 }
 
 func (b *crdBuildStarter) StartBuild(ctx context.Context, spec api.DatasetSpec, versionID string) error {
+	var parent v1alpha1.Dataset
+	if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: spec.Name}, &parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("Dataset %q not found; apply it before triggering a build", spec.Name)
+		}
+		return fmt.Errorf("get Dataset %q: %w", spec.Name, err)
+	}
+
 	v := &v1alpha1.DatasetVersion{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: b.namespace,
 			Name:      v1alpha1.VersionCRName(spec.Name, versionID),
 			Labels:    map[string]string{v1alpha1.DatasetLabel: spec.Name},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1alpha1.GroupVersion.String(),
+				Kind:       "Dataset",
+				Name:       parent.Name,
+				UID:        parent.UID,
+			}},
 		},
 		Spec: v1alpha1.DatasetVersionSpec{
 			Dataset:    spec.Name,
 			VersionID:  versionID,
-			ShardCount: spec.ShardCount,
+			ShardCount: parent.Spec.ShardCount,
 		},
 	}
-	return b.client.Create(ctx, v)
+	if err := b.client.Create(ctx, v); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create DatasetVersion: %w", err)
+	}
+	return nil
 }
 
 func envOrDefault(key, fallback string) string {

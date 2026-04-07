@@ -20,16 +20,21 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 )
 
 const (
@@ -49,6 +54,7 @@ const (
 //	check v1 eligible for retirement
 func TestKindE2E_FullPipeline(t *testing.T) {
 	cs, config := kindClientAndConfig(t)
+	kc := kindCRClient(t, config)
 	ns := kindE2ENamespace(t, cs)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -67,9 +73,9 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 	cpURL := fmt.Sprintf("http://127.0.0.1:%d", cpLocalPort)
 	t.Logf("control-plane port-forwarded to %s", cpURL)
 
-	// 4. Trigger v1 build.
+	// 4. Apply Dataset CR (configuration), then trigger v1 build (instance).
 	v1CSV := "key,value\nuser-1,Alice\nuser-2,Bob"
-	triggerBuild(t, cpURL, "users", "v1", api.DatasetSpec{
+	usersSpec := api.DatasetSpec{
 		Name:       "users",
 		KeyPrefix:  "users",
 		ShardCount: 2,
@@ -79,17 +85,19 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 			ValueColumn: "value",
 			CSV:         &api.CsvSource{Data: v1CSV},
 		},
-	})
+	}
+	applyDataset(t, ctx, kc, ns, usersSpec)
+	triggerBuild(t, cpURL, "users", "v1", usersSpec)
 
 	// 5. Wait for v1 to become active.
-	waitForActiveVersion(t, ctx, cpURL, "users", "v1", 5*time.Minute)
+	waitForActiveVersion(t, ctx, kc, ns, "users", "v1", 5*time.Minute)
 	t.Log("v1 is active")
 
 	// 6. Wait for DaemonSet to be ready.
 	waitForDaemonSetReady(t, ctx, cs, ns, "frostmap-node-agent", 2*time.Minute)
 
 	// 7. Wait for node-agent convergence.
-	waitForRolloutConverged(t, ctx, cpURL, "users", "v1", 3*time.Minute)
+	waitForRolloutConverged(t, ctx, kc, ns, "users", "v1", 3*time.Minute)
 	t.Log("v1 rolled out to all nodes")
 
 	// 8. Verify memcache responses.
@@ -99,23 +107,17 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 	assertMcGet(t, mcAddr, "users:user-2", "Bob")
 	t.Log("v1 memcache responses verified")
 
-	// 9. Trigger v2 build.
+	// 9. Trigger v2 build (Dataset CR already applied; v2 reuses it with
+	// updated source data).
 	v2CSV := "key,value\nuser-1,Alice-v2\nuser-2,Bob-v2\nuser-3,Charlie"
-	triggerBuild(t, cpURL, "users", "v2", api.DatasetSpec{
-		Name:       "users",
-		KeyPrefix:  "users",
-		ShardCount: 2,
-		Retention:  2,
-		Source: api.SourceSpec{
-			KeyColumn:   "key",
-			ValueColumn: "value",
-			CSV:         &api.CsvSource{Data: v2CSV},
-		},
-	})
+	usersV2Spec := usersSpec
+	usersV2Spec.Source.CSV = &api.CsvSource{Data: v2CSV}
+	applyDataset(t, ctx, kc, ns, usersV2Spec)
+	triggerBuild(t, cpURL, "users", "v2", usersV2Spec)
 
 	// 10. Wait for v2 active + converged.
-	waitForActiveVersion(t, ctx, cpURL, "users", "v2", 5*time.Minute)
-	waitForRolloutConverged(t, ctx, cpURL, "users", "v2", 3*time.Minute)
+	waitForActiveVersion(t, ctx, kc, ns, "users", "v2", 5*time.Minute)
+	waitForRolloutConverged(t, ctx, kc, ns, "users", "v2", 3*time.Minute)
 	t.Log("v2 rolled out")
 
 	// 11. Verify v2 memcache responses.
@@ -124,18 +126,31 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 	assertMcGet(t, mcAddr, "users:user-3", "Charlie")
 	t.Log("v2 memcache responses verified")
 
-	// 12. Check retirement eligibility.
-	eligible := getRetired(t, cpURL, "users")
-	found := false
-	for _, v := range eligible {
-		if v.ID == "v1" {
-			found = true
+	// 12. Verify v1 is fully retired. With the VolumeAttachment-driven
+	// retirement reconciler, "retirement complete" means the CR has been
+	// deleted (the previous broker-based model left it in state=retired).
+	// Poll because retirement happens asynchronously after v2's rollout
+	// causes the node-agent to detach v1's PV.
+	deadline := time.Now().Add(2 * time.Minute)
+	v1Key := ctrlclient.ObjectKey{Namespace: ns, Name: v1alpha1.VersionCRName("users", "v1")}
+	for time.Now().Before(deadline) {
+		var dv v1alpha1.DatasetVersion
+		err := kc.Get(ctx, v1Key, &dv)
+		if apierrors.IsNotFound(err) {
+			t.Log("v1 retirement complete (CR deleted) — PASS")
+			return
+		}
+		if err != nil {
+			t.Fatalf("get DatasetVersion users-v1: %v", err)
+		}
+		t.Logf("v1 still present, state=%s pv=%s", dv.Status.State, dv.Status.PVName)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled waiting for v1 retirement")
+		case <-time.After(3 * time.Second):
 		}
 	}
-	if !found {
-		t.Fatalf("v1 not eligible for retirement, got %+v", eligible)
-	}
-	t.Log("v1 eligible for retirement — PASS")
+	t.Fatal("v1 was not retired (CR still exists) within 2 minutes")
 }
 
 // ---------------------------------------------------------------------------
@@ -221,12 +236,15 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 	cs.RbacV1().Roles(ns).Create(ctx, &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
 		Rules: []rbacv1.PolicyRule{
-			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"create", "get", "update", "delete", "list"}},
+			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "get", "delete"}},
-			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"create", "get", "update", "delete", "list"}},
+			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list", "delete"}},
 			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets", "datasetversions"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
 			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets/status", "datasetversions/status"}, Verbs: []string{"get", "update", "patch"}},
+			// Phase 5: lease-based leader election + events.
+			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+			{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
 		},
 	}, metav1.CreateOptions{})
 
@@ -242,6 +260,7 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 		ObjectMeta: metav1.ObjectMeta{Name: crName},
 		Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{""}, Resources: []string{"persistentvolumes"}, Verbs: []string{"create", "get", "update", "delete", "list"}},
+			{APIGroups: []string{"storage.k8s.io"}, Resources: []string{"volumeattachments"}, Verbs: []string{"get", "list", "watch"}},
 		},
 	}, metav1.CreateOptions{})
 	t.Cleanup(func() { cs.RbacV1().ClusterRoles().Delete(context.Background(), crName, metav1.DeleteOptions{}) })
@@ -317,9 +336,35 @@ func deployControlPlane(t *testing.T, ctx context.Context, cs kubernetes.Interfa
 							"--image-pull-policy=Never",
 							"--storage-class=" + storageClass,
 							"--disk-size-gb=1",
-							"--reconcile-interval=2s",
+							"--leader-elect=true",
+							"--metrics-bind-address=:8081",
+							"--health-probe-bind-address=:8082",
 						},
-						Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+						Ports: []corev1.ContainerPort{
+							{Name: "http", ContainerPort: 8080},
+							{Name: "metrics", ContainerPort: 8081},
+							{Name: "health", ContainerPort: 8082},
+						},
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/healthz",
+									Port: intstr.FromString("health"),
+								},
+							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       10,
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/readyz",
+									Port: intstr.FromString("health"),
+								},
+							},
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       5,
+						},
 					}},
 				},
 			},
@@ -446,15 +491,18 @@ func waitForDaemonSetReady(t *testing.T, ctx context.Context, cs kubernetes.Inte
 	t.Fatalf("daemonset %s not ready within %v", name, timeout)
 }
 
-func waitForActiveVersion(t *testing.T, ctx context.Context, cpURL, dataset, version string, timeout time.Duration) {
+// waitForActiveVersion polls the apiserver until a DatasetVersion CR for
+// (dataset, version) reaches state=active.
+func waitForActiveVersion(t *testing.T, ctx context.Context, kc ctrlclient.Client, ns, dataset, version string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	key := ctrlclient.ObjectKey{Namespace: ns, Name: v1alpha1.VersionCRName(dataset, version)}
 	for time.Now().Before(deadline) {
-		status := getRollout(t, cpURL, dataset)
-		if status.ActiveVersion == version {
+		var v v1alpha1.DatasetVersion
+		if err := kc.Get(ctx, key, &v); err == nil && v.Status.State == string(api.StateActive) {
 			return
 		}
-		t.Logf("waiting for active version %s, current=%s", version, status.ActiveVersion)
+		t.Logf("waiting for %s/%s to reach active", dataset, version)
 		select {
 		case <-ctx.Done():
 			t.Fatalf("context cancelled waiting for active version %s", version)
@@ -464,16 +512,27 @@ func waitForActiveVersion(t *testing.T, ctx context.Context, cpURL, dataset, ver
 	t.Fatalf("version %s did not become active within %v", version, timeout)
 }
 
-func waitForRolloutConverged(t *testing.T, ctx context.Context, cpURL, dataset, version string, timeout time.Duration) {
+// waitForRolloutConverged polls the active DatasetVersion CR's status.rollout
+// until ConvergedNodes > 0 and Pending/Error are zero.
+func waitForRolloutConverged(t *testing.T, ctx context.Context, kc ctrlclient.Client, ns, dataset, version string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
+	key := ctrlclient.ObjectKey{Namespace: ns, Name: v1alpha1.VersionCRName(dataset, version)}
 	for time.Now().Before(deadline) {
-		status := getRollout(t, cpURL, dataset)
-		if status.ActiveVersion == version && len(status.PendingNodes) == 0 && len(status.ErrorNodes) == 0 && len(status.ConvergedNodes) > 0 {
-			return
+		var v v1alpha1.DatasetVersion
+		if err := kc.Get(ctx, key, &v); err == nil {
+			r := v.Status.Rollout
+			if v.Status.State == string(api.StateActive) && r != nil &&
+				r.ConvergedNodes > 0 && r.PendingNodes == 0 && r.ErrorNodes == 0 {
+				return
+			}
+			if r != nil {
+				t.Logf("rollout %s/%s: state=%s total=%d converged=%d pending=%d error=%d",
+					dataset, version, v.Status.State, r.TotalNodes, r.ConvergedNodes, r.PendingNodes, r.ErrorNodes)
+			} else {
+				t.Logf("rollout %s/%s: state=%s rollout=nil", dataset, version, v.Status.State)
+			}
 		}
-		t.Logf("rollout: active=%s converged=%d pending=%v error=%v",
-			status.ActiveVersion, len(status.ConvergedNodes), status.PendingNodes, status.ErrorNodes)
 		select {
 		case <-ctx.Done():
 			t.Fatalf("context cancelled waiting for rollout convergence")
@@ -481,6 +540,47 @@ func waitForRolloutConverged(t *testing.T, ctx context.Context, cpURL, dataset, 
 		}
 	}
 	t.Fatalf("rollout for %s/%s did not converge within %v", dataset, version, timeout)
+}
+
+// applyDataset creates a Dataset CR from an api.DatasetSpec, or updates the
+// spec if one already exists. Tests must call this before triggerBuild —
+// the build endpoint is a pure trigger and refuses to create the parent.
+func applyDataset(t *testing.T, ctx context.Context, kc ctrlclient.Client, ns string, spec api.DatasetSpec) {
+	t.Helper()
+	desired := v1alpha1.FromAPIDatasetSpec(spec)
+	desired.Namespace = ns
+	desired.Name = spec.Name
+
+	var existing v1alpha1.Dataset
+	err := kc.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: spec.Name}, &existing)
+	if err == nil {
+		existing.Spec = desired.Spec
+		if err := kc.Update(ctx, &existing); err != nil {
+			t.Fatalf("update Dataset %q: %v", spec.Name, err)
+		}
+		return
+	}
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("get Dataset %q: %v", spec.Name, err)
+	}
+	if err := kc.Create(ctx, desired); err != nil {
+		t.Fatalf("create Dataset %q: %v", spec.Name, err)
+	}
+}
+
+// kindCRClient builds a controller-runtime client from a rest.Config with the
+// frostmap v1alpha1 scheme registered. Used by the kind e2e tests to read
+// Dataset / DatasetVersion CRs directly from the apiserver.
+func kindCRClient(t *testing.T, config *rest.Config) ctrlclient.Client {
+	t.Helper()
+	scheme := apiruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	c, err := ctrlclient.New(config, ctrlclient.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("ctrlclient.New: %v", err)
+	}
+	return c
 }
 
 // ---------------------------------------------------------------------------
@@ -510,36 +610,6 @@ func triggerBuild(t *testing.T, cpURL, dataset, versionID string, spec api.Datas
 		t.Fatalf("build trigger returned %d: %s", resp.StatusCode, respBody)
 	}
 	t.Logf("triggered build %s/%s", dataset, versionID)
-}
-
-func getRollout(t *testing.T, cpURL, dataset string) controlplane.RolloutStatus {
-	t.Helper()
-	resp, err := http.Get(cpURL + "/admin/dataset/" + dataset + "/rollout")
-	if err != nil {
-		t.Fatalf("GET rollout: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var status controlplane.RolloutStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		t.Fatalf("decode rollout: %v", err)
-	}
-	return status
-}
-
-func getRetired(t *testing.T, cpURL, dataset string) []controlplane.VersionEntry {
-	t.Helper()
-	resp, err := http.Get(cpURL + "/admin/dataset/" + dataset + "/retired")
-	if err != nil {
-		t.Fatalf("GET retired: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var entries []controlplane.VersionEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-		t.Fatalf("decode retired: %v", err)
-	}
-	return entries
 }
 
 // ---------------------------------------------------------------------------
