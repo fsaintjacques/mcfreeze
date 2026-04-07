@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -48,6 +49,13 @@ type CRDStore struct {
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
 	namespace string
+
+	// createMu serializes CreateVersion's check-then-create sequence to
+	// close the TOCTOU window between the building-version guard and the
+	// CR Create call. This is correct for the current single-replica
+	// control-plane Deployment; cluster-wide enforcement arrives in
+	// Phase 5 with controller-runtime leader election.
+	createMu sync.Mutex
 
 	// Ephemeral state (mirrors MemStore's assignment plumbing).
 	mu          sync.Mutex
@@ -166,6 +174,11 @@ func (s *CRDStore) mergeAssignmentLocked(nodeName string, assignment api.NodeAss
 // ---------------------------------------------------------------------------
 
 // RegisterDataset creates or updates the Dataset CR. Idempotent.
+//
+// The Store interface returns no error here, so failures are logged at
+// ERROR level. Subsequent operations on the dataset (CreateVersion,
+// Promote) will fail loudly if the CR is missing, surfacing the problem
+// to the orchestrator's retry loop.
 func (s *CRDStore) RegisterDataset(spec api.DatasetSpec) {
 	ctx := context.Background()
 	cr := v1alpha1.FromAPIDatasetSpec(spec)
@@ -173,24 +186,28 @@ func (s *CRDStore) RegisterDataset(spec api.DatasetSpec) {
 
 	u, err := toUnstructured(cr, "Dataset")
 	if err != nil {
-		// RegisterDataset has no error return; log and bail. Phase 5
-		// reconcilers will surface this via status conditions.
+		slog.Error("CRDStore.RegisterDataset: encode CR", "dataset", spec.Name, "err", err)
 		return
 	}
 
 	client := s.dyn.Resource(datasetGVR).Namespace(s.namespace)
 	existing, err := client.Get(ctx, spec.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, _ = client.Create(ctx, u, metav1.CreateOptions{})
+		if _, err := client.Create(ctx, u, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			slog.Error("CRDStore.RegisterDataset: create", "dataset", spec.Name, "err", err)
+		}
 		return
 	}
 	if err != nil {
+		slog.Error("CRDStore.RegisterDataset: get", "dataset", spec.Name, "err", err)
 		return
 	}
 	// Preserve resourceVersion + UID for the update.
 	u.SetResourceVersion(existing.GetResourceVersion())
 	u.SetUID(existing.GetUID())
-	_, _ = client.Update(ctx, u, metav1.UpdateOptions{})
+	if _, err := client.Update(ctx, u, metav1.UpdateOptions{}); err != nil {
+		slog.Error("CRDStore.RegisterDataset: update", "dataset", spec.Name, "err", err)
+	}
 }
 
 func (s *CRDStore) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
@@ -212,6 +229,13 @@ func (s *CRDStore) GetDatasetSpec(name string) (api.DatasetSpec, bool) {
 
 func (s *CRDStore) CreateVersion(dataset, versionID string) error {
 	ctx := context.Background()
+
+	// Serialize the check+create across goroutines in this process to avoid
+	// a TOCTOU race that would let two callers both pass the
+	// duplicate-building guard. (Cross-process concurrency is out of scope:
+	// only one control-plane writes to a given namespace.)
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
 
 	// Reject if a building version already exists.
 	for _, v := range s.GetVersions(dataset) {
@@ -336,23 +360,28 @@ func (s *CRDStore) Promote(dataset, versionID string) error {
 		return fmt.Errorf("dataset %q not registered", dataset)
 	}
 
-	// Retire any currently-active version of this dataset.
+	// Snapshot active versions before mutating, so a crash mid-sequence
+	// leaves the dataset with at least one active version (the new one)
+	// rather than zero.
 	versions := s.GetVersions(dataset)
+
+	// Promote target first.
+	if err := s.patchVersionStatus(ctx, v1alpha1.VersionCRName(dataset, versionID), map[string]interface{}{
+		"state": string(api.StateActive),
+	}); err != nil {
+		return fmt.Errorf("promote target: %w", err)
+	}
+
+	// Then retire any prior active version. Brief overlap (two active
+	// versions) is preferable to a zero-active window for readers.
 	for _, v := range versions {
-		if v.State == api.StateActive {
+		if v.State == api.StateActive && v.ID != versionID {
 			if err := s.patchVersionStatus(ctx, v1alpha1.VersionCRName(dataset, v.ID), map[string]interface{}{
 				"state": string(api.StateRetired),
 			}); err != nil {
 				return fmt.Errorf("retire prior active %q: %w", v.ID, err)
 			}
 		}
-	}
-
-	// Promote target.
-	if err := s.patchVersionStatus(ctx, v1alpha1.VersionCRName(dataset, versionID), map[string]interface{}{
-		"state": string(api.StateActive),
-	}); err != nil {
-		return fmt.Errorf("promote target: %w", err)
 	}
 
 	// Update Dataset.status.activeVersion.
@@ -435,16 +464,8 @@ func (s *CRDStore) SetBuildHandle(dataset, versionID string, handle builder.Hand
 		return err
 	}
 
-	// Re-fetch to obtain a stable UID for ownerRefs.
-	versionUID := cur.UID
-	if versionUID == "" {
-		fresh, err := s.getVersionCR(ctx, name)
-		if err == nil {
-			versionUID = fresh.UID
-		}
-	}
-	if versionUID != "" && s.kube != nil {
-		s.patchBuildResourceOwnerRefs(ctx, dataset, versionID, versionUID)
+	if cur.UID != "" && s.kube != nil {
+		s.patchBuildResourceOwnerRefs(ctx, dataset, versionID, cur.UID)
 	}
 	return nil
 }

@@ -13,7 +13,7 @@ func VersionCRName(dataset, versionID string) string {
 	return fmt.Sprintf("%s-%s", dataset, versionID)
 }
 
-// DatasetSpecLabel is the label key set on DatasetVersion CRs to identify
+// DatasetLabel is the label key set on DatasetVersion CRs to identify
 // the parent dataset for label-selector queries.
 const DatasetLabel = "frostmap.dev/dataset"
 
@@ -46,17 +46,15 @@ func toAPISourceSpec(s SourceSpec) api.SourceSpec {
 		KeyColumn:   s.KeyColumn,
 		ValueColumn: s.ValueColumn,
 	}
-	if s.Encoding != nil {
-		enc := api.EncodingSpec{}
-		if s.Encoding.Protobuf != nil {
-			enc.Protobuf = &api.ProtobufEncoding{
+	if s.Encoding != nil && s.Encoding.Protobuf != nil {
+		out.Encoding = &api.EncodingSpec{
+			Protobuf: &api.ProtobufEncoding{
 				Descriptor:    s.Encoding.Protobuf.Descriptor,
 				DescriptorURI: s.Encoding.Protobuf.DescriptorURI,
 				Package:       s.Encoding.Protobuf.Package,
 				MessageName:   s.Encoding.Protobuf.MessageName,
-			}
+			},
 		}
-		out.Encoding = &enc
 	}
 	if s.BigQuery != nil {
 		out.BigQuery = &api.BigQuerySource{
@@ -80,17 +78,15 @@ func fromAPISourceSpec(s api.SourceSpec) SourceSpec {
 		KeyColumn:   s.KeyColumn,
 		ValueColumn: s.ValueColumn,
 	}
-	if s.Encoding != nil {
-		enc := EncodingSpec{}
-		if s.Encoding.Protobuf != nil {
-			enc.Protobuf = &ProtobufEncoding{
+	if s.Encoding != nil && s.Encoding.Protobuf != nil {
+		out.Encoding = &EncodingSpec{
+			Protobuf: &ProtobufEncoding{
 				Descriptor:    s.Encoding.Protobuf.Descriptor,
 				DescriptorURI: s.Encoding.Protobuf.DescriptorURI,
 				Package:       s.Encoding.Protobuf.Package,
 				MessageName:   s.Encoding.Protobuf.MessageName,
-			}
+			},
 		}
-		out.Encoding = &enc
 	}
 	if s.BigQuery != nil {
 		out.BigQuery = &BigQuerySource{

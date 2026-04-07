@@ -25,11 +25,11 @@ var (
 
 // TestKindE2E_CRDStore exercises the CRD-backed Store end-to-end:
 //
-//	1. Build pipeline runs with --store=crd (default).
-//	2. Dataset + DatasetVersion CRs exist after the build.
-//	3. Restarting the control-plane preserves state.
-//	4. Deleting the Dataset CR cascade-deletes its DatasetVersion CRs
-//	   (and via ownerRefs, the Job/ConfigMap/PVC).
+//  1. Build pipeline runs with --store=crd (default).
+//  2. Dataset + DatasetVersion CRs exist after the build.
+//  3. Restarting the control-plane preserves state.
+//  4. Deleting the Dataset CR cascade-deletes its DatasetVersion CRs
+//     (and via ownerRefs, the Job/ConfigMap/PVC).
 func TestKindE2E_CRDStore(t *testing.T) {
 	cs, config := kindClientAndConfig(t)
 	dyn, err := dynamic.NewForConfig(config)
