@@ -77,6 +77,9 @@ spec:
             - shardCount
             - versionId
             type: object
+            x-kubernetes-validations:
+            - message: DatasetVersion spec is immutable
+              rule: self == oldSelf
           status:
             description: DatasetVersionStatus defines the observed state of a DatasetVersion.
             properties:
@@ -159,6 +162,32 @@ spec:
                 description: PVName is the Kubernetes PersistentVolume name (set on
                   transition to ready).
                 type: string
+              rollout:
+                description: Rollout reports per-node convergence for this version
+                  while it is active.
+                properties:
+                  convergedNodes:
+                    description: ConvergedNodes is the count of nodes reporting Active
+                      state for this version.
+                    type: integer
+                  errorNodes:
+                    description: ErrorNodes is the count of nodes reporting Error
+                      for this version.
+                    type: integer
+                  pendingNodes:
+                    description: PendingNodes is the count of nodes that have not
+                      yet reached Active.
+                    type: integer
+                  totalNodes:
+                    description: TotalNodes is the count of nodes the version has
+                      been pushed to.
+                    type: integer
+                required:
+                - convergedNodes
+                - errorNodes
+                - pendingNodes
+                - totalNodes
+                type: object
               snapshotPath:
                 description: SnapshotPath is the on-disk location of the snapshot
                   (local builds only).

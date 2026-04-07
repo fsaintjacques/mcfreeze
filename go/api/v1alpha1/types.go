@@ -45,6 +45,36 @@ type DatasetSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=2
 	Retention int `json:"retention"`
+
+	// Trigger describes how new DatasetVersions are produced. If unset,
+	// versions are only created by external triggers (HTTP build endpoint,
+	// future webhooks, manual kubectl apply).
+	// +optional
+	Trigger *TriggerSpec `json:"trigger,omitempty"`
+}
+
+// +kubebuilder:object:generate=true
+
+// TriggerSpec is a discriminated union describing a build trigger.
+// Exactly one of Manual or Cron must be set.
+type TriggerSpec struct {
+	// Manual marks the dataset as build-on-demand only.
+	// +optional
+	Manual *ManualTrigger `json:"manual,omitempty"`
+
+	// Cron schedules periodic builds.
+	// +optional
+	Cron *CronTrigger `json:"cron,omitempty"`
+}
+
+// ManualTrigger has no fields. Its presence indicates manual-only builds.
+type ManualTrigger struct{}
+
+// CronTrigger schedules periodic builds.
+type CronTrigger struct {
+	// Schedule is a standard cron expression (5-field, no seconds).
+	// +kubebuilder:validation:MinLength=1
+	Schedule string `json:"schedule"`
 }
 
 // +kubebuilder:object:generate=true
@@ -91,6 +121,7 @@ type DatasetVersion struct {
 }
 
 // DatasetVersionSpec is immutable after creation.
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="DatasetVersion spec is immutable"
 type DatasetVersionSpec struct {
 	// Dataset is the parent Dataset name.
 	// +kubebuilder:validation:MinLength=1
@@ -134,9 +165,30 @@ type DatasetVersionStatus struct {
 	// Error contains the failure reason when State is "failed".
 	Error string `json:"error,omitempty"`
 
+	// Rollout reports per-node convergence for this version while it is active.
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
+
 	// Conditions represent the latest observations of the DatasetVersion's state.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:generate=true
+
+// RolloutStatus aggregates per-node convergence for an active DatasetVersion.
+type RolloutStatus struct {
+	// TotalNodes is the count of nodes the version has been pushed to.
+	TotalNodes int `json:"totalNodes"`
+
+	// ConvergedNodes is the count of nodes reporting Active state for this version.
+	ConvergedNodes int `json:"convergedNodes"`
+
+	// PendingNodes is the count of nodes that have not yet reached Active.
+	PendingNodes int `json:"pendingNodes"`
+
+	// ErrorNodes is the count of nodes reporting Error for this version.
+	ErrorNodes int `json:"errorNodes"`
 }
 
 // +kubebuilder:object:root=true
