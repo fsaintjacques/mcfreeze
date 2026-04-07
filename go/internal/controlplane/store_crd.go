@@ -57,117 +57,34 @@ type CRDStore struct {
 	// Phase 5 with controller-runtime leader election.
 	createMu sync.Mutex
 
-	// Ephemeral state (mirrors MemStore's assignment plumbing).
-	mu          sync.Mutex
-	nodes       map[string]struct{}
-	assignments map[string][]api.NodeAssignment
-	generation  map[string]int64
-	notify      map[string]chan struct{}
-	nodeStates  map[string]api.NodeState
+	// Ephemeral per-node state (assignments, generation, notify, nodeStates,
+	// registered nodes) lives in the embedded broker so the HTTP server and
+	// the Phase 5 reconcilers can share it.
+	*AssignmentBroker
 }
 
-// NewCRDStore constructs a CRDStore. The CRDs must already be installed in
-// the cluster; New does not register them.
+// NewCRDStore constructs a CRDStore with a fresh in-memory AssignmentBroker.
+// The CRDs must already be installed in the cluster; New does not register
+// them.
 func NewCRDStore(dyn dynamic.Interface, kube kubernetes.Interface, namespace string) *CRDStore {
+	return NewCRDStoreWithBroker(dyn, kube, namespace, NewAssignmentBroker())
+}
+
+// NewCRDStoreWithBroker constructs a CRDStore that shares the given broker.
+func NewCRDStoreWithBroker(dyn dynamic.Interface, kube kubernetes.Interface, namespace string, broker *AssignmentBroker) *CRDStore {
 	return &CRDStore{
-		dyn:         dyn,
-		kube:        kube,
-		namespace:   namespace,
-		nodes:       make(map[string]struct{}),
-		assignments: make(map[string][]api.NodeAssignment),
-		generation:  make(map[string]int64),
-		notify:      make(map[string]chan struct{}),
-		nodeStates:  make(map[string]api.NodeState),
+		dyn:              dyn,
+		kube:             kube,
+		namespace:        namespace,
+		AssignmentBroker: broker,
 	}
 }
+
+// Broker returns the underlying AssignmentBroker.
+func (s *CRDStore) Broker() *AssignmentBroker { return s.AssignmentBroker }
 
 // Compile-time check that CRDStore satisfies the Store interface.
 var _ Store = (*CRDStore)(nil)
-
-// ---------------------------------------------------------------------------
-// Ephemeral methods (identical logic to MemStore)
-// ---------------------------------------------------------------------------
-
-func (s *CRDStore) SetAssignments(nodeName string, assignments []api.NodeAssignment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.assignments[nodeName] = assignments
-	s.generation[nodeName]++
-	if ch, ok := s.notify[nodeName]; ok {
-		close(ch)
-	}
-	s.notify[nodeName] = make(chan struct{})
-}
-
-func (s *CRDStore) GetAssignments(nodeName string, afterGeneration int64) (api.AssignmentsResponse, <-chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	gen := s.generation[nodeName]
-	resp := api.AssignmentsResponse{
-		Generation:  gen,
-		Assignments: s.assignments[nodeName],
-	}
-	if gen > afterGeneration {
-		return resp, nil
-	}
-	ch, ok := s.notify[nodeName]
-	if !ok {
-		ch = make(chan struct{})
-		s.notify[nodeName] = ch
-	}
-	return resp, ch
-}
-
-func (s *CRDStore) MergeAssignment(nodeName string, assignment api.NodeAssignment) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mergeAssignmentLocked(nodeName, assignment)
-}
-
-func (s *CRDStore) Generation(nodeName string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.generation[nodeName]
-}
-
-func (s *CRDStore) ReportState(nodeName string, state api.NodeState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nodeStates[nodeName] = state
-}
-
-func (s *CRDStore) GetNodeState(nodeName string) (api.NodeState, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.nodeStates[nodeName]
-	return st, ok
-}
-
-func (s *CRDStore) RegisterNode(nodeName string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.nodes[nodeName] = struct{}{}
-}
-
-func (s *CRDStore) mergeAssignmentLocked(nodeName string, assignment api.NodeAssignment) {
-	existing := s.assignments[nodeName]
-	merged := make([]api.NodeAssignment, 0, len(existing)+1)
-	for _, a := range existing {
-		if a.Dataset != assignment.Dataset {
-			merged = append(merged, a)
-		}
-	}
-	merged = append(merged, assignment)
-
-	s.assignments[nodeName] = merged
-	s.generation[nodeName]++
-
-	if ch, ok := s.notify[nodeName]; ok {
-		close(ch)
-	}
-	s.notify[nodeName] = make(chan struct{})
-}
 
 // ---------------------------------------------------------------------------
 // Dataset CRD methods
@@ -405,11 +322,9 @@ func (s *CRDStore) Promote(dataset, versionID string) error {
 		KeyPrefix: spec.KeyPrefix,
 		Version:   entry.VersionRecord,
 	}
-	s.mu.Lock()
-	for nodeName := range s.nodes {
-		s.mergeAssignmentLocked(nodeName, assignment)
+	for _, nodeName := range s.AssignmentBroker.Nodes() {
+		s.AssignmentBroker.MergeAssignment(nodeName, assignment)
 	}
-	s.mu.Unlock()
 
 	return nil
 }
@@ -519,11 +434,11 @@ func (s *CRDStore) RolloutStatus(dataset string) RolloutStatus {
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	nodes := s.AssignmentBroker.Nodes()
+	nodeStates := s.AssignmentBroker.SnapshotNodeStates()
 
-	for nodeName := range s.nodes {
-		ns, ok := s.nodeStates[nodeName]
+	for _, nodeName := range nodes {
+		ns, ok := nodeStates[nodeName]
 		if !ok {
 			status.PendingNodes = append(status.PendingNodes, nodeName)
 			continue
@@ -552,22 +467,22 @@ func (s *CRDStore) RolloutStatus(dataset string) RolloutStatus {
 }
 
 func (s *CRDStore) CheckRetirement(dataset string) []VersionEntry {
-	s.mu.Lock()
-	for nodeName := range s.nodes {
-		if _, ok := s.nodeStates[nodeName]; !ok {
-			s.mu.Unlock()
+	nodes := s.AssignmentBroker.Nodes()
+	nodeStates := s.AssignmentBroker.SnapshotNodeStates()
+
+	for _, nodeName := range nodes {
+		if _, ok := nodeStates[nodeName]; !ok {
 			return nil
 		}
 	}
 	reportedVersions := make(map[string]bool)
-	for _, ns := range s.nodeStates {
+	for _, ns := range nodeStates {
 		for _, ds := range ns.Datasets {
 			if ds.Dataset == dataset {
 				reportedVersions[ds.VersionID] = true
 			}
 		}
 	}
-	s.mu.Unlock()
 
 	versions := s.GetVersions(dataset)
 	var eligible []VersionEntry
