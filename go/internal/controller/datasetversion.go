@@ -1,7 +1,3 @@
-// Package controller hosts the controller-runtime reconcilers introduced in
-// Phase 5 of the Kubernetes-native control plane. They replace the
-// imperative Orchestrator/Store/CRDStore stack with a declarative,
-// level-triggered reconciliation model.
 package controller
 
 import (
@@ -23,6 +19,54 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// DatasetVersion state machine driven by DatasetVersionReconciler.Reconcile.
+//
+// Each box is a value of DatasetVersion.Status.State. Edges are labeled with
+// the trigger that causes the transition; "rq" notes how Reconcile asks to
+// be re-invoked after handling the state.
+//
+//	                         (CR created, Status.State == "")
+//	                                       │
+//	                                       ▼
+//	                          ┌──────────────────────┐
+//	          Builder.Start───│      building        │◀──┐ Builder.Poll == Running
+//	          (first call)    │  BuildJob persisted  │   │   rq: 5s
+//	                          └──────────┬───────────┘───┘
+//	                                     │
+//	             ┌───────────────────────┼────────────────────────┐
+//	             │ Poll == Complete      │ Poll == Failed         │ timeout
+//	             │ (symlink + descriptor)│   or NotFound          │ exceeded
+//	             ▼                       ▼                        ▼
+//	   ┌───────────────────┐   ┌───────────────────┐    ┌───────────────────┐
+//	   │       ready       │   │      failed       │    │      failed       │
+//	   │ rq: immediate     │   │ (terminal no-op)  │    │ (terminal no-op)  │
+//	   └────────┬──────────┘   └───────────────────┘    └───────────────────┘
+//	            │
+//	            │ list siblings, demote any active → retired,
+//	            │ promote self
+//	            ▼
+//	   ┌───────────────────┐
+//	   │      active       │   no-op (NodeAssignmentReconciler owns rollout;
+//	   │ (no requeue)      │   transition to retired is driven by another
+//	   └────────┬──────────┘   sibling promoting in reconcileReady)
+//	            │
+//	            │ another version becomes active → demoted here
+//	            ▼
+//	   ┌───────────────────┐
+//	   │     retired       │──── Broker.IsDrained == false ──┐
+//	   │ rq: 10s if not    │                                 │
+//	   │   yet drained     │◀────────────────────────────────┘
+//	   └────────┬──────────┘
+//	            │ Broker.IsDrained == true
+//	            ▼
+//	   Volume.DeletePV  +  client.Delete(CR)   ── end of life ──
+//
+// Reconcile is called by the manager work queue on: (1) watch events from
+// the API server (CR create/update/delete, including the reconciler's own
+// status patches), (2) explicit RequeueAfter from a prior Reconcile, and
+// (3) the informer's periodic resync. Every state transition is therefore
+// level-triggered and idempotent.
 
 // DefaultBuildTimeout is the maximum duration a DatasetVersion may stay in
 // state=building before the reconciler cancels the build and marks it failed.
