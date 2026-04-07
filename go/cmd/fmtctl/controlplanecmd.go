@@ -193,8 +193,7 @@ type httpServerRunnable struct {
 func (h *httpServerRunnable) NeedLeaderElection() bool { return true }
 
 func (h *httpServerRunnable) Start(ctx context.Context) error {
-	store := controlplane.NewMemStoreWithBroker(h.broker)
-	srv, err := controlplane.NewServer(store, h.listen)
+	srv, err := controlplane.NewServer(h.broker, h.listen)
 	if err != nil {
 		return err
 	}

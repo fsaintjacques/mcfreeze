@@ -19,34 +19,33 @@ type BuildStarter interface {
 }
 
 // Server is the control-plane HTTP server. It serves the node-agent API
-// (assignments long-poll, state reporting) and an admin API for tests.
+// (assignments long-poll, state reporting) and the build trigger. Per-node
+// state lives in the AssignmentBroker; the Server holds no other state.
 type Server struct {
-	store    Store
+	broker   *AssignmentBroker
 	builds   BuildStarter
 	mux      *http.ServeMux
 	listener net.Listener
 }
 
-// SetBuildStarter wires the build trigger. Called after the Orchestrator is
-// created to break the circular dependency (Server is created before
-// Orchestrator, but Orchestrator holds Server).
+// SetBuildStarter wires the build trigger. Optional: callers that don't need
+// to expose POST /api/v1/dataset/{name}/build can omit it.
 func (s *Server) SetBuildStarter(bs BuildStarter) {
 	s.builds = bs
 }
 
-// NewServer creates a Server bound to addr. Call Serve() to start accepting.
-func NewServer(store Store, addr string) (*Server, error) {
+// NewServer creates a Server bound to addr backed by the given broker.
+// Call Serve() to start accepting.
+func NewServer(broker *AssignmentBroker, addr string) (*Server, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: store, mux: http.NewServeMux(), listener: l}
+	s := &Server{broker: broker, mux: http.NewServeMux(), listener: l}
 	s.mux.HandleFunc("GET /api/v1/node/{node}/assignments", s.handleGetAssignments)
 	s.mux.HandleFunc("POST /api/v1/node/{node}/state", s.handlePostState)
 	s.mux.HandleFunc("POST /api/v1/dataset/{name}/build", s.handleBuild)
 	s.mux.HandleFunc("POST /admin/node/{node}/assignments", s.handleAdminSetAssignments)
-	s.mux.HandleFunc("GET /admin/dataset/{name}/rollout", s.handleAdminRollout)
-	s.mux.HandleFunc("GET /admin/dataset/{name}/retired", s.handleAdminRetired)
 	return s, nil
 }
 
@@ -69,7 +68,7 @@ func (s *Server) Close() error {
 
 func (s *Server) handleGetAssignments(w http.ResponseWriter, r *http.Request) {
 	node := r.PathValue("node")
-	s.store.RegisterNode(node) // auto-register on first poll
+	s.broker.RegisterNode(node) // auto-register on first poll
 
 	var generation int64
 	if g := r.URL.Query().Get("generation"); g != "" {
@@ -81,13 +80,13 @@ func (s *Server) handleGetAssignments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp, ch := s.store.GetAssignments(node, generation)
+	resp, ch := s.broker.GetAssignments(node, generation)
 
 	if ch != nil {
 		// Block until assignments change or client disconnects.
 		select {
 		case <-ch:
-			resp, _ = s.store.GetAssignments(node, generation)
+			resp, _ = s.broker.GetAssignments(node, generation)
 		case <-r.Context().Done():
 			http.Error(w, "client disconnected", http.StatusRequestTimeout)
 			return
@@ -113,7 +112,7 @@ func (s *Server) handlePostState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.store.ReportState(node, state)
+	s.broker.ReportState(node, state)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -179,22 +178,8 @@ func (s *Server) handleAdminSetAssignments(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.store.SetAssignments(node, assignments)
+	s.broker.SetAssignments(node, assignments)
 	w.WriteHeader(http.StatusOK)
-}
-
-func (s *Server) handleAdminRollout(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	status := s.store.RolloutStatus(name)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
-}
-
-func (s *Server) handleAdminRetired(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	eligible := s.store.CheckRetirement(name)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(eligible)
 }
 
 // isValidName returns true if s is non-empty and contains only lowercase

@@ -41,7 +41,7 @@ func (o *Orchestrator) RegisterNode(nodeName string) {
 // NewOrchestrator creates an Orchestrator with an HTTP server bound to a free port.
 func NewOrchestrator(b builder.Async, volumeBase string) (*Orchestrator, error) {
 	store := NewMemStore()
-	srv, err := NewServer(store, "127.0.0.1:0")
+	srv, err := NewServer(store.Broker(), "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
