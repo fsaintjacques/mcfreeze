@@ -137,6 +137,27 @@ spec:
                 required:
                 - keyColumn
                 type: object
+              trigger:
+                description: |-
+                  Trigger describes how new DatasetVersions are produced. If unset,
+                  versions are only created by external triggers (HTTP build endpoint,
+                  future webhooks, manual kubectl apply).
+                properties:
+                  cron:
+                    description: Cron schedules periodic builds.
+                    properties:
+                      schedule:
+                        description: Schedule is a standard cron expression (5-field,
+                          no seconds).
+                        minLength: 1
+                        type: string
+                    required:
+                    - schedule
+                    type: object
+                  manual:
+                    description: Manual marks the dataset as build-on-demand only.
+                    type: object
+                type: object
             required:
             - keyPrefix
             - retention
