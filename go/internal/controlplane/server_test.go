@@ -10,9 +10,9 @@ import (
 	"github.com/fsaintjacques/frostmap/go/api"
 )
 
-func startTestServer(t *testing.T) (*Server, *Store) {
+func startTestServer(t *testing.T) (*Server, *MemStore) {
 	t.Helper()
-	store := NewStore()
+	store := NewMemStore()
 	srv, err := NewServer(store, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

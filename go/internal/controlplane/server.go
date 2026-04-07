@@ -21,7 +21,7 @@ type BuildStarter interface {
 // Server is the control-plane HTTP server. It serves the node-agent API
 // (assignments long-poll, state reporting) and an admin API for tests.
 type Server struct {
-	store    *Store
+	store    Store
 	builds   BuildStarter
 	mux      *http.ServeMux
 	listener net.Listener
@@ -35,7 +35,7 @@ func (s *Server) SetBuildStarter(bs BuildStarter) {
 }
 
 // NewServer creates a Server bound to addr. Call Serve() to start accepting.
-func NewServer(store *Store, addr string) (*Server, error) {
+func NewServer(store Store, addr string) (*Server, error) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

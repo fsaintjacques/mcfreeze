@@ -16,7 +16,7 @@ import (
 // Orchestrator ties the store, builder, and server together. It provides a
 // high-level API for tests to trigger builds and promotions.
 type Orchestrator struct {
-	Store   *Store
+	Store   Store
 	Builder builder.Async
 	Server  *Server
 
@@ -40,7 +40,7 @@ func (o *Orchestrator) RegisterNode(nodeName string) {
 
 // NewOrchestrator creates an Orchestrator with an HTTP server bound to a free port.
 func NewOrchestrator(b builder.Async, volumeBase string) (*Orchestrator, error) {
-	store := NewStore()
+	store := NewMemStore()
 	srv, err := NewServer(store, "127.0.0.1:0")
 	if err != nil {
 		return nil, err

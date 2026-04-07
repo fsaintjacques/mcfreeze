@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -29,6 +30,7 @@ func runControlPlane(args []string) {
 	diskSizeGB := fs.Int64("disk-size-gb", 10, "PVC size in GiB")
 	reconcileInterval := fs.Duration("reconcile-interval", 5*time.Second, "reconcile loop interval")
 	buildTimeout := fs.Duration("build-timeout", 30*time.Minute, "max build duration before cancellation")
+	storeKind := fs.String("store", "crd", "store backend: crd (Kubernetes CRDs) or memory (in-memory, lost on restart)")
 	fs.Parse(args)
 
 	if *image == "" || *storageClass == "" {
@@ -62,7 +64,22 @@ func runControlPlane(args []string) {
 		DiskSizeGB:      *diskSizeGB,
 	}
 
-	store := controlplane.NewStore()
+	var store controlplane.Store
+	switch *storeKind {
+	case "memory":
+		store = controlplane.NewMemStore()
+	case "crd":
+		dynClient, err := dynamic.NewForConfig(kubeConfig)
+		if err != nil {
+			slog.Error("create dynamic client", "err", err)
+			os.Exit(1)
+		}
+		store = controlplane.NewCRDStore(dynClient, kubeClient, *namespace)
+	default:
+		slog.Error("invalid --store value (want crd|memory)", "value", *storeKind)
+		os.Exit(1)
+	}
+
 	srv, err := controlplane.NewServer(store, *listen)
 	if err != nil {
 		slog.Error("create server", "err", err)
@@ -88,6 +105,7 @@ func runControlPlane(args []string) {
 		"namespace", *namespace,
 		"image", *image,
 		"storage-class", *storageClass,
+		"store", *storeKind,
 	)
 
 	if err := orch.Run(ctx); err != nil {

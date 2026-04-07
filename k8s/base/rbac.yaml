@@ -22,6 +22,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "delete"]
+  - apiGroups: ["frostmap.dev"]
+    resources: ["datasets", "datasetversions"]
+    verbs: ["create", "get", "update", "delete", "list", "watch", "patch"]
+  - apiGroups: ["frostmap.dev"]
+    resources: ["datasets/status", "datasetversions/status"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

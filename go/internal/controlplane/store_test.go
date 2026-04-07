@@ -10,7 +10,7 @@ import (
 // --- version state machine tests ---
 
 func TestVersion_FullLifecycle(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -40,7 +40,7 @@ func TestVersion_FullLifecycle(t *testing.T) {
 }
 
 func TestVersion_PromoteRetiresOldActive(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -68,7 +68,7 @@ func TestVersion_PromoteRetiresOldActive(t *testing.T) {
 }
 
 func TestVersion_DuplicateBuildingRejected(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	if err := s.CreateVersion("ds", "v1"); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestVersion_DuplicateBuildingRejected(t *testing.T) {
 }
 
 func TestVersion_CreateAfterFailedSucceeds(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.CreateVersion("ds", "v1")
 	s.MarkFailed("ds", "v1", "build error")
 
@@ -88,7 +88,7 @@ func TestVersion_CreateAfterFailedSucceeds(t *testing.T) {
 }
 
 func TestVersion_InvalidTransitions(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 
 	// Can't promote a building version.
@@ -114,7 +114,7 @@ func TestVersion_InvalidTransitions(t *testing.T) {
 // --- rollout and retirement tests ---
 
 func TestRolloutStatus_AllConverged(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 	s.RegisterNode("node-2")
@@ -141,7 +141,7 @@ func TestRolloutStatus_AllConverged(t *testing.T) {
 }
 
 func TestRolloutStatus_PartialConvergence(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 	s.RegisterNode("node-2")
@@ -165,7 +165,7 @@ func TestRolloutStatus_PartialConvergence(t *testing.T) {
 }
 
 func TestRolloutStatus_ErrorNode(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -184,7 +184,7 @@ func TestRolloutStatus_ErrorNode(t *testing.T) {
 }
 
 func TestCheckRetirement_EligibleAfterConvergence(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -220,7 +220,7 @@ func TestCheckRetirement_EligibleAfterConvergence(t *testing.T) {
 }
 
 func TestDeleteVersion_Retired(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -242,7 +242,7 @@ func TestDeleteVersion_Retired(t *testing.T) {
 }
 
 func TestDeleteVersion_RejectsNonRetired(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 
 	s.CreateVersion("ds", "v1")
@@ -255,7 +255,7 @@ func TestDeleteVersion_RejectsNonRetired(t *testing.T) {
 }
 
 func TestVersion_PromoteMultiNode(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 	s.RegisterNode("node-2")
@@ -273,7 +273,7 @@ func TestVersion_PromoteMultiNode(t *testing.T) {
 }
 
 func TestStore_SetAndGetAssignments(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 
 	assignments := []api.NodeAssignment{{
 		Dataset:   "ds",
@@ -296,7 +296,7 @@ func TestStore_SetAndGetAssignments(t *testing.T) {
 }
 
 func TestStore_GetAssignments_BlocksOnSameGeneration(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 
 	s.SetAssignments("node-1", nil)
 
@@ -334,7 +334,7 @@ func TestStore_GetAssignments_BlocksOnSameGeneration(t *testing.T) {
 }
 
 func TestStore_GetAssignments_UnknownNode(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 
 	resp, ch := s.GetAssignments("unknown", 0)
 	if ch == nil {
@@ -351,7 +351,7 @@ func TestStore_GetAssignments_UnknownNode(t *testing.T) {
 // --- build handle tests ---
 
 func TestStore_SetBuildHandle(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.CreateVersion("ds", "v1")
 
 	if err := s.SetBuildHandle("ds", "v1", "handle-1"); err != nil {
@@ -365,7 +365,7 @@ func TestStore_SetBuildHandle(t *testing.T) {
 }
 
 func TestStore_SetBuildHandle_RejectsNonBuilding(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.CreateVersion("ds", "v1")
 	s.MarkReady("ds", "v1", "/snap", "pv")
@@ -376,7 +376,7 @@ func TestStore_SetBuildHandle_RejectsNonBuilding(t *testing.T) {
 }
 
 func TestStore_GetBuildingVersions(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.CreateVersion("ds1", "v1")
 	s.CreateVersion("ds2", "v2")
 
@@ -394,7 +394,7 @@ func TestStore_GetBuildingVersions(t *testing.T) {
 }
 
 func TestStore_GetBuildingVersions_Empty(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	building := s.GetBuildingVersions()
 	if len(building) != 0 {
 		t.Fatalf("expected 0 building versions, got %d", len(building))
@@ -402,7 +402,7 @@ func TestStore_GetBuildingVersions_Empty(t *testing.T) {
 }
 
 func TestStore_SetDescriptor(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	s.RegisterDataset(api.DatasetSpec{Name: "ds", KeyPrefix: "ds"})
 	s.RegisterNode("node-1")
 
@@ -436,7 +436,7 @@ func TestStore_SetDescriptor(t *testing.T) {
 }
 
 func TestStore_SetDescriptor_NoopOnEmpty(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 	// Should not error even if version doesn't exist (no-op for empty strings).
 	if err := s.SetDescriptor("ds", "v1", "", ""); err != nil {
 		t.Fatal(err)
@@ -444,7 +444,7 @@ func TestStore_SetDescriptor_NoopOnEmpty(t *testing.T) {
 }
 
 func TestStore_ReportAndGetState(t *testing.T) {
-	s := NewStore()
+	s := NewMemStore()
 
 	state := api.NodeState{
 		Node: "node-1",

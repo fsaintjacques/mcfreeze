@@ -1,7 +1,7 @@
 CARGO_FLAGS ?=
 
 .PHONY: build release format lint check-format check-lint check test test-unit test-integration test-kind clean \
-       docker-build kind-up kind-down kind-load
+       docker-build kind-up kind-down kind-load generate
 
 # --- Build ---
 
@@ -50,6 +50,15 @@ test-kind:
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
 	cd go && go test -tags kind -count=1 -v ./...
 
+# --- Code generation ---
+
+# Regenerates deepcopy methods and CRD manifests from kubebuilder markers in
+# go/api/v1alpha1/. Requires controller-gen on PATH (install via:
+#   go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
+generate:
+	cd go && controller-gen object paths=./api/v1alpha1/...
+	cd go && controller-gen crd paths=./api/v1alpha1/... output:crd:dir=../k8s/crds
+
 # --- Clean ---
 
 clean:
@@ -71,6 +80,7 @@ docker-build:
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
 	bash k8s/kind/deploy-csi-hostpath.sh
+	kubectl apply -f k8s/crds/
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
