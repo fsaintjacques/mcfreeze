@@ -10,8 +10,8 @@ import (
 
 // Handle is an opaque identifier for an in-flight build. Its meaning
 // depends on the Async implementation (output dir path for fork,
-// Job name for K8s, synthetic key for tests). Persisted in VersionEntry
-// so it survives control-plane restarts.
+// Job name for K8s, synthetic key for tests). Persisted in
+// DatasetVersion.status.buildJob so it survives control-plane restarts.
 type Handle string
 
 // Phase represents the current phase of a build.
