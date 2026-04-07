@@ -28,6 +28,15 @@ rules:
   - apiGroups: ["frostmap.dev"]
     resources: ["datasets/status", "datasetversions/status"]
     verbs: ["get", "update", "patch"]
+  # Lease-based leader election for the controller-runtime manager.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events are emitted by controller-runtime for leader election transitions
+  # and by reconcilers via mgr.GetEventRecorderFor.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -41,7 +50,9 @@ roleRef:
   kind: Role
   name: frostmap-control-plane
 ---
-# Cluster-scoped: PersistentVolumes (create, get, update, delete, list).
+# Cluster-scoped: PersistentVolumes (create, get, update, delete, list)
+# and VolumeAttachments (list, watch — used by the retirement reconciler
+# to gate PV deletion on "no node still has this disk attached").
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -50,6 +61,9 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["create", "get", "update", "delete", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -18,12 +18,18 @@ type BuildStarter interface {
 	StartBuild(ctx context.Context, spec api.DatasetSpec, versionID string) error
 }
 
+// StateReportCallback is invoked from handlePostState after the broker has
+// recorded a node's state. Used by the NodeAssignmentReconciler to wake on
+// state changes without polling.
+type StateReportCallback func(ctx context.Context, node string)
+
 // Server is the control-plane HTTP server. It serves the node-agent API
 // (assignments long-poll, state reporting) and the build trigger. Per-node
 // state lives in the AssignmentBroker; the Server holds no other state.
 type Server struct {
 	broker   *AssignmentBroker
 	builds   BuildStarter
+	onState  StateReportCallback
 	mux      *http.ServeMux
 	listener net.Listener
 }
@@ -32,6 +38,12 @@ type Server struct {
 // to expose POST /api/v1/dataset/{name}/build can omit it.
 func (s *Server) SetBuildStarter(bs BuildStarter) {
 	s.builds = bs
+}
+
+// SetStateReportCallback wires a callback fired after every successful
+// node-state report. Optional.
+func (s *Server) SetStateReportCallback(cb StateReportCallback) {
+	s.onState = cb
 }
 
 // NewServer creates a Server bound to addr backed by the given broker.
@@ -113,6 +125,9 @@ func (s *Server) handlePostState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.broker.ReportState(node, state)
+	if s.onState != nil {
+		s.onState(r.Context(), node)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 

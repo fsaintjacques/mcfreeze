@@ -9,7 +9,16 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
+
+// stateReportEventBuffer caps the in-memory queue of node-state-report
+// signals between the HTTP /state handler and the reconciler. Reports drop
+// when the buffer is full; the reconciler will still pick up the latest
+// state on its next normal reconcile.
+const stateReportEventBuffer = 64
 
 // NodeAssignmentReconciler keeps the AssignmentBroker in sync with the set of
 // DatasetVersions in state=active and aggregates per-node convergence into
@@ -33,6 +42,12 @@ import (
 type NodeAssignmentReconciler struct {
 	client.Client
 	Broker *controlplane.AssignmentBroker
+
+	// stateReportEvents is fed by OnStateReport (called from the HTTP /state
+	// handler). source.Channel in SetupWithManager pumps events from it into
+	// the controller work queue, so a node-agent state report wakes the
+	// reconciler immediately rather than waiting for an unrelated watch event.
+	stateReportEvents chan event.TypedGenericEvent[client.Object]
 }
 
 // Reconcile implements the loop described above.
@@ -55,6 +70,32 @@ func (r *NodeAssignmentReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 	return ctrl.Result{}, r.patchRollout(ctx, &self)
+}
+
+// OnStateReport is called by controlplane.Server.handlePostState after a
+// node-agent reports its state into the broker. It enqueues a generic event
+// for every active DatasetVersion in the namespace so the reconciler picks
+// up the new state immediately. Drops events if the buffer is full —
+// fallback consistency is provided by the next normal watch-driven reconcile.
+func (r *NodeAssignmentReconciler) OnStateReport(ctx context.Context, _ string) {
+	if r.stateReportEvents == nil {
+		return
+	}
+	var list v1alpha1.DatasetVersionList
+	if err := r.List(ctx, &list); err != nil {
+		return
+	}
+	for i := range list.Items {
+		v := &list.Items[i]
+		if v.Status.State != string(api.StateActive) {
+			continue
+		}
+		select {
+		case r.stateReportEvents <- event.TypedGenericEvent[client.Object]{Object: v}:
+		default:
+			// Buffer full; the next watch event will catch up.
+		}
+	}
 }
 
 // syncBroker recomputes the desired assignments for every registered node and
@@ -173,9 +214,13 @@ func rolloutsEqual(a, b *v1alpha1.RolloutStatus) bool {
 }
 
 // SetupWithManager registers the reconciler with a controller-runtime manager.
+// It also creates the state-report event channel that OnStateReport pushes
+// to and binds it to the controller via source.Channel.
 func (r *NodeAssignmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.stateReportEvents = make(chan event.TypedGenericEvent[client.Object], stateReportEventBuffer)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DatasetVersion{}).
 		Named("nodeassignment").
+		WatchesRawSource(source.Channel(r.stateReportEvents, &handler.EnqueueRequestForObject{})).
 		Complete(r)
 }
