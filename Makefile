@@ -43,8 +43,20 @@ test-unit:
 	cd rust && cargo test $(CARGO_FLAGS)
 	cd go && go test ./...
 
-test-integration: build
-	cd go && FM=$(abspath rust/target/debug/fm) go test -tags integration ./...
+ENVTEST_K8S_VERSION ?= 1.31.0
+SETUP_ENVTEST ?= $(shell go env GOPATH)/bin/setup-envtest
+
+$(SETUP_ENVTEST):
+	cd go && go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+envtest-setup: $(SETUP_ENVTEST)
+	$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path
+
+test-integration: build envtest-setup
+	cd go && \
+		FM=$(abspath rust/target/debug/fm) \
+		KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
+		go test -tags integration ./...
 
 test-kind:
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)

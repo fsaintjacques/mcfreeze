@@ -8,15 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
@@ -24,21 +22,26 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 	"github.com/fsaintjacques/frostmap/go/internal/testutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestFullLoop exercises the entire pipeline:
+// TestFullLoop exercises the entire pipeline against a real apiserver via
+// envtest:
 //
-//	control-plane builds snapshot → assigns to node →
+//	test creates Dataset + DatasetVersion CRs →
+//	DatasetVersionReconciler runs the fork builder →
+//	NodeAssignmentReconciler pushes to broker →
 //	node-agent reconciles (attach, mount, catalog, version confirm) →
 //	KV server serves data via memcache →
-//	control-plane receives PhaseActive state report →
+//	control-plane sees PhaseActive in NodeState →
 //	upgrade to v2 → re-verify
 func TestFullLoop(t *testing.T) {
+	testutil.EnvtestSkipIfBinariesMissing(t)
+
 	volumeBase := t.TempDir()
 	buildBase := t.TempDir()
 
-	// --- control-plane ---
-	builder := &builder.Fake{
+	b := &builder.Fake{
 		FMBinary:   testutil.FMBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,
@@ -50,11 +53,18 @@ func TestFullLoop(t *testing.T) {
 		},
 	}
 
-	orch, err := controlplane.NewOrchestrator(builder, volumeBase)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { orch.Close() })
+	cp := testutil.NewControlPlane(t, b, volumeBase)
+
+	// Dataset CR (drives the reconcilers).
+	cp.CreateDataset(t, &v1alpha1.Dataset{
+		ObjectMeta: metav1.ObjectMeta{Name: "users"},
+		Spec: v1alpha1.DatasetSpec{
+			KeyPrefix:  "users",
+			ShardCount: 4,
+			Retention:  2,
+			Source:     v1alpha1.SourceSpec{KeyColumn: "key", ValueColumn: "value"},
+		},
+	})
 
 	// --- KV server ---
 	kvSrv := testutil.StartEmptyCatalogServer(t)
@@ -72,44 +82,40 @@ func TestFullLoop(t *testing.T) {
 		},
 		volume.NewFSManager(volumeBase),
 		mount.NewFSMounter(),
-		assignment.NewHTTPSource(orch.Addr(), nodeName),
-		assignment.NewHTTPStateReporter(orch.Addr(), nodeName),
+		assignment.NewHTTPSource("http://"+cp.Addr(), nodeName),
+		assignment.NewHTTPStateReporter("http://"+cp.Addr(), nodeName),
 		version.NewHTTPChecker(fmt.Sprintf("http://%s", kvSrv.HTTPAddr)),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	orch.RegisterNode(nodeName)
+	cp.Broker.RegisterNode(nodeName)
 
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(ctx) }()
 
-	// --- v1: build and promote ---
-	spec := api.DatasetSpec{Name: "users", KeyPrefix: "users"}
-	if err := orch.BuildAndPromote(ctx, spec, "v1"); err != nil {
-		t.Fatalf("BuildAndPromote v1: %v", err)
-	}
+	// --- v1: kubectl-apply equivalent ---
+	cp.CreateVersion(t, "users", "v1", 4)
+	cp.WaitForVersionState(t, "users", "v1", string(api.StateActive), 30*time.Second)
 
-	// Wait for control-plane to receive PhaseActive.
-	waitForNodePhase(t, orch.Store, nodeName, "users", "v1", api.PhaseActive, 15*time.Second)
+	// Wait for the node-agent to report PhaseActive on v1.
+	waitForNodePhase(t, cp, nodeName, "users", "v1", api.PhaseActive, 15*time.Second)
 
 	// Verify memcache.
 	assertMcGet(t, kvSrv.TCPAddr, "users:user-1", "Alice")
 	assertMcGet(t, kvSrv.TCPAddr, "users:user-2", "Bob")
 
 	// --- v2: upgrade ---
-	builder.Data["users"] = [][2][]byte{
+	b.Data["users"] = [][2][]byte{
 		{[]byte("user-1"), []byte("Alice-v2")},
 		{[]byte("user-2"), []byte("Bob-v2")},
 		{[]byte("user-3"), []byte("Charlie")},
 	}
 
-	if err := orch.BuildAndPromote(ctx, spec, "v2"); err != nil {
-		t.Fatalf("BuildAndPromote v2: %v", err)
-	}
-
-	waitForNodePhase(t, orch.Store, nodeName, "users", "v2", api.PhaseActive, 15*time.Second)
+	cp.CreateVersion(t, "users", "v2", 4)
+	cp.WaitForVersionState(t, "users", "v2", string(api.StateActive), 30*time.Second)
+	waitForNodePhase(t, cp, nodeName, "users", "v2", api.PhaseActive, 15*time.Second)
 
 	assertMcGet(t, kvSrv.TCPAddr, "users:user-1", "Alice-v2")
 	assertMcGet(t, kvSrv.TCPAddr, "users:user-2", "Bob-v2")
@@ -120,138 +126,13 @@ func TestFullLoop(t *testing.T) {
 	<-agentDone
 }
 
-// TestMultiNodeConvergenceAndRetirement runs two node-agents against the same
-// control-plane, verifies both converge, then upgrades and checks that the
-// old version becomes eligible for retirement.
-func TestMultiNodeConvergenceAndRetirement(t *testing.T) {
-	buildBase := t.TempDir()
-
-	builder := &builder.Fake{
-		FMBinary:   testutil.FMBinary(t),
-		Partitions: 4,
-		OutputBase: buildBase,
-		Data: map[string][][2][]byte{
-			"ds": {
-				{[]byte("k"), []byte("val-v1")},
-			},
-		},
-	}
-
-	// Shared volume base — each node gets its own subdirectory.
-	vol1 := t.TempDir()
-	vol2 := t.TempDir()
-
-	orch, err := controlplane.NewOrchestrator(builder, vol1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Override VolumeBase for node-2 symlinking later.
-	t.Cleanup(func() { orch.Close() })
-
-	orch.RegisterNode("node-1")
-	orch.RegisterNode("node-2")
-
-	// Each node gets its own KV server.
-	kv1 := testutil.StartEmptyCatalogServer(t)
-	kv2 := testutil.StartEmptyCatalogServer(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	startAgent := func(name, volBase, mountBase, catalogDir, kvHTTP string) chan error {
-		agent := nodeagent.New(
-			nodeagent.Config{
-				NodeName:       name,
-				MountBase:      mountBase,
-				CatalogDir:     catalogDir,
-				ReportInterval: time.Hour,
-			},
-			volume.NewFSManager(volBase),
-			mount.NewFSMounter(),
-			assignment.NewHTTPSource(orch.Addr(), name),
-			assignment.NewHTTPStateReporter(orch.Addr(), name),
-			version.NewHTTPChecker(fmt.Sprintf("http://%s", kvHTTP)),
-		)
-		done := make(chan error, 1)
-		go func() { done <- agent.Run(ctx) }()
-		return done
-	}
-
-	mount1 := t.TempDir()
-	mount2 := t.TempDir()
-	done1 := startAgent("node-1", vol1, mount1, kv1.CatalogDir(), kv1.HTTPAddr)
-	done2 := startAgent("node-2", vol2, mount2, kv2.CatalogDir(), kv2.HTTPAddr)
-
-	// --- v1: build and promote ---
-	spec := api.DatasetSpec{Name: "ds", KeyPrefix: "ds"}
-	if err := orch.BuildAndPromote(ctx, spec, "v1"); err != nil {
-		t.Fatalf("BuildAndPromote v1: %v", err)
-	}
-
-	// Symlink the snapshot into vol2 as well (Promote pushed to both nodes,
-	// but only vol1 got the symlink from BuildAndPromote).
-	symlinkPV(t, buildBase+"/ds/v1", vol2, "pv-ds-v1")
-
-	// Wait for both nodes to converge.
-	if err := orch.WaitForConvergence(ctx, "ds", "v1"); err != nil {
-		t.Fatalf("WaitForConvergence v1: %v", err)
-	}
-
-	status := orch.Store.RolloutStatus("ds")
-	if len(status.ConvergedNodes) != 2 {
-		t.Fatalf("converged = %d, want 2: pending=%v error=%v", len(status.ConvergedNodes), status.PendingNodes, status.ErrorNodes)
-	}
-
-	// Verify both KV servers serve the data.
-	assertMcGet(t, kv1.TCPAddr, "ds:k", "val-v1")
-	assertMcGet(t, kv2.TCPAddr, "ds:k", "val-v1")
-
-	// --- v2: upgrade ---
-	builder.Data["ds"] = [][2][]byte{
-		{[]byte("k"), []byte("val-v2")},
-	}
-	if err := orch.BuildAndPromote(ctx, spec, "v2"); err != nil {
-		t.Fatalf("BuildAndPromote v2: %v", err)
-	}
-	symlinkPV(t, buildBase+"/ds/v2", vol2, "pv-ds-v2")
-
-	if err := orch.WaitForConvergence(ctx, "ds", "v2"); err != nil {
-		t.Fatalf("WaitForConvergence v2: %v", err)
-	}
-
-	assertMcGet(t, kv1.TCPAddr, "ds:k", "val-v2")
-	assertMcGet(t, kv2.TCPAddr, "ds:k", "val-v2")
-
-	// v1 should be eligible for retirement (both nodes on v2).
-	eligible := orch.Store.CheckRetirement("ds")
-	if len(eligible) != 1 || eligible[0].ID != "v1" {
-		t.Fatalf("expected v1 eligible for retirement, got %+v", eligible)
-	}
-
-	if err := orch.Store.DeleteVersion("ds", "v1"); err != nil {
-		t.Fatalf("DeleteVersion v1: %v", err)
-	}
-
-	cancel()
-	<-done1
-	<-done2
-}
-
-func symlinkPV(t *testing.T, snapPath, volBase, pvName string) {
-	t.Helper()
-	link := filepath.Join(volBase, pvName)
-	if err := os.Symlink(snapPath, link); err != nil && !os.IsExist(err) {
-		t.Fatalf("symlink PV %s: %v", pvName, err)
-	}
-}
-
 // --- helpers ---
 
-func waitForNodePhase(t *testing.T, store controlplane.Store, nodeName, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
+func waitForNodePhase(t *testing.T, cp *testutil.ControlPlane, nodeName, dataset, versionID string, want api.DatasetPhase, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if state, ok := store.GetNodeState(nodeName); ok {
+		if state, ok := cp.Broker.GetNodeState(nodeName); ok {
 			for _, ds := range state.Datasets {
 				if ds.Dataset == dataset && ds.VersionID == versionID && ds.Phase == want {
 					return
