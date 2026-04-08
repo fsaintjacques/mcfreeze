@@ -218,7 +218,10 @@ fn build_partition_table(dir: &Path) -> Result<(Vec<Bucket>, PartitionIndexDone)
         .records()
         .map(|r| -> Result<RawEntry, LoaderError> {
             let r = r?;
-            Ok(RawEntry::new(r.fingerprint, r.aligned_offset)?)
+            // Spill already holds compact fp + u32 offset; widen for the
+            // current RawEntry API. insert() will re-narrow via
+            // compact_fingerprint (idempotent) and cast offset back to u32.
+            Ok(RawEntry::new(r.fingerprint as u64, r.offset as u64)?)
         })
         .collect::<Result<_, _>>()?;
 
