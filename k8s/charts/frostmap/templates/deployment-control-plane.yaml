@@ -45,11 +45,11 @@ spec:
                   fieldPath: metadata.namespace
           ports:
             - name: http
-              containerPort: {{ .Values.controlPlane.listen | trimPrefix ":" | atoi }}
+              containerPort: {{ splitList ":" .Values.controlPlane.listen | last | atoi }}
             - name: metrics
-              containerPort: {{ .Values.controlPlane.metricsBindAddress | trimPrefix ":" | atoi }}
+              containerPort: {{ splitList ":" .Values.controlPlane.metricsBindAddress | last | atoi }}
             - name: health
-              containerPort: {{ .Values.controlPlane.healthProbeBindAddress | trimPrefix ":" | atoi }}
+              containerPort: {{ splitList ":" .Values.controlPlane.healthProbeBindAddress | last | atoi }}
           livenessProbe:
             httpGet:
               path: /healthz

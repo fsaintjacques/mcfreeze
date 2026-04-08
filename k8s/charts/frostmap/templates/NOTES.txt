@@ -11,8 +11,9 @@ Node-agent (DaemonSet):
 {{- end }}
 
 CRDs are installed once via helm's crds/ directory and are not removed on
-`helm uninstall`. To upgrade them after a chart bump:
-  kubectl apply -f $(helm show chart {{ .Chart.Name }} | yq '.path')/crds/
+`helm uninstall`. To upgrade them after a chart bump, apply the crds/
+directory from the chart source directly:
+  kubectl apply -f k8s/charts/frostmap/crds/
 
 Define a Dataset to start ingesting data:
   kubectl apply -f your-dataset.yaml
