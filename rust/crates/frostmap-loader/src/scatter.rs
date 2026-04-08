@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use frostmap_format::{
     data::AlignedWriter,
-    index::fingerprint,
+    index::{compact_fingerprint, fingerprint, RawEntry},
     meta::{Layout, DEFAULT_VERIFY_SEED},
 };
 
@@ -354,11 +354,14 @@ fn partition_writer(
             histogram.record(size.max(1)).unwrap_or_default();
             sum_bytes += size;
             let (aligned_offset, _on_disk_size) = data.write_value(&key, &value)?;
+            // RawEntry::new validates the offset fits in u32 (max 256 GB
+            // per partition). We then store the compact 32-bit fingerprint
+            // and the validated offset directly — spill is byte-identical
+            // to Bucket layout.
+            let entry = RawEntry::new(fp, aligned_offset)?;
             spill.push(SpillRecord {
-                fingerprint: fp,
-                aligned_offset,
-                size: 0, // unused in V3 (size is in value header)
-                _pad: 0,
+                fingerprint: compact_fingerprint(entry.fingerprint),
+                offset: entry.aligned_offset,
             })?;
             n_keys += 1;
         }
@@ -434,7 +437,7 @@ mod tests {
             // Read one aligned block to get the value header.
             let raw = pread(
                 &data_file,
-                rec.aligned_offset * VALUE_ALIGNMENT,
+                rec.offset as u64 * VALUE_ALIGNMENT,
                 VALUE_ALIGNMENT as u32,
             )
             .unwrap();

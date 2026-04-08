@@ -7,26 +7,32 @@ use bytemuck::{Pod, Zeroable};
 use crate::error::LoaderError;
 
 // ---------------------------------------------------------------------------
-// SpillRecord — 24-byte fixed-size on-disk entry
+// SpillRecord — 8-byte fixed-size on-disk entry
 // ---------------------------------------------------------------------------
 
-pub const SPILL_MAGIC: [u8; 8] = *b"KVSPILL\n";
+/// Magic bumped from `KVSPILL\n` (24-byte record) to `KVSPIL2\n` (8-byte
+/// record). The old format's 24-byte record carried a full u64 fingerprint,
+/// u64 aligned offset, a dead `size: u32`, and `_pad: u32`. The new format
+/// stores exactly the two fields the index phase actually consumes: the
+/// compact 32-bit fingerprint and the aligned offset in 64-byte units. The
+/// layout is identical to `frostmap_format::index::Bucket`.
+pub const SPILL_MAGIC: [u8; 8] = *b"KVSPIL2\n";
 pub const SPILL_HEADER_SIZE: usize = 16; // magic(8) + count(8)
-pub const SPILL_RECORD_SIZE: usize = 24;
+pub const SPILL_RECORD_SIZE: usize = 8;
 
 /// On-disk representation of one index entry accumulated during scatter.
 ///
-/// 24 bytes (4-byte explicit pad after `size`) so that the struct is
-/// 8-byte aligned and safe to cast via `bytemuck`.
+/// Byte-layout-identical to `frostmap_format::index::Bucket`: spill is an
+/// unsorted multiset of buckets, and the index build phase hash-places them.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct SpillRecord {
-    pub fingerprint: u64,    //  8
-    pub aligned_offset: u64, //  8
-    /// Unused in V3 (value size is in the value header). Written as 0.
-    /// Retained for struct layout compatibility (24-byte Pod record).
-    pub size: u32, //  4
-    pub _pad: u32,           //  4  → total 24
+    /// Compact 32-bit fingerprint (low 32 bits of the xxhash64). Already
+    /// biased away from zero by `compact_fingerprint`.
+    pub fingerprint: u32,
+    /// Aligned offset into `data.bin`, in `VALUE_ALIGNMENT` (64-byte) units.
+    /// Max addressable: 2^32 × 64 B = 256 GB per partition.
+    pub offset: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<SpillRecord>() == SPILL_RECORD_SIZE);
@@ -174,42 +180,36 @@ mod tests {
     fn single_record() {
         let r = SpillRecord {
             fingerprint: 0xDEAD,
-            aligned_offset: 42,
-            size: 100,
-            _pad: 0,
+            offset: 42,
         };
         let got = round_trip(&[r]);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].fingerprint, r.fingerprint);
-        assert_eq!(got[0].aligned_offset, r.aligned_offset);
-        assert_eq!(got[0].size, r.size);
+        assert_eq!(got[0].offset, r.offset);
     }
 
     #[test]
     fn many_records() {
-        let records: Vec<SpillRecord> = (0u64..1000)
+        let records: Vec<SpillRecord> = (0u32..1000)
             .map(|i| SpillRecord {
-                fingerprint: i,
-                aligned_offset: i * 2,
-                size: i as u32,
-                _pad: 0,
+                fingerprint: i + 1, // avoid zero-fingerprint sentinel
+                offset: i * 2,
             })
             .collect();
         let got = round_trip(&records);
         assert_eq!(got.len(), records.len());
         for (a, b) in got.iter().zip(records.iter()) {
             assert_eq!(a.fingerprint, b.fingerprint);
-            assert_eq!(a.aligned_offset, b.aligned_offset);
-            assert_eq!(a.size, b.size);
+            assert_eq!(a.offset, b.offset);
         }
     }
 
     #[test]
     fn spill_iter_size_hint() {
-        let records: Vec<SpillRecord> = (0..5)
+        let records: Vec<SpillRecord> = (0u32..5)
             .map(|i| SpillRecord {
-                fingerprint: i,
-                ..Default::default()
+                fingerprint: i + 1,
+                offset: 0,
             })
             .collect();
         let dir = TempDir::new().unwrap();

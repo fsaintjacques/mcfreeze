@@ -22,10 +22,7 @@ use frostmap_format::meta::{
 };
 
 use build::IndexBuildPhase;
-use scatter::{
-    new_size_histogram, Fanout, PartitionDone, ScatterDone, ScatterPhase, ScatterStats,
-    ValueSizeHistogram,
-};
+use scatter::{Fanout, PartitionDone, ScatterDone, ScatterPhase, ScatterStats};
 use spill::SpillReader;
 
 // ---------------------------------------------------------------------------
@@ -63,8 +60,6 @@ async fn check_scatter_done(
     // Fallback: derive completion from per-partition files.
     let n = layout.n_partitions as usize;
     let mut partitions = Vec::with_capacity(n);
-    let mut merged = new_size_histogram();
-    let mut total_sum = 0u64;
     let mut data_bytes = 0u64;
 
     for i in 0..n {
@@ -78,21 +73,16 @@ async fn check_scatter_done(
         data_bytes += std::fs::metadata(&data_path)?.len();
 
         if spill_path.exists() {
-            let reader = SpillReader::open(&spill_path)?;
-            let n_part = reader.count();
-            let mut part_hist = new_size_histogram();
-            let mut part_sum = 0u64;
-            for rec in reader.records() {
-                let size = rec?.size as u64;
-                part_hist.record(size.max(1)).unwrap_or_default();
-                part_sum += size;
-            }
-            merged.add(&part_hist).expect("compatible bounds");
-            total_sum += part_sum;
-            let vs = ValueSizeHistogram::from_histogram(&part_hist, part_sum, n_part);
+            // Spill no longer carries value sizes (they live in each value's
+            // 12-byte header in data.bin). On this crash-recovery fallback
+            // we record key counts only; the histogram is left as None. The
+            // happy path still gets the full histogram via scatter.done.
+            // TODO: re-introduce histogram reconstruction (by walking
+            // data.bin headers or via a per-partition sidecar).
+            let n_part = SpillReader::open(&spill_path)?.count();
             partitions.push(PartitionDone {
                 n_keys: n_part,
-                value_sizes: Some(vs),
+                value_sizes: None,
             });
         } else if frostmap_format::meta::index_path(root).exists() {
             // index.all exists but no spill — partition was already indexed.
@@ -108,16 +98,6 @@ async fn check_scatter_done(
     }
 
     let n_keys = partitions.iter().map(|p| p.n_keys).sum();
-    let sample_keys = merged.len();
-    let value_sizes = if merged.is_empty() {
-        None
-    } else {
-        Some(ValueSizeHistogram::from_histogram(
-            &merged,
-            total_sum,
-            sample_keys,
-        ))
-    };
 
     let done = ScatterDone {
         n_keys,
@@ -125,7 +105,7 @@ async fn check_scatter_done(
         data_bytes,
         wall_secs: None,
         bytes_per_sec: None,
-        value_sizes,
+        value_sizes: None,
         partitions,
     };
     let json = serde_json::to_string_pretty(&done)
