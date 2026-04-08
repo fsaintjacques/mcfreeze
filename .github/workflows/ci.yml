@@ -2,8 +2,22 @@ name: CI
 
 on:
   pull_request:
+    paths:
+      - 'rust/**'
+      - 'go/**'
+      - 'docker/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/ci.yml'
   push:
     branches: [main]
+    paths:
+      - 'rust/**'
+      - 'go/**'
+      - 'docker/**'
+      - 'k8s/**'
+      - 'Makefile'
+      - '.github/workflows/ci.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,7 +25,7 @@ env:
   FROSTMAP_IMAGE: frostmap:dev
 
 jobs:
-  build:
+  compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,29 +40,18 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Build fm and fmtctl (debug)
         run: make build
-      - name: Stage runtime image context
-        run: |
-          mkdir -p /tmp/stage
-          cp rust/target/debug/fm      /tmp/stage/fm
-          cp go/bin/fmtctl             /tmp/stage/fmtctl
-          cp docker/Dockerfile.runtime /tmp/stage/Dockerfile
-      - uses: docker/setup-buildx-action@v3
-      - name: Build runtime image
-        uses: docker/build-push-action@v6
-        with:
-          context: /tmp/stage
-          tags: ${{ env.FROSTMAP_IMAGE }}
-          outputs: type=docker,dest=/tmp/frostmap.tar
-      - name: Upload image artifact
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: frostmap-image
-          path: /tmp/frostmap.tar
+          name: frostmap-binaries
+          path: |
+            rust/target/debug/fm
+            go/bin/fmtctl
           retention-days: 1
 
   check:
     runs-on: ubuntu-latest
-    needs: build
+    needs: compile
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +69,7 @@ jobs:
 
   kind:
     runs-on: ubuntu-latest
-    needs: build
+    needs: compile
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -74,13 +77,20 @@ jobs:
         with:
           go-version: stable
           cache-dependency-path: go/go.sum
-      - name: Download image artifact
+      - name: Download binaries
         uses: actions/download-artifact@v4
         with:
-          name: frostmap-image
-          path: /tmp
-      - name: Load image into docker
-        run: docker load -i /tmp/frostmap.tar
+          name: frostmap-binaries
+          path: /tmp/bins
+      - name: Stage runtime image context
+        run: |
+          mkdir -p /tmp/stage
+          cp /tmp/bins/rust/target/debug/fm /tmp/stage/fm
+          cp /tmp/bins/go/bin/fmtctl        /tmp/stage/fmtctl
+          cp docker/Dockerfile.runtime      /tmp/stage/Dockerfile
+          chmod +x /tmp/stage/fm /tmp/stage/fmtctl
+      - name: Build runtime image
+        run: docker build -t ${{ env.FROSTMAP_IMAGE }} /tmp/stage
       - name: Install KIND
         uses: helm/kind-action@v1
         with:
@@ -89,8 +99,54 @@ jobs:
         run: make kind-up
       - name: Load image into kind
         run: kind load docker-image ${{ env.FROSTMAP_IMAGE }} --name ${{ env.KIND_CLUSTER_NAME }}
+      - name: Verify image present in kind node
+        run: |
+          echo '::group::docker images on runner'
+          docker image ls ${{ env.FROSTMAP_IMAGE }}
+          echo '::endgroup::'
+          echo '::group::containerd images on kind node'
+          docker exec ${{ env.KIND_CLUSTER_NAME }}-control-plane crictl images | grep -i frostmap || {
+            echo "frostmap image NOT found in kind node containerd"
+            docker exec ${{ env.KIND_CLUSTER_NAME }}-control-plane crictl images
+            exit 1
+          }
+          echo '::endgroup::'
       - name: Install chart and run kind tests
         run: make helm-install-kind test-kind
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo '::group::nodes'
+          kubectl get nodes -o wide
+          echo '::endgroup::'
+          echo '::group::all resources (all namespaces)'
+          kubectl get all -A
+          echo '::endgroup::'
+          echo '::group::events (all namespaces, sorted)'
+          kubectl get events -A --sort-by=.lastTimestamp
+          echo '::endgroup::'
+          for ns in frostmap-system default; do
+            echo "::group::describe pods ($ns)"
+            kubectl -n "$ns" describe pods
+            echo '::endgroup::'
+            echo "::group::pod logs ($ns, all containers, current + previous)"
+            for pod in $(kubectl -n "$ns" get pods -o name 2>/dev/null); do
+              echo "--- $pod ---"
+              kubectl -n "$ns" logs "$pod" --all-containers --tail=500 2>&1
+              echo "--- $pod (previous) ---"
+              kubectl -n "$ns" logs "$pod" --all-containers --previous --tail=500 2>&1
+            done
+            echo '::endgroup::'
+          done
+          echo '::group::CRDs'
+          kubectl get crd | grep -i frostmap || true
+          echo '::endgroup::'
+          echo '::group::jobs and build CRs (all namespaces)'
+          kubectl get jobs -A
+          kubectl get frostmapbuilds -A 2>/dev/null || true
+          kubectl describe frostmapbuilds -A 2>/dev/null || true
+          echo '::endgroup::'
       - name: Teardown
         if: always()
         run: make kind-down
