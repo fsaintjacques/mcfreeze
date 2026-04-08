@@ -33,12 +33,26 @@ pub fn fingerprint(key: &[u8]) -> u64 {
     }
 }
 
-/// Truncate a 64-bit fingerprint to the 32-bit bucket fingerprint.
-/// Zero is biased to 1 (the full fingerprint is never zero, but truncation
-/// could produce zero in theory — belt and suspenders).
+/// Derive the 32-bit bucket fingerprint from a full 64-bit fingerprint.
+///
+/// Uses the **high** 32 bits. This is intentional: `Layout::partition_of`
+/// uses the low `log2(n_partitions)` bits of the same u64 to route records
+/// to a partition, so within a single partition every record shares the
+/// same low bits. If `compact_fingerprint` also used the low 32 bits, the
+/// compact fps within a partition would share those same low bits, and
+/// `cfp % n_buckets` would collapse onto a fraction `n_buckets /
+/// gcd(2^partition_bits, n_buckets)` of the table — guaranteed PSL
+/// overflow on any realistic load.
+///
+/// Taking the high 32 bits decouples partition routing from home-position
+/// computation: within a partition, compact fps are uniformly distributed
+/// across the full `u32` space.
+///
+/// Zero is biased to 1 to preserve the zero-fingerprint sentinel that
+/// marks empty buckets.
 #[inline]
 pub fn compact_fingerprint(fp: u64) -> u32 {
-    let t = fp as u32;
+    let t = (fp >> 32) as u32;
     if t == 0 {
         1
     } else {
@@ -91,17 +105,22 @@ impl Bucket {
 // ---------------------------------------------------------------------------
 
 /// A raw entry accumulated during the data-write phase.
+///
+/// `fingerprint` is the **pre-compacted** 32-bit bucket fingerprint (the
+/// result of `compact_fingerprint` on the full u64 xxhash64). Storing it
+/// pre-compact removes the need for `insert` to re-narrow per call and
+/// matches the on-disk `Bucket` layout byte-for-byte.
 #[derive(Clone, Copy)]
 pub struct RawEntry {
-    /// Full 64-bit fingerprint (used for partitioning; truncated to 32 bits for the bucket).
-    pub fingerprint: u64,
+    /// Compact 32-bit fingerprint, already biased away from zero.
+    pub fingerprint: u32,
     /// Aligned offset in VALUE_ALIGNMENT units.
     pub aligned_offset: u32,
 }
 
 impl RawEntry {
     /// Validate that offset fits in u32.
-    pub fn new(fingerprint: u64, aligned_offset: u64) -> Result<Self> {
+    pub fn new(fingerprint: u32, aligned_offset: u64) -> Result<Self> {
         if aligned_offset > MAX_OFFSET as u64 {
             return Err(Error::OffsetOverflow(aligned_offset));
         }
@@ -158,7 +177,8 @@ pub fn bucket_count(n_keys: usize) -> usize {
 pub fn insert(table: &mut [Bucket], psls: &mut [u8], entry: RawEntry) -> Result<()> {
     debug_assert_eq!(table.len(), psls.len(), "psls must be parallel to table");
     let n = table.len();
-    let cfp = compact_fingerprint(entry.fingerprint);
+    // RawEntry.fingerprint is already the compact 32-bit form.
+    let cfp = entry.fingerprint;
     let mut pos = cfp as usize % n;
     let mut psl = 0u8;
     let mut cur_fp = cfp;
@@ -449,12 +469,12 @@ mod tests {
     use super::*;
 
     /// Test helper: probe the entire table for the first match.
-    fn probe(table: &[Bucket], fingerprint: u64) -> Option<u64> {
+    /// Takes a pre-compacted u32 fingerprint.
+    fn probe(table: &[Bucket], cfp: u32) -> Option<u64> {
         let n = table.len();
         if n == 0 {
             return None;
         }
-        let cfp = compact_fingerprint(fingerprint);
         let mut pos = cfp as usize % n;
         let mut steps = 0usize;
 
@@ -526,18 +546,18 @@ mod tests {
 
     #[test]
     fn raw_entry_rejects_max_offset() {
-        let fp = fingerprint(b"key");
-        assert!(RawEntry::new(fp, u32::MAX as u64).is_err());
+        let cfp = compact_fingerprint(fingerprint(b"key"));
+        assert!(RawEntry::new(cfp, u32::MAX as u64).is_err());
         // One below the sentinel is still valid.
-        assert!(RawEntry::new(fp, (u32::MAX - 1) as u64).is_ok());
+        assert!(RawEntry::new(cfp, (u32::MAX - 1) as u64).is_ok());
     }
 
     // --- build / probe ---
 
     fn make_entry(key: &[u8], byte_offset: u64) -> RawEntry {
-        let fp = fingerprint(key);
+        let cfp = compact_fingerprint(fingerprint(key));
         let off = byte_offset / VALUE_ALIGNMENT;
-        RawEntry::new(fp, off).unwrap()
+        RawEntry::new(cfp, off).unwrap()
     }
 
     #[test]
@@ -561,7 +581,7 @@ mod tests {
     fn probe_miss() {
         let entries = vec![make_entry(b"hello", 0)];
         let (table, _) = build(&entries).unwrap();
-        let absent = fingerprint(b"absent");
+        let absent = compact_fingerprint(fingerprint(b"absent"));
         assert_eq!(probe(&table, absent), None);
     }
 
@@ -603,7 +623,7 @@ mod tests {
     fn probe_group_matches_scalar() {
         let (table, entries) = simd_test_table();
         for e in &entries {
-            let cfp = compact_fingerprint(e.fingerprint);
+            let cfp = e.fingerprint;
             let pos = cfp as usize % table.len();
 
             let expected = probe_group_scalar(&table, cfp, pos);
@@ -631,7 +651,10 @@ mod tests {
             assert!(result.is_some(), "miss for fingerprint {}", e.fingerprint);
             assert_eq!(result.unwrap(), e.aligned_offset as u64 * VALUE_ALIGNMENT);
         }
-        assert_eq!(probe(&table, fingerprint(b"absent")), None);
+        assert_eq!(
+            probe(&table, compact_fingerprint(fingerprint(b"absent"))),
+            None
+        );
     }
 
     // --- last-group boundary ---
@@ -692,7 +715,7 @@ mod tests {
 
         // probe must iterate: group at 4 (no match), group at 12 (no match),
         // group at 20 (match at slot 0).
-        assert_eq!(probe(&table, target_cfp as u64), Some(42u64 * 64));
+        assert_eq!(probe(&table, target_cfp), Some(42u64 * 64));
     }
 
     #[test]

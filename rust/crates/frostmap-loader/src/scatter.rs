@@ -355,12 +355,13 @@ fn partition_writer(
             sum_bytes += size;
             let (aligned_offset, _on_disk_size) = data.write_value(&key, &value)?;
             // RawEntry::new validates the offset fits in u32 (max 256 GB
-            // per partition). We then store the compact 32-bit fingerprint
-            // and the validated offset directly — spill is byte-identical
-            // to Bucket layout.
-            let entry = RawEntry::new(fp, aligned_offset)?;
+            // per partition). The fingerprint is pre-compacted to 32 bits
+            // via compact_fingerprint (high 32 bits of the u64 hash, so
+            // it is uncorrelated with the partition routing bits in the
+            // low 32). The resulting record is byte-identical to Bucket.
+            let entry = RawEntry::new(compact_fingerprint(fp), aligned_offset)?;
             spill.push(SpillRecord {
-                fingerprint: compact_fingerprint(entry.fingerprint),
+                fingerprint: entry.fingerprint,
                 offset: entry.aligned_offset,
             })?;
             n_keys += 1;

@@ -254,6 +254,27 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
         None
     };
 
+    // Resume fast-path: if scatter has already completed for this output
+    // and the snapshot is not finalized yet, skip source construction
+    // entirely. Opening a BigQuery read session + 8 streaming decoders +
+    // protobuf transcoder state costs multiple GB of resident memory —
+    // none of which is needed once every partition has been spilled to
+    // disk. Holding that memory through the index phase is what causes
+    // the loader to OOM on a pure index-phase rerun.
+    if !args.dry_run && !args.download_benchmark {
+        if let Some(output) = args.output.as_ref() {
+            let scatter_done = output.join("scatter.done");
+            let meta_path = output.join("meta.json");
+            if scatter_done.exists() && !meta_path.exists() {
+                info!(
+                    output = %output.display(),
+                    "scatter.done present and meta.json missing — running index phase only",
+                );
+                return run_index_only(&args).await;
+            }
+        }
+    }
+
     let pipeline = build_pipeline(&args, worker_config).await?;
 
     if args.dry_run {
@@ -269,6 +290,56 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
             .load(&output, args.partitions, args.index_parallelism)
             .await
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resume path: index phase only, no sources opened
+// ---------------------------------------------------------------------------
+
+/// Run the index phase against a snapshot whose scatter phase is already
+/// complete. No source is opened; no gRPC/Arrow/transcoder state is ever
+/// resident while the index build runs.
+///
+/// Protobuf descriptor patching is intentionally skipped on this path.
+/// If the original load used protobuf encoding, the descriptor will not
+/// be embedded in meta.json on this rerun; re-run from source if the
+/// descriptor is required.
+async fn run_index_only(args: &LoadArgs) -> Result<()> {
+    let output = args
+        .output
+        .clone()
+        .context("--output is required for index-only resume")?;
+
+    let loader_config = LoaderConfig {
+        n_partitions: args.partitions,
+        index_parallelism: args.index_parallelism,
+        ..LoaderConfig::default()
+    };
+    let loader = SnapshotLoader::new(&output, loader_config)
+        .context("failed to create SnapshotLoader")?;
+
+    let scatter_result = loader
+        .scatter_result_from_done()
+        .await
+        .context("failed to read scatter.done")?
+        .context("scatter.done not found or invalid — cannot run index-only")?;
+
+    let index_reporter =
+        ProgressReporter::new("index", Some(args.partitions as u64), args.progress_secs);
+    let stats = loader
+        .finalize(scatter_result, Some(index_reporter.updater()))
+        .await
+        .context("index/finalize failed")?;
+    index_reporter.stop();
+
+    info!(
+        n_keys = stats.n_keys,
+        data_bytes = stats.data_bytes,
+        scatter_secs = stats.scatter_duration.as_secs_f64(),
+        index_secs = stats.index_duration.as_secs_f64(),
+        "load complete (index-only resume)",
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
