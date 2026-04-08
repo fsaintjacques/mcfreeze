@@ -60,7 +60,7 @@ test-integration: build envtest-setup
 
 test-kind: helm-install-kind
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
-	cd go && go test -tags kind -count=1 -v ./...
+	cd go && FROSTMAP_IMAGE=$(FROSTMAP_IMAGE) go test -tags kind -count=1 -v ./...
 
 # --- Code generation ---
 
@@ -82,7 +82,9 @@ clean:
 KIND_CLUSTER_NAME ?= frostmap
 KIND_PROVIDER     ?= $(shell [ -n "$$GITHUB_ACTIONS" ] && echo docker || \
                        (command -v podman >/dev/null 2>&1 && echo podman || echo docker))
-FROSTMAP_IMAGE    ?= frostmap:dev
+FROSTMAP_IMAGE    ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/frostmap:dev || echo frostmap:dev)
+FROSTMAP_IMAGE_REPO = $(firstword $(subst :, ,$(FROSTMAP_IMAGE)))
+FROSTMAP_IMAGE_TAG  = $(lastword $(subst :, ,$(FROSTMAP_IMAGE)))
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
@@ -105,12 +107,6 @@ ifeq ($(KIND_PROVIDER),podman)
 	podman save $(FROSTMAP_IMAGE) -o /tmp/frostmap-kind.tar
 	kind load image-archive /tmp/frostmap-kind.tar --name $(KIND_CLUSTER_NAME)
 	rm -f /tmp/frostmap-kind.tar
-	# podman normalizes unqualified image refs to `localhost/<name>`, which is
-	# the only tag containerd inside the kind node ends up with. Add a
-	# `docker.io/library/<name>` alias so kubelet can resolve the bare ref
-	# (`$(FROSTMAP_IMAGE)`) the chart uses, matching docker-provider behavior.
-	podman exec $(KIND_CLUSTER_NAME)-control-plane \
-		ctr -n k8s.io images tag localhost/$(FROSTMAP_IMAGE) docker.io/library/$(FROSTMAP_IMAGE) || true
 else
 	kind load docker-image $(FROSTMAP_IMAGE) --name $(KIND_CLUSTER_NAME)
 endif
@@ -124,6 +120,8 @@ helm-install-kind:
 	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/frostmap \
 		-n $(HELM_RELEASE_NS) --create-namespace \
 		-f ./k8s/charts/frostmap/values-kind.yaml \
+		--set image.repository=$(FROSTMAP_IMAGE_REPO) \
+		--set image.tag=$(FROSTMAP_IMAGE_TAG) \
 		--wait
 
 helm-uninstall-kind:
