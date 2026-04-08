@@ -38,10 +38,19 @@ import (
 )
 
 const (
-	frostmapImage = "localhost/frostmap:dev"
-	storageClass  = "csi-hostpath-sc"
-	csiDriver     = "hostpath.csi.k8s.io"
+	defaultFrostmapImage = "frostmap:dev"
+	storageClass         = "csi-hostpath-sc"
+	csiDriver            = "hostpath.csi.k8s.io"
 )
+
+// frostmapImageRef honors FROSTMAP_IMAGE so podman-based local dev (which
+// tags images as localhost/frostmap:dev) can override the default.
+func frostmapImageRef() string {
+	if v := os.Getenv("FROSTMAP_IMAGE"); v != "" {
+		return v
+	}
+	return defaultFrostmapImage
+}
 
 // TestKindE2E_FullPipeline exercises the complete Phase 3 pipeline in KIND:
 //
@@ -326,13 +335,13 @@ func deployControlPlane(t *testing.T, ctx context.Context, cs kubernetes.Interfa
 					ServiceAccountName: "frostmap-control-plane",
 					Containers: []corev1.Container{{
 						Name:            "control-plane",
-						Image:           frostmapImage,
+						Image:           frostmapImageRef(),
 						ImagePullPolicy: corev1.PullNever,
 						Args: []string{
 							"control-plane",
 							"--listen=:8080",
 							"--namespace=" + ns,
-							"--image=" + frostmapImage,
+							"--image=" + frostmapImageRef(),
 							"--image-pull-policy=Never",
 							"--storage-class=" + storageClass,
 							"--disk-size-gb=1",
@@ -391,7 +400,7 @@ func deployDaemonSet(t *testing.T, ctx context.Context, cs kubernetes.Interface,
 					Containers: []corev1.Container{
 						{
 							Name:            "node-agent",
-							Image:           frostmapImage,
+							Image:           frostmapImageRef(),
 							ImagePullPolicy: corev1.PullNever,
 							Args: []string{
 								"node-agent",
@@ -416,7 +425,7 @@ func deployDaemonSet(t *testing.T, ctx context.Context, cs kubernetes.Interface,
 						},
 						{
 							Name:            "kv-server",
-							Image:           frostmapImage,
+							Image:           frostmapImageRef(),
 							ImagePullPolicy: corev1.PullNever,
 							Command:         []string{"fm"},
 							Args: []string{

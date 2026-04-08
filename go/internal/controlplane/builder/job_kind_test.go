@@ -18,6 +18,16 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
 )
 
+// kindImage returns the frostmap image ref used by kind tests, honoring the
+// FROSTMAP_IMAGE env var so podman-based local dev (which tags images as
+// localhost/frostmap:dev) can override the docker-provider default.
+func kindImage() string {
+	if v := os.Getenv("FROSTMAP_IMAGE"); v != "" {
+		return v
+	}
+	return "frostmap:dev"
+}
+
 // kindClientset creates a Kubernetes clientset from the default kubeconfig.
 func kindClientset(t *testing.T) kubernetes.Interface {
 	t.Helper()
@@ -84,7 +94,7 @@ func TestKindJob_FullLifecycle(t *testing.T) {
 		Client:          cs,
 		Volumes:         dm,
 		Namespace:       ns,
-		Image:           "localhost/frostmap:dev",
+		Image:           kindImage(),
 		ImagePullPolicy: corev1.PullNever,
 		StorageClass:    "standard",
 		DiskSizeGB:      1,
@@ -184,7 +194,7 @@ func TestKindJob_Cancel(t *testing.T) {
 		Client:          cs,
 		Volumes:         dm,
 		Namespace:       ns,
-		Image:           "localhost/frostmap:dev",
+		Image:           kindImage(),
 		ImagePullPolicy: corev1.PullNever,
 		StorageClass:    "standard",
 		DiskSizeGB:      1,
