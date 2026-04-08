@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "frostmap.controlPlane.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "frostmap.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

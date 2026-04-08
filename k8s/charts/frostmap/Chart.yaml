@@ -1,0 +1,8 @@
+apiVersion: v2
+name: frostmap
+description: Frostmap KV control plane and node-agent for Kubernetes.
+type: application
+# Chart.version is locked to appVersion — bump them together.
+version: 0.1.0
+appVersion: 0.1.0
+kubeVersion: ">=1.27.0-0"

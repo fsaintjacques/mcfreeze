@@ -1,0 +1,18 @@
+Frostmap {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+
+Control-plane:
+  kubectl -n {{ .Release.Namespace }} get deploy {{ include "frostmap.controlPlane.name" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "frostmap.controlPlane.name" . }} -f
+
+{{- if .Values.nodeAgent.enabled }}
+
+Node-agent (DaemonSet):
+  kubectl -n {{ .Release.Namespace }} get ds {{ include "frostmap.nodeAgent.name" . }}
+{{- end }}
+
+CRDs are installed once via helm's crds/ directory and are not removed on
+`helm uninstall`. To upgrade them after a chart bump:
+  kubectl apply -f $(helm show chart {{ .Chart.Name }} | yq '.path')/crds/
+
+Define a Dataset to start ingesting data:
+  kubectl apply -f your-dataset.yaml

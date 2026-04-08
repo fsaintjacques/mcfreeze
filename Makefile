@@ -1,7 +1,7 @@
 CARGO_FLAGS ?=
 
 .PHONY: build release format lint check-format check-lint check test test-unit test-integration test-kind clean \
-       docker-build kind-up kind-down kind-load generate
+       docker-build kind-up kind-down kind-load helm-install-kind helm-uninstall-kind generate
 
 # --- Build ---
 
@@ -58,7 +58,7 @@ test-integration: build envtest-setup
 		KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test -tags integration ./...
 
-test-kind:
+test-kind: helm-install-kind
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
 	cd go && go test -tags kind -count=1 -v ./...
 
@@ -69,7 +69,7 @@ test-kind:
 #   go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
 generate:
 	cd go && controller-gen object paths=./api/v1alpha1/...
-	cd go && controller-gen crd paths=./api/v1alpha1/... output:crd:dir=../k8s/crds
+	cd go && controller-gen crd paths=./api/v1alpha1/... output:crd:dir=../k8s/charts/frostmap/crds
 
 # --- Clean ---
 
@@ -92,7 +92,6 @@ docker-build:
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
 	bash k8s/kind/deploy-csi-hostpath.sh
-	kubectl apply -f k8s/crds/
 
 kind-down:
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
@@ -106,6 +105,26 @@ ifeq ($(KIND_PROVIDER),podman)
 	podman save $(FROSTMAP_IMAGE) -o /tmp/frostmap-kind.tar
 	kind load image-archive /tmp/frostmap-kind.tar --name $(KIND_CLUSTER_NAME)
 	rm -f /tmp/frostmap-kind.tar
+	# podman normalizes unqualified image refs to `localhost/<name>`, which is
+	# the only tag containerd inside the kind node ends up with. Add a
+	# `docker.io/library/<name>` alias so kubelet can resolve the bare ref
+	# (`$(FROSTMAP_IMAGE)`) the chart uses, matching docker-provider behavior.
+	podman exec $(KIND_CLUSTER_NAME)-control-plane \
+		ctr -n k8s.io images tag localhost/$(FROSTMAP_IMAGE) docker.io/library/$(FROSTMAP_IMAGE) || true
 else
 	kind load docker-image $(FROSTMAP_IMAGE) --name $(KIND_CLUSTER_NAME)
 endif
+
+# Install (or upgrade) the frostmap chart into the running KIND cluster.
+# Assumes `make kind-up kind-load` has already run.
+HELM_RELEASE_NAME ?= frostmap
+HELM_RELEASE_NS   ?= frostmap-system
+
+helm-install-kind:
+	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/frostmap \
+		-n $(HELM_RELEASE_NS) --create-namespace \
+		-f ./k8s/charts/frostmap/values-kind.yaml \
+		--wait
+
+helm-uninstall-kind:
+	helm uninstall $(HELM_RELEASE_NAME) -n $(HELM_RELEASE_NS) --ignore-not-found
