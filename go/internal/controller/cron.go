@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -183,10 +184,12 @@ func (c *CronRunnable) fire(ctx context.Context, ds *v1alpha1.Dataset) {
 			Name:      v1alpha1.VersionCRName(ds.Name, versionID),
 			Labels:    map[string]string{v1alpha1.DatasetLabel: ds.Name},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "Dataset",
-				Name:       ds.Name,
-				UID:        ds.UID,
+				APIVersion:         v1alpha1.GroupVersion.String(),
+				Kind:               "Dataset",
+				Name:               ds.Name,
+				UID:                ds.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(true),
 			}},
 		},
 		Spec: v1alpha1.DatasetVersionSpec{

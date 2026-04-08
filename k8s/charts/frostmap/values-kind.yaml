@@ -1,0 +1,18 @@
+# KIND-specific overrides. Use with:
+#   helm upgrade --install frostmap ./k8s/charts/frostmap \
+#     -n frostmap-system --create-namespace \
+#     -f ./k8s/charts/frostmap/values-kind.yaml --wait
+
+image:
+  tag: dev
+  pullPolicy: Never
+
+controlPlane:
+  storageClass: csi-hostpath-sc
+  diskSizeGB: 1
+  leaderElection: false
+
+nodeAgent:
+  csiDriver: hostpath.csi.k8s.io
+  mounter: fs
+  csiHostPath: /var/lib/csi-hostpath-data

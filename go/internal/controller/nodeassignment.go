@@ -43,6 +43,11 @@ type NodeAssignmentReconciler struct {
 	client.Client
 	Broker *controlplane.AssignmentBroker
 
+	// Namespace scopes every List call made by this reconciler. It mirrors the
+	// manager's namespace filter; OnStateReport uses it because its callback
+	// signature does not carry a namespace from the HTTP handler.
+	Namespace string
+
 	// stateReportEvents is fed by OnStateReport (called from the HTTP /state
 	// handler). source.Channel in SetupWithManager pumps events from it into
 	// the controller work queue, so a node-agent state report wakes the
@@ -82,7 +87,7 @@ func (r *NodeAssignmentReconciler) OnStateReport(ctx context.Context, _ string) 
 		return
 	}
 	var list v1alpha1.DatasetVersionList
-	if err := r.List(ctx, &list); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
 		return
 	}
 	for i := range list.Items {

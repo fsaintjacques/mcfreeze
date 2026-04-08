@@ -96,8 +96,9 @@ func NewControlPlane(t *testing.T, b builder.Async, volumeBase string) *ControlP
 		t.Fatalf("setup DatasetVersionReconciler: %v", err)
 	}
 	if err := (&controller.NodeAssignmentReconciler{
-		Client: mgr.GetClient(),
-		Broker: broker,
+		Client:    mgr.GetClient(),
+		Broker:    broker,
+		Namespace: namespace,
 	}).SetupWithManager(mgr); err != nil {
 		_ = env.Stop()
 		t.Fatalf("setup NodeAssignmentReconciler: %v", err)
@@ -146,7 +147,9 @@ func NewControlPlane(t *testing.T, b builder.Async, volumeBase string) *ControlP
 
 	// Wait briefly for the manager cache to sync so the first List/Get
 	// against the manager client returns reliably.
-	if !mgr.GetCache().WaitForCacheSync(ctxWithTimeout(2 * time.Second)) {
+	syncCtx, syncCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer syncCancel()
+	if !mgr.GetCache().WaitForCacheSync(syncCtx) {
 		t.Fatal("manager cache failed to sync")
 	}
 
@@ -211,15 +214,7 @@ func (cp *ControlPlane) WaitForVersionState(t *testing.T, dataset, versionID, st
 func crdDirFromCaller() string {
 	_, file, _, _ := runtime.Caller(0)
 	// file = .../go/internal/testutil/envtest.go
-	return filepath.Join(filepath.Dir(file), "..", "..", "..", "k8s", "crds")
-}
-
-// ctxWithTimeout returns a context that is automatically cancelled after d.
-// Used for cache sync waits where we don't need to plumb a parent context.
-func ctxWithTimeout(d time.Duration) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), d)
-	_ = cancel // intentionally not propagated; the deadline is the bound
-	return ctx
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "k8s", "charts", "frostmap", "crds")
 }
 
 // testWriter adapts *testing.T to io.Writer so envtest/zap log output is

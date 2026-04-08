@@ -23,6 +23,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -125,8 +126,9 @@ func runControlPlane(args []string) {
 	}
 
 	nar := &controller.NodeAssignmentReconciler{
-		Client: mgr.GetClient(),
-		Broker: broker,
+		Client:    mgr.GetClient(),
+		Broker:    broker,
+		Namespace: *namespace,
 	}
 	if err := nar.SetupWithManager(mgr); err != nil {
 		log.Error(err, "setup NodeAssignmentReconciler")
@@ -242,10 +244,12 @@ func (b *crdBuildStarter) StartBuild(ctx context.Context, spec api.DatasetSpec, 
 			Name:      v1alpha1.VersionCRName(spec.Name, versionID),
 			Labels:    map[string]string{v1alpha1.DatasetLabel: spec.Name},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "Dataset",
-				Name:       parent.Name,
-				UID:        parent.UID,
+				APIVersion:         v1alpha1.GroupVersion.String(),
+				Kind:               "Dataset",
+				Name:               parent.Name,
+				UID:                parent.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(true),
 			}},
 		},
 		Spec: v1alpha1.DatasetVersionSpec{

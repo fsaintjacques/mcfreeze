@@ -1,0 +1,101 @@
+{{- if .Values.nodeAgent.enabled -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "frostmap.nodeAgent.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "frostmap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node-agent
+  template:
+    metadata:
+      labels:
+        {{- include "frostmap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: node-agent
+    spec:
+      serviceAccountName: {{ include "frostmap.nodeAgent.name" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: node-agent
+          image: {{ include "frostmap.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - node-agent
+            - --control-plane-url={{ include "frostmap.controlPlane.url" . }}
+            - --csi-driver={{ .Values.nodeAgent.csiDriver }}
+            - --mounter={{ .Values.nodeAgent.mounter }}
+            - --mount-base={{ .Values.nodeAgent.mountBase }}
+            - --catalog-dir={{ .Values.nodeAgent.catalogDir }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: catalog
+              mountPath: {{ .Values.nodeAgent.catalogDir }}
+            - name: mounts
+              mountPath: {{ .Values.nodeAgent.mountBase }}
+              mountPropagation: Bidirectional
+            {{- if .Values.nodeAgent.csiHostPath }}
+            - name: csi-data
+              mountPath: {{ .Values.nodeAgent.csiHostPath }}
+              readOnly: true
+            {{- end }}
+          securityContext:
+            privileged: true
+          {{- with .Values.nodeAgent.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: kv-server
+          image: {{ include "frostmap.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["fm"]
+          args:
+            - serve
+            - catalog
+            - --catalog={{ .Values.nodeAgent.catalogDir }}/catalog.json
+            - --tcp=0.0.0.0:{{ .Values.nodeAgent.kvServer.memcachePort }}
+            - --metrics=0.0.0.0:{{ .Values.nodeAgent.kvServer.metricsPort }}
+          ports:
+            - name: memcache
+              containerPort: {{ .Values.nodeAgent.kvServer.memcachePort }}
+            - name: metrics
+              containerPort: {{ .Values.nodeAgent.kvServer.metricsPort }}
+          volumeMounts:
+            - name: catalog
+              mountPath: {{ .Values.nodeAgent.catalogDir }}
+              readOnly: true
+            - name: mounts
+              mountPath: {{ .Values.nodeAgent.mountBase }}
+              mountPropagation: HostToContainer
+            {{- if .Values.nodeAgent.csiHostPath }}
+            - name: csi-data
+              mountPath: {{ .Values.nodeAgent.csiHostPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: catalog
+          emptyDir: {}
+        - name: mounts
+          emptyDir: {}
+        {{- if .Values.nodeAgent.csiHostPath }}
+        - name: csi-data
+          hostPath:
+            path: {{ .Values.nodeAgent.csiHostPath }}
+            type: DirectoryOrCreate
+        {{- end }}
+      {{- with .Values.nodeAgent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

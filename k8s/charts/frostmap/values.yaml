@@ -1,0 +1,56 @@
+# Default values for the frostmap Helm chart.
+
+image:
+  repository: frostmap
+  # tag defaults to .Chart.AppVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+controlPlane:
+  replicas: 1
+  leaderElection: true
+  listen: ":8080"
+  metricsBindAddress: ":8081"
+  healthProbeBindAddress: ":8082"
+  # Image used for build Jobs. Empty → defaults to image.repository:tag.
+  builderImage: ""
+  # REQUIRED. The chart fails fast at render time if this is empty.
+  storageClass: ""
+  diskSizeGB: 10
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+nodeAgent:
+  enabled: true
+  # Empty → defaults to in-cluster service DNS for the control-plane.
+  controlPlaneURL: ""
+  csiDriver: pd.csi.storage.gke.io
+  mounter: linux
+  mountBase: /mnt/kv
+  catalogDir: /run/kv
+  # Set to a host path string (e.g. /var/lib/csi-hostpath-data) to mount it
+  # read-only into both containers. Used by the KIND csi-driver-host-path
+  # flow; leave empty on real clusters.
+  csiHostPath: ""
+  resources: {}
+  tolerations:
+    - operator: Exists
+  kvServer:
+    memcachePort: 11211
+    metricsPort: 7777
+
+service:
+  type: ClusterIP
+  port: 8080
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true

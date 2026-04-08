@@ -1,0 +1,32 @@
+{{- if and .Values.rbac.create .Values.nodeAgent.enabled -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "frostmap.nodeAgent.name" . }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["create", "get", "delete", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "frostmap.nodeAgent.name" . }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "frostmap.nodeAgent.name" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "frostmap.nodeAgent.name" . }}
+{{- end }}

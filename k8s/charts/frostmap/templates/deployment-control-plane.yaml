@@ -1,0 +1,80 @@
+{{- include "frostmap.checkLeaderElection" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "frostmap.controlPlane.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      {{- include "frostmap.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        {{- include "frostmap.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: control-plane
+    spec:
+      serviceAccountName: {{ include "frostmap.controlPlane.name" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: control-plane
+          image: {{ include "frostmap.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - control-plane
+            - --listen={{ .Values.controlPlane.listen }}
+            - --image={{ include "frostmap.builderImage" . }}
+            - --image-pull-policy={{ .Values.image.pullPolicy }}
+            - --storage-class={{ include "frostmap.requireStorageClass" . }}
+            - --disk-size-gb={{ .Values.controlPlane.diskSizeGB }}
+            - --leader-elect={{ .Values.controlPlane.leaderElection }}
+            - --metrics-bind-address={{ .Values.controlPlane.metricsBindAddress }}
+            - --health-probe-bind-address={{ .Values.controlPlane.healthProbeBindAddress }}
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: {{ .Values.controlPlane.listen | trimPrefix ":" | atoi }}
+            - name: metrics
+              containerPort: {{ .Values.controlPlane.metricsBindAddress | trimPrefix ":" | atoi }}
+            - name: health
+              containerPort: {{ .Values.controlPlane.healthProbeBindAddress | trimPrefix ":" | atoi }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          {{- with .Values.controlPlane.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.controlPlane.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controlPlane.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
