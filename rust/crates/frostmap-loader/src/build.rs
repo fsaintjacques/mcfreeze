@@ -218,12 +218,23 @@ fn build_partition_table(dir: &Path) -> Result<(Vec<Bucket>, PartitionIndexDone)
         .records()
         .map(|r| -> Result<RawEntry, LoaderError> {
             let r = r?;
-            // Spill already holds compact fp + u32 offset; widen for the
-            // current RawEntry API. insert() will re-narrow via
-            // compact_fingerprint (idempotent) and cast offset back to u32.
-            Ok(RawEntry::new(r.fingerprint as u64, r.offset as u64)?)
+            // Spill already holds the pre-compacted u32 fingerprint and
+            // u32 offset (byte-identical to Bucket). Just wrap it in a
+            // RawEntry; no re-compaction, no widening.
+            Ok(RawEntry::new(r.fingerprint, r.offset as u64)?)
         })
         .collect::<Result<_, _>>()?;
+
+    // Preflight: Robin Hood insertion can't handle a chain of duplicate
+    // fingerprints longer than MAX_PSL. A pathological dataset (e.g.
+    // `--key-column id` where `id` is not unique — git blob shas in
+    // `bigquery-public-data.github_repos.files` can repeat thousands of
+    // times per repo) would otherwise spin in an infinite retry loop,
+    // growing the bucket table each time without ever making progress.
+    //
+    // Detect this up-front and return a clear error instead of silently
+    // burning memory.
+    check_no_pathological_duplicates(dir, &entries)?;
 
     let (table, retries) = frostmap_format::index::build(&entries)?;
     let n_buckets = table.len() as u64;
@@ -252,6 +263,50 @@ fn build_partition_table(dir: &Path) -> Result<(Vec<Bucket>, PartitionIndexDone)
             retries: retries as u64,
         },
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate-key preflight
+// ---------------------------------------------------------------------------
+
+/// Maximum tolerated duplicate-fingerprint chain length.
+///
+/// Robin Hood insertion caps probe sequence length at `MAX_PSL = u8::MAX`.
+/// A set of records all sharing the same compact fingerprint forms a
+/// contiguous chain at a single home position; record `k` of that chain
+/// ends up at PSL `k - 1`. Once the chain exceeds `MAX_PSL`, insertion
+/// fails, and growing the bucket table has no effect — the chain length
+/// is a property of the input, not the table size. We reject such inputs
+/// up front with a clear error.
+const MAX_DUPLICATE_FINGERPRINT_CHAIN: usize = 255;
+
+/// Scan `entries` for any compact fingerprint that repeats more than
+/// `MAX_DUPLICATE_FINGERPRINT_CHAIN` times. Returns early on the first
+/// offender so the error surfaces in O(n) with no extra allocations past
+/// the count table.
+fn check_no_pathological_duplicates(
+    dir: &Path,
+    entries: &[RawEntry],
+) -> Result<(), LoaderError> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<u32, u32> = HashMap::with_capacity(entries.len());
+    let mut worst: u32 = 0;
+    for e in entries {
+        let c = counts.entry(e.fingerprint).or_insert(0);
+        *c += 1;
+        if *c > worst {
+            worst = *c;
+            if worst as usize > MAX_DUPLICATE_FINGERPRINT_CHAIN {
+                return Err(LoaderError::DuplicateKeys {
+                    partition: dir.display().to_string(),
+                    max_count: worst as usize,
+                    max_tolerated: MAX_DUPLICATE_FINGERPRINT_CHAIN,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

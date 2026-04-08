@@ -39,7 +39,8 @@ impl PartitionWriter {
     /// Record one key-value pair into this partition.
     fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
         let (aligned_offset, _on_disk_size) = self.data.write_value(key, value)?;
-        self.entries.push(RawEntry::new(fp, aligned_offset)?);
+        self.entries
+            .push(RawEntry::new(index::compact_fingerprint(fp), aligned_offset)?);
         Ok(())
     }
 

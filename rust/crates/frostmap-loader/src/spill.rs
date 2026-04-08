@@ -10,13 +10,21 @@ use crate::error::LoaderError;
 // SpillRecord — 8-byte fixed-size on-disk entry
 // ---------------------------------------------------------------------------
 
-/// Magic bumped from `KVSPILL\n` (24-byte record) to `KVSPIL2\n` (8-byte
-/// record). The old format's 24-byte record carried a full u64 fingerprint,
-/// u64 aligned offset, a dead `size: u32`, and `_pad: u32`. The new format
-/// stores exactly the two fields the index phase actually consumes: the
-/// compact 32-bit fingerprint and the aligned offset in 64-byte units. The
-/// layout is identical to `frostmap_format::index::Bucket`.
-pub const SPILL_MAGIC: [u8; 8] = *b"KVSPIL2\n";
+/// Magic bumped across two format revisions:
+///
+/// - `KVSPILL\n` (legacy): 24-byte record with full u64 fingerprint, u64
+///   offset, and a dead `size: u32` + `_pad: u32`.
+/// - `KVSPIL2\n`: 8-byte record, but `fingerprint` was the **low** 32 bits
+///   of the xxhash64. Those low bits are also used by `Layout::partition_of`
+///   for routing, so within a partition every compact fingerprint shared
+///   the same low `log2(n_partitions)` bits. `cfp % n_buckets` collapsed
+///   onto a small subset of the table and Robin Hood insertion looped
+///   forever in PSL overflow retries.
+/// - `KVSPIL3\n` (current): 8-byte record where `fingerprint` is the
+///   **high** 32 bits of the xxhash64 via `compact_fingerprint`. Decouples
+///   partition routing (low bits) from home-position computation (high
+///   bits). Byte layout identical to `frostmap_format::index::Bucket`.
+pub const SPILL_MAGIC: [u8; 8] = *b"KVSPIL3\n";
 pub const SPILL_HEADER_SIZE: usize = 16; // magic(8) + count(8)
 pub const SPILL_RECORD_SIZE: usize = 8;
 

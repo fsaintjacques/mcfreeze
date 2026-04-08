@@ -251,6 +251,27 @@ impl SnapshotLoader {
         })
     }
 
+    /// Build a [`ScatterResult`] from an existing `scatter.done`, without
+    /// opening any source. Returns `Ok(None)` if scatter has not yet
+    /// completed for this snapshot root.
+    ///
+    /// Use this on the resume path to run the index phase without
+    /// constructing (and holding) source pipelines. Opening a BigQuery
+    /// read session or similar source costs hundreds of MB to multiple
+    /// GB of resident state — none of which is needed once scatter has
+    /// already spilled every partition to disk.
+    pub async fn scatter_result_from_done(&self) -> Result<Option<ScatterResult>, LoaderError> {
+        let layout = Layout::new(self.config.n_partitions)?;
+        let Some(stats) = check_scatter_done(&self.root, layout).await? else {
+            return Ok(None);
+        };
+        Ok(Some(ScatterResult {
+            layout,
+            stats,
+            duration: Duration::ZERO,
+        }))
+    }
+
     /// Build indexes and write `meta.json` from a completed [`ScatterResult`].
     ///
     /// `index_progress_fn` is called with `(1, 0)` after each partition is
