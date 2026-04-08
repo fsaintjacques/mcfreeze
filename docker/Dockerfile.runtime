@@ -1,0 +1,4 @@
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY fm      /usr/local/bin/fm
+COPY fmtctl  /usr/local/bin/fmtctl
+ENTRYPOINT ["/usr/local/bin/fmtctl"]
