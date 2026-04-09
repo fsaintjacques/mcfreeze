@@ -12,7 +12,7 @@ use crate::{
         FORMAT_VERSION, HASH_ALGORITHM,
     },
     spill::{SpillReader, SpillWriter},
-    Result,
+    Error, Result,
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +146,12 @@ impl PartitionBuildReady {
         let n = spill.count() as usize;
         let entries: Vec<Bucket> = spill.records().collect::<Result<_>>()?;
 
+        // Preflight: Robin Hood insertion caps PSL at u8::MAX. A set of
+        // records sharing the same compact fingerprint forms a contiguous
+        // chain whose length is a property of the input, not the table
+        // size. Detect this up-front instead of looping forever.
+        check_no_pathological_duplicates(&entries)?;
+
         let (table, retries) = index::build(&entries)?;
         let n_buckets = table.len();
         let fill_rate = if n_buckets > 0 {
@@ -174,10 +180,6 @@ impl PartitionBuildReady {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
-// SnapshotWriter
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // SnapshotWriter
@@ -381,6 +383,41 @@ impl SnapshotFinalizer {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate-fingerprint preflight
+// ---------------------------------------------------------------------------
+
+/// Maximum tolerated duplicate-fingerprint chain length.
+///
+/// Robin Hood insertion caps probe sequence length at `MAX_PSL = u8::MAX`.
+/// A set of records all sharing the same compact fingerprint forms a
+/// contiguous chain at a single home position; record `k` of that chain
+/// ends up at PSL `k - 1`. Once the chain exceeds this limit, insertion
+/// fails and growing the table has no effect — the chain length is a
+/// property of the input, not the table size.
+const MAX_DUPLICATE_FINGERPRINT_CHAIN: usize = 255;
+
+fn check_no_pathological_duplicates(entries: &[Bucket]) -> Result<()> {
+    use std::collections::HashMap;
+
+    let mut counts: HashMap<u32, u32> = HashMap::with_capacity(entries.len());
+    let mut worst: u32 = 0;
+    for e in entries {
+        let c = counts.entry(e.fingerprint).or_insert(0);
+        *c += 1;
+        if *c > worst {
+            worst = *c;
+            if worst as usize > MAX_DUPLICATE_FINGERPRINT_CHAIN {
+                return Err(Error::DuplicateFingerprints {
+                    max_count: worst as usize,
+                    max_tolerated: MAX_DUPLICATE_FINGERPRINT_CHAIN,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

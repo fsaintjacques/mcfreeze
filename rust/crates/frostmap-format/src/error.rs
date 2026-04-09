@@ -16,6 +16,15 @@ pub enum Error {
         n_buckets: usize,
     },
 
+    #[error(
+        "partition contains {max_count} records sharing a single 32-bit fingerprint \
+         (max tolerated: {max_tolerated}); the key column is likely not unique"
+    )]
+    DuplicateFingerprints {
+        max_count: usize,
+        max_tolerated: usize,
+    },
+
     #[error("unsupported hash algorithm: {0}")]
     UnsupportedHashAlgorithm(String),
 
