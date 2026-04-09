@@ -88,6 +88,21 @@ pub struct Bucket {
 }
 
 impl Bucket {
+    /// Create a new bucket, validating that the aligned offset fits in u32.
+    ///
+    /// `aligned_offset` is in `VALUE_ALIGNMENT` (64-byte) units. The maximum
+    /// valid value is `u32::MAX - 1` because `u32::MAX` is reserved as the
+    /// `NO_MATCH` sentinel in `ProbeResult::offsets`.
+    pub fn new(fingerprint: u32, aligned_offset: u64) -> Result<Self> {
+        if aligned_offset > MAX_OFFSET as u64 {
+            return Err(Error::OffsetOverflow(aligned_offset));
+        }
+        Ok(Self {
+            fingerprint,
+            offset: aligned_offset as u32,
+        })
+    }
+
     #[inline]
     pub fn is_empty(self) -> bool {
         self.fingerprint == 0
@@ -104,33 +119,6 @@ impl Bucket {
 // Robin Hood insertion
 // ---------------------------------------------------------------------------
 
-/// A raw entry accumulated during the data-write phase.
-///
-/// `fingerprint` is the **pre-compacted** 32-bit bucket fingerprint (the
-/// result of `compact_fingerprint` on the full u64 xxhash64). Storing it
-/// pre-compact removes the need for `insert` to re-narrow per call and
-/// matches the on-disk `Bucket` layout byte-for-byte.
-#[derive(Clone, Copy)]
-pub struct RawEntry {
-    /// Compact 32-bit fingerprint, already biased away from zero.
-    pub fingerprint: u32,
-    /// Aligned offset in VALUE_ALIGNMENT units.
-    pub aligned_offset: u32,
-}
-
-impl RawEntry {
-    /// Validate that offset fits in u32.
-    pub fn new(fingerprint: u32, aligned_offset: u64) -> Result<Self> {
-        if aligned_offset > MAX_OFFSET as u64 {
-            return Err(Error::OffsetOverflow(aligned_offset));
-        }
-        Ok(Self {
-            fingerprint,
-            aligned_offset: aligned_offset as u32,
-        })
-    }
-}
-
 /// Allocate a hash table and insert all `entries` using Robin Hood hashing.
 ///
 /// Starts at `ceil(n_keys / FILL_RATE)` buckets. On PSL overflow, retries
@@ -138,7 +126,7 @@ impl RawEntry {
 ///
 /// Returns `(table, retries)` where `retries` is the number of times the
 /// table was grown due to PSL overflow (0 = no overflow occurred).
-pub fn build(entries: &[RawEntry]) -> Result<(Vec<Bucket>, usize)> {
+pub fn build(entries: &[Bucket]) -> Result<(Vec<Bucket>, usize)> {
     let mut n_buckets = bucket_count(entries.len());
     let mut retries = 0usize;
     loop {
@@ -174,15 +162,14 @@ pub fn bucket_count(n_keys: usize) -> usize {
 }
 
 /// Insert one entry into `table` using Robin Hood displacement.
-pub fn insert(table: &mut [Bucket], psls: &mut [u8], entry: RawEntry) -> Result<()> {
+pub fn insert(table: &mut [Bucket], psls: &mut [u8], entry: Bucket) -> Result<()> {
     debug_assert_eq!(table.len(), psls.len(), "psls must be parallel to table");
     let n = table.len();
-    // RawEntry.fingerprint is already the compact 32-bit form.
     let cfp = entry.fingerprint;
     let mut pos = cfp as usize % n;
     let mut psl = 0u8;
     let mut cur_fp = cfp;
-    let mut cur_off = entry.aligned_offset;
+    let mut cur_off = entry.offset;
 
     loop {
         let slot = table[pos];
@@ -545,19 +532,19 @@ mod tests {
     }
 
     #[test]
-    fn raw_entry_rejects_max_offset() {
+    fn bucket_rejects_max_offset() {
         let cfp = compact_fingerprint(fingerprint(b"key"));
-        assert!(RawEntry::new(cfp, u32::MAX as u64).is_err());
+        assert!(Bucket::new(cfp, u32::MAX as u64).is_err());
         // One below the sentinel is still valid.
-        assert!(RawEntry::new(cfp, (u32::MAX - 1) as u64).is_ok());
+        assert!(Bucket::new(cfp, (u32::MAX - 1) as u64).is_ok());
     }
 
     // --- build / probe ---
 
-    fn make_entry(key: &[u8], byte_offset: u64) -> RawEntry {
+    fn make_entry(key: &[u8], byte_offset: u64) -> Bucket {
         let cfp = compact_fingerprint(fingerprint(key));
         let off = byte_offset / VALUE_ALIGNMENT;
-        RawEntry::new(cfp, off).unwrap()
+        Bucket::new(cfp, off).unwrap()
     }
 
     #[test]
@@ -573,7 +560,7 @@ mod tests {
         for e in &entries {
             let result = probe(&table, e.fingerprint);
             assert!(result.is_some(), "fingerprint {} not found", e.fingerprint);
-            assert_eq!(result.unwrap(), e.aligned_offset as u64 * VALUE_ALIGNMENT);
+            assert_eq!(result.unwrap(), e.offset as u64 * VALUE_ALIGNMENT);
         }
     }
 
@@ -588,7 +575,7 @@ mod tests {
     #[test]
     fn build_many() {
         let n = 10_000usize;
-        let entries: Vec<RawEntry> = (0..n)
+        let entries: Vec<Bucket> = (0..n)
             .map(|i| {
                 let key = i.to_le_bytes();
                 make_entry(&key, (i as u64) * 64)
@@ -608,9 +595,9 @@ mod tests {
 
     // --- probe_group correctness ---
 
-    fn simd_test_table() -> (Vec<Bucket>, Vec<RawEntry>) {
+    fn simd_test_table() -> (Vec<Bucket>, Vec<Bucket>) {
         let n = 1_000usize;
-        let entries: Vec<RawEntry> = (0..n)
+        let entries: Vec<Bucket> = (0..n)
             .map(|i| make_entry(&(i as u64).to_le_bytes(), (i as u64) * 64))
             .collect();
         let (table, _) = build(&entries).unwrap();
@@ -649,7 +636,7 @@ mod tests {
         for e in &entries {
             let result = probe(&table, e.fingerprint);
             assert!(result.is_some(), "miss for fingerprint {}", e.fingerprint);
-            assert_eq!(result.unwrap(), e.aligned_offset as u64 * VALUE_ALIGNMENT);
+            assert_eq!(result.unwrap(), e.offset as u64 * VALUE_ALIGNMENT);
         }
         assert_eq!(
             probe(&table, compact_fingerprint(fingerprint(b"absent"))),

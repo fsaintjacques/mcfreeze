@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use frostmap_format::{
-    index::{self, Bucket, RawEntry},
-    meta::{index_path, Layout},
+    index::Bucket,
+    meta::index_path,
+    writer::{PartitionBuildReady, SnapshotFinalizer},
 };
 
-use crate::{error::LoaderError, spill::SpillReader};
+use crate::error::LoaderError;
 
 // ---------------------------------------------------------------------------
 // index.done JSON
@@ -47,22 +47,22 @@ pub struct IndexDone {
 // ---------------------------------------------------------------------------
 
 pub struct IndexBuildPhase {
-    root: std::path::PathBuf,
-    layout: Layout,
+    finalizer: SnapshotFinalizer,
+    partitions: Vec<PartitionBuildReady>,
     parallelism: usize,
     progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 impl IndexBuildPhase {
     pub fn new(
-        root: &Path,
-        layout: Layout,
+        finalizer: SnapshotFinalizer,
+        partitions: Vec<PartitionBuildReady>,
         parallelism: usize,
         progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Self {
         Self {
-            root: root.to_path_buf(),
-            layout,
+            finalizer,
+            partitions,
             parallelism: parallelism.max(1),
             progress_fn,
         }
@@ -72,20 +72,19 @@ impl IndexBuildPhase {
     ///
     /// Idempotent at the phase level: if `index.done` already exists the phase
     /// is skipped entirely and its stats are returned from the file.
-    pub fn run(self) -> Result<IndexDone, LoaderError> {
-        let sentinel = self.root.join("index.done");
+    pub fn run(self) -> Result<(IndexDone, SnapshotFinalizer), LoaderError> {
+        let root = self.finalizer.root();
+        let sentinel = root.join("index.done");
         if sentinel.exists() {
             let json = std::fs::read_to_string(&sentinel)?;
             let done: IndexDone = serde_json::from_str(&json).map_err(|e| {
                 LoaderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             })?;
             info!(n_keys = done.n_keys, "index already complete, skipping");
-            return Ok(done);
+            return Ok((done, self.finalizer));
         }
 
         let start = Instant::now();
-        let n = self.layout.n_partitions as usize;
-        let root = &self.root;
         let cb = &self.progress_fn;
 
         let pool = rayon::ThreadPoolBuilder::new()
@@ -95,22 +94,34 @@ impl IndexBuildPhase {
         // Build all partition tables in parallel.
         let results: Vec<Result<(Vec<Bucket>, PartitionIndexDone), LoaderError>> =
             pool.install(|| {
-                (0..n)
-                    .into_par_iter()
-                    .map(|i| {
-                        let dir =
-                            frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i);
-                        let result = build_partition_table(&dir)?;
+                self.partitions
+                    .par_iter()
+                    .map(|p| {
+                        let (table, stats) = p.build_index()?;
+                        let part = PartitionIndexDone {
+                            n_keys: stats.n_keys,
+                            n_buckets: stats.n_buckets,
+                            fill_rate: stats.fill_rate,
+                            retries: stats.retries as u64,
+                        };
+                        if stats.retries > 0 {
+                            info!(
+                                retries = stats.retries,
+                                n_buckets = stats.n_buckets,
+                                n_keys = stats.n_keys,
+                                "PSL overflow: index rebuilt",
+                            );
+                        }
                         if let Some(ref f) = cb {
                             f(1, 0);
                         }
-                        Ok(result)
+                        Ok((table, part))
                     })
                     .collect()
             });
 
-        let mut tables = Vec::with_capacity(n);
-        let mut partitions = Vec::with_capacity(n);
+        let mut tables = Vec::with_capacity(results.len());
+        let mut partitions = Vec::with_capacity(results.len());
         for r in results {
             let (table, part) = r?;
             tables.push(table);
@@ -118,7 +129,7 @@ impl IndexBuildPhase {
         }
 
         // Write unified index.all.
-        let info = index::write_unified_index(&index_path(root), &tables)?;
+        let info = self.finalizer.write_index(&tables)?;
 
         let wall_secs = start.elapsed().as_secs_f64();
 
@@ -127,7 +138,7 @@ impl IndexBuildPhase {
         let n_buckets = partitions.iter().map(|p| p.n_buckets).sum();
         let total_retries = partitions.iter().map(|p| p.retries).sum();
         let n_overflow_partitions = partitions.iter().filter(|p| p.retries > 0).count() as u64;
-        let index_bytes = std::fs::metadata(index_path(root))
+        let index_bytes = std::fs::metadata(index_path(self.finalizer.root()))
             .map(|m| m.len())
             .unwrap_or(0);
 
@@ -176,137 +187,12 @@ impl IndexBuildPhase {
 
         // Remove spill files only after index.done is durably written.
         // A crash before this point leaves spills intact for a full retry.
-        for i in 0..n {
-            let spill = frostmap_format::meta::partition_dir(root, self.layout.n_partitions, i)
-                .join("spill.bin");
-            if spill.exists() {
-                std::fs::remove_file(&spill)?;
-            }
+        for p in &self.partitions {
+            p.remove_spill()?;
         }
 
-        Ok(done)
+        Ok((done, self.finalizer))
     }
-}
-
-// ---------------------------------------------------------------------------
-// Per-partition table build (no I/O except reading spill.bin)
-// ---------------------------------------------------------------------------
-
-/// Read `spill.bin` and build the Robin Hood table in memory.
-///
-/// Returns the bucket table and per-partition stats.
-fn build_partition_table(dir: &Path) -> Result<(Vec<Bucket>, PartitionIndexDone), LoaderError> {
-    let spill_path = dir.join("spill.bin");
-
-    if !spill_path.exists() {
-        // Empty partition (no keys routed here).
-        return Ok((
-            Vec::new(),
-            PartitionIndexDone {
-                n_keys: 0,
-                n_buckets: 0,
-                fill_rate: 0.0,
-                retries: 0,
-            },
-        ));
-    }
-
-    let spill = SpillReader::open(&spill_path)?;
-    let n = spill.count() as usize;
-
-    let entries: Vec<RawEntry> = spill
-        .records()
-        .map(|r| -> Result<RawEntry, LoaderError> {
-            let r = r?;
-            // Spill already holds the pre-compacted u32 fingerprint and
-            // u32 offset (byte-identical to Bucket). Just wrap it in a
-            // RawEntry; no re-compaction, no widening.
-            Ok(RawEntry::new(r.fingerprint, r.offset as u64)?)
-        })
-        .collect::<Result<_, _>>()?;
-
-    // Preflight: Robin Hood insertion can't handle a chain of duplicate
-    // fingerprints longer than MAX_PSL. A pathological dataset (e.g.
-    // `--key-column id` where `id` is not unique — git blob shas in
-    // `bigquery-public-data.github_repos.files` can repeat thousands of
-    // times per repo) would otherwise spin in an infinite retry loop,
-    // growing the bucket table each time without ever making progress.
-    //
-    // Detect this up-front and return a clear error instead of silently
-    // burning memory.
-    check_no_pathological_duplicates(dir, &entries)?;
-
-    let (table, retries) = frostmap_format::index::build(&entries)?;
-    let n_buckets = table.len() as u64;
-    let fill_rate = if n_buckets > 0 {
-        n as f64 / n_buckets as f64
-    } else {
-        0.0
-    };
-
-    if retries > 0 {
-        info!(
-            partition = %dir.display(),
-            retries,
-            n_buckets,
-            n_keys = n,
-            "PSL overflow: index rebuilt",
-        );
-    }
-
-    Ok((
-        table,
-        PartitionIndexDone {
-            n_keys: n as u64,
-            n_buckets,
-            fill_rate,
-            retries: retries as u64,
-        },
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Duplicate-key preflight
-// ---------------------------------------------------------------------------
-
-/// Maximum tolerated duplicate-fingerprint chain length.
-///
-/// Robin Hood insertion caps probe sequence length at `MAX_PSL = u8::MAX`.
-/// A set of records all sharing the same compact fingerprint forms a
-/// contiguous chain at a single home position; record `k` of that chain
-/// ends up at PSL `k - 1`. Once the chain exceeds `MAX_PSL`, insertion
-/// fails, and growing the bucket table has no effect — the chain length
-/// is a property of the input, not the table size. We reject such inputs
-/// up front with a clear error.
-const MAX_DUPLICATE_FINGERPRINT_CHAIN: usize = 255;
-
-/// Scan `entries` for any compact fingerprint that repeats more than
-/// `MAX_DUPLICATE_FINGERPRINT_CHAIN` times. Returns early on the first
-/// offender so the error surfaces in O(n) with no extra allocations past
-/// the count table.
-fn check_no_pathological_duplicates(
-    dir: &Path,
-    entries: &[RawEntry],
-) -> Result<(), LoaderError> {
-    use std::collections::HashMap;
-
-    let mut counts: HashMap<u32, u32> = HashMap::with_capacity(entries.len());
-    let mut worst: u32 = 0;
-    for e in entries {
-        let c = counts.entry(e.fingerprint).or_insert(0);
-        *c += 1;
-        if *c > worst {
-            worst = *c;
-            if worst as usize > MAX_DUPLICATE_FINGERPRINT_CHAIN {
-                return Err(LoaderError::DuplicateKeys {
-                    partition: dir.display().to_string(),
-                    max_count: worst as usize,
-                    max_tolerated: MAX_DUPLICATE_FINGERPRINT_CHAIN,
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -318,10 +204,25 @@ mod tests {
     use super::*;
     use crate::scatter::ScatterPhase;
     use crate::source::VecBatch;
+    use frostmap_format::meta::{Layout, DEFAULT_VERIFY_SEED};
+    use frostmap_format::writer::PartitionWriter;
+    use std::io::BufWriter;
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout {
         Layout::new(n).unwrap()
+    }
+
+    fn make_writers(
+        root: &std::path::Path,
+        n: u32,
+    ) -> Vec<PartitionWriter<BufWriter<std::fs::File>>> {
+        (0..n as usize)
+            .map(|i| {
+                let dir = frostmap_format::meta::partition_dir(root, n, i);
+                PartitionWriter::new_buffered(&dir, DEFAULT_VERIFY_SEED, 1024 * 1024, 4096).unwrap()
+            })
+            .collect()
     }
 
     async fn scatter_and_build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
@@ -332,14 +233,20 @@ mod tests {
                 .map(|&(k, v)| (k.to_vec(), v.to_vec()))
                 .collect(),
         );
-        let phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
+        let writers = make_writers(dir.path(), n);
+        let phase = ScatterPhase::new(dir.path(), layout(n), writers, 4).unwrap();
         let mut fanout = phase.fanout();
         fanout.scatter_batch(&batch).await.unwrap();
-        phase
+        let stats = phase
             .finish(vec![fanout], std::time::Instant::now())
             .await
             .unwrap();
-        IndexBuildPhase::new(dir.path(), layout(n), 2, None)
+        let finalizer = SnapshotFinalizer::from_existing(
+            dir.path().to_path_buf(),
+            layout(n),
+            DEFAULT_VERIFY_SEED,
+        );
+        let (_done, _finalizer) = IndexBuildPhase::new(finalizer, stats.partitions_ready, 2, None)
             .run()
             .unwrap();
         dir
@@ -385,7 +292,12 @@ mod tests {
         let snapshot = std::fs::read(&idx).unwrap();
 
         // Second run: index.done exists → skip.
-        let done = IndexBuildPhase::new(dir.path(), layout(1), 1, None)
+        let finalizer = SnapshotFinalizer::from_existing(
+            dir.path().to_path_buf(),
+            layout(1),
+            DEFAULT_VERIFY_SEED,
+        );
+        let (done, _finalizer) = IndexBuildPhase::new(finalizer, Vec::new(), 1, None)
             .run()
             .unwrap();
         assert_eq!(done.n_keys, 2, "key count must be preserved on skip");

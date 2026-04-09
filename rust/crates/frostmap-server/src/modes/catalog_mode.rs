@@ -277,7 +277,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut w = SnapshotWriter::new(dir.path(), 1).unwrap();
         w.write(b"k", b"v").unwrap();
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
         dir
     }
 

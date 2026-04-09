@@ -1,15 +1,17 @@
 use std::fs::{self, File};
-use std::path::Path;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 
 use crate::{
     data::AlignedWriter,
-    index::{self, fingerprint, Bucket, RawEntry},
+    index::{self, fingerprint, Bucket},
     meta::{
         index_path, partition_dir, Layout, Meta, PartitionMeta, Stats, DEFAULT_VERIFY_SEED,
         FORMAT_VERSION, HASH_ALGORITHM,
     },
+    spill::{SpillReader, SpillWriter},
     Result,
 };
 
@@ -17,45 +19,172 @@ use crate::{
 // PartitionWriter
 // ---------------------------------------------------------------------------
 
-/// Writes one partition's `data.bin` and accumulates index entries.
+/// Writes one partition's `data.bin` and spills index entries to `spill.bin`.
 ///
-/// Phase 1 (`write`): stream key-value pairs → `data.bin`.
-/// Phase 2 (`build_index`): flush data, build Robin Hood table in memory.
-struct PartitionWriter {
-    data: AlignedWriter<File>,
-    entries: Vec<RawEntry>,
+/// Phase 1 (`write`): stream key-value pairs → `data.bin` + `spill.bin`.
+/// Phase 2 (`finish_data`): flush both files, return a [`PartitionBuildReady`]
+///         that can build the Robin Hood index on demand.
+///
+/// Generic over the `data.bin` writer: use `File` for the simple path
+/// (SnapshotWriter) or `BufWriter<File>` for the parallel loader path
+/// where larger I/O buffers matter.
+pub struct PartitionWriter<W: Write> {
+    dir: PathBuf,
+    data: AlignedWriter<W>,
+    spill: SpillWriter,
 }
 
-impl PartitionWriter {
-    fn new(dir: &Path, verify_seed: u64) -> Result<Self> {
+impl PartitionWriter<File> {
+    /// Create a partition writer that writes directly to unbuffered `File`.
+    ///
+    /// Suitable for the single-threaded `SnapshotWriter` path where the
+    /// OS page cache is sufficient.
+    pub fn new(dir: &Path, verify_seed: u64, spill_buf_bytes: usize) -> Result<Self> {
         fs::create_dir_all(dir)?;
         let data_file = File::create(dir.join("data.bin"))?;
+        let spill = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
         Ok(Self {
+            dir: dir.to_path_buf(),
             data: AlignedWriter::new(data_file, verify_seed),
-            entries: Vec::new(),
+            spill,
         })
     }
+}
 
+impl PartitionWriter<BufWriter<File>> {
+    /// Create a partition writer with a buffered `data.bin` writer.
+    ///
+    /// Suitable for the parallel loader path where each partition writer
+    /// runs in its own thread and benefits from larger I/O buffers.
+    pub fn new_buffered(
+        dir: &Path,
+        verify_seed: u64,
+        data_buf_bytes: usize,
+        spill_buf_bytes: usize,
+    ) -> Result<Self> {
+        fs::create_dir_all(dir)?;
+        let data_file =
+            BufWriter::with_capacity(data_buf_bytes, File::create(dir.join("data.bin"))?);
+        let spill = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            data: AlignedWriter::new(data_file, verify_seed),
+            spill,
+        })
+    }
+}
+
+impl<W: Write> PartitionWriter<W> {
     /// Record one key-value pair into this partition.
-    fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
+    ///
+    /// The caller provides the pre-computed full 64-bit fingerprint; the
+    /// compact 32-bit form is derived internally.
+    pub fn write(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
         let (aligned_offset, _on_disk_size) = self.data.write_value(key, value)?;
-        self.entries
-            .push(RawEntry::new(index::compact_fingerprint(fp), aligned_offset)?);
+        let bucket = Bucket::new(index::compact_fingerprint(fp), aligned_offset)?;
+        self.spill.push(bucket)?;
         Ok(())
     }
 
-    /// Flush `data.bin` and build the Robin Hood index in memory.
-    fn build_index(self) -> Result<(Vec<Bucket>, u64)> {
+    /// Flush `data.bin` and `spill.bin`, returning a handle that can build
+    /// the index.
+    pub fn finish_data(self) -> Result<PartitionBuildReady> {
         self.data.finish()?;
-        let n_keys = self.entries.len() as u64;
-        let (table, _) = index::build(&self.entries)?;
-        Ok((table, n_keys))
+        self.spill.finish()?;
+        Ok(PartitionBuildReady { dir: self.dir })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PartitionBuildReady
+// ---------------------------------------------------------------------------
+
+/// Per-partition statistics returned by [`PartitionBuildReady::build_index`].
+pub struct PartitionIndexStats {
+    pub n_keys: u64,
+    pub n_buckets: u64,
+    pub fill_rate: f64,
+    pub retries: usize,
+}
+
+/// A partition whose data and spill phases are complete. Call
+/// [`build_index`](Self::build_index) to read `spill.bin`, construct
+/// the Robin Hood hash table, and clean up the spill file.
+pub struct PartitionBuildReady {
+    dir: PathBuf,
+}
+
+impl PartitionBuildReady {
+    /// Resume from an existing partition directory that already has
+    /// `data.bin` and `spill.bin` on disk (scatter was completed in a
+    /// previous run).
+    pub fn from_existing(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
+    /// Read `spill.bin` and build the Robin Hood table.
+    ///
+    /// Returns the bucket table and per-partition stats. The spill file is
+    /// left on disk; call [`remove_spill`](Self::remove_spill) after the
+    /// index has been durably written if crash-recovery semantics require it.
+    pub fn build_index(&self) -> Result<(Vec<Bucket>, PartitionIndexStats)> {
+        let spill_path = self.dir.join("spill.bin");
+
+        if !spill_path.exists() {
+            return Ok((
+                Vec::new(),
+                PartitionIndexStats {
+                    n_keys: 0,
+                    n_buckets: 0,
+                    fill_rate: 0.0,
+                    retries: 0,
+                },
+            ));
+        }
+
+        let spill = SpillReader::open(&spill_path)?;
+        let n = spill.count() as usize;
+        let entries: Vec<Bucket> = spill.records().collect::<Result<_>>()?;
+
+        let (table, retries) = index::build(&entries)?;
+        let n_buckets = table.len();
+        let fill_rate = if n_buckets > 0 {
+            n as f64 / n_buckets as f64
+        } else {
+            0.0
+        };
+
+        Ok((
+            table,
+            PartitionIndexStats {
+                n_keys: n as u64,
+                n_buckets: n_buckets as u64,
+                fill_rate,
+                retries,
+            },
+        ))
+    }
+
+    /// Remove the `spill.bin` file after the index has been durably written.
+    pub fn remove_spill(&self) -> Result<()> {
+        let spill_path = self.dir.join("spill.bin");
+        if spill_path.exists() {
+            fs::remove_file(&spill_path)?;
+        }
+        Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
 // SnapshotWriter
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// SnapshotWriter
+// ---------------------------------------------------------------------------
+
+/// Default spill buffer size for the simple (single-threaded) path.
+const DEFAULT_SPILL_BUF_BYTES: usize = 256 * 1024;
 
 /// Writes a complete snapshot directory.
 ///
@@ -66,10 +195,15 @@ impl PartitionWriter {
 /// }
 /// w.finish()?;
 /// ```
+///
+/// For parallel pipelines, call [`into_partition_writers`](Self::into_partition_writers)
+/// to decompose into per-partition writers that can be distributed across threads,
+/// and a [`SnapshotFinalizer`] that reassembles the results.
 pub struct SnapshotWriter {
+    root: PathBuf,
     layout: Layout,
     verify_seed: u64,
-    partitions: Vec<PartitionWriter>,
+    partitions: Vec<PartitionWriter<File>>,
 }
 
 impl SnapshotWriter {
@@ -82,10 +216,17 @@ impl SnapshotWriter {
         fs::create_dir_all(root)?;
 
         let partitions = (0..n_partitions as usize)
-            .map(|i| PartitionWriter::new(&partition_dir(root, n_partitions, i), verify_seed))
+            .map(|i| {
+                PartitionWriter::new(
+                    &partition_dir(root, n_partitions, i),
+                    verify_seed,
+                    DEFAULT_SPILL_BUF_BYTES,
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
+            root: root.to_path_buf(),
             layout,
             verify_seed,
             partitions,
@@ -99,28 +240,128 @@ impl SnapshotWriter {
         self.partitions[idx].write(key, fp, value)
     }
 
-    /// Build all partition indexes, write `index.all`, then write `meta.json`.
-    pub fn finish(self, root: impl AsRef<Path>) -> Result<()> {
-        let root = root.as_ref();
-        let n_partitions = self.layout.n_partitions;
+    /// Build all partition indexes sequentially, write `index.all`, then
+    /// write `meta.json`.
+    ///
+    /// For parallel index builds, use [`into_partition_writers`](Self::into_partition_writers)
+    /// with a [`SnapshotFinalizer`] instead.
+    pub fn finish(self) -> Result<()> {
+        let (partitions, finalizer) = self.into_partition_writers();
 
-        // Build all partition tables in memory.
-        let mut tables = Vec::with_capacity(n_partitions as usize);
+        let ready: Vec<PartitionBuildReady> = partitions
+            .into_iter()
+            .map(|pw| pw.finish_data())
+            .collect::<Result<_>>()?;
+
+        finalizer.finish(&ready)?;
+        Ok(())
+    }
+
+    /// Decompose into per-partition writers and a finalizer.
+    ///
+    /// Use this for parallel pipelines where each `PartitionWriter` is
+    /// driven by its own thread/task. Once all writers are done, pass the
+    /// resulting [`PartitionBuildReady`] handles to
+    /// [`SnapshotFinalizer::finish`].
+    pub fn into_partition_writers(self) -> (Vec<PartitionWriter<File>>, SnapshotFinalizer) {
+        let finalizer = SnapshotFinalizer {
+            root: self.root,
+            layout: self.layout,
+            verify_seed: self.verify_seed,
+        };
+        (self.partitions, finalizer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SnapshotFinalizer
+// ---------------------------------------------------------------------------
+
+/// Finalizes a snapshot after all partitions have been written.
+///
+/// Builds per-partition Robin Hood indexes, writes the unified `index.all`,
+/// and writes `meta.json`.
+pub struct SnapshotFinalizer {
+    root: PathBuf,
+    layout: Layout,
+    verify_seed: u64,
+}
+
+impl SnapshotFinalizer {
+    /// Create a finalizer for an existing snapshot directory (e.g. to resume
+    /// after a crash where scatter completed but index build did not).
+    pub fn from_existing(root: PathBuf, layout: Layout, verify_seed: u64) -> Self {
+        Self {
+            root,
+            layout,
+            verify_seed,
+        }
+    }
+
+    /// The layout of the snapshot being finalized.
+    pub fn layout(&self) -> Layout {
+        self.layout
+    }
+
+    /// The root directory of the snapshot.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Build all partition indexes and write `index.all` + `meta.json`.
+    ///
+    /// Each [`PartitionBuildReady`] reads its `spill.bin`, builds the Robin
+    /// Hood table, and removes the spill file.
+    pub fn finish(self, partitions: &[PartitionBuildReady]) -> Result<()> {
+        let n = partitions.len();
+        let mut tables = Vec::with_capacity(n);
         let mut n_keys_total = 0u64;
-        for pw in self.partitions {
-            let (table, n_keys) = pw.build_index()?;
-            n_keys_total += n_keys;
+
+        for p in partitions {
+            let (table, stats) = p.build_index()?;
+            n_keys_total += stats.n_keys;
             tables.push(table);
         }
 
-        // Write unified index.all with 2MB-aligned partitions.
-        let info = index::write_unified_index(&index_path(root), &tables)?;
+        let info = self.write_index(&tables)?;
+        let stats = Stats {
+            n_keys: n_keys_total,
+            created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            scatter: None,
+            index: None,
+        };
+        self.write_meta(&info, Some(stats), None)?;
 
+        for p in partitions {
+            p.remove_spill()?;
+        }
+
+        Ok(())
+    }
+
+    /// Write only `index.all` from pre-built tables and return the per-partition
+    /// offsets and bucket counts. Does **not** write `meta.json`.
+    pub fn write_index(&self, tables: &[Vec<Bucket>]) -> Result<index::UnifiedIndexInfo> {
+        index::write_unified_index(&index_path(&self.root), tables)
+    }
+
+    /// Write `meta.json` from index info and caller-provided stats.
+    ///
+    /// The caller supplies the [`UnifiedIndexInfo`](index::UnifiedIndexInfo)
+    /// returned by [`write_index`](Self::write_index) and an optional
+    /// [`Stats`] block. This method owns the `Meta` / `PartitionMeta`
+    /// construction and serialization.
+    pub fn write_meta(
+        &self,
+        info: &index::UnifiedIndexInfo,
+        stats: Option<Stats>,
+        encoding: Option<serde_json::Value>,
+    ) -> Result<()> {
         let partitions = info
             .offsets
-            .into_iter()
-            .zip(info.n_buckets)
-            .map(|(offset, n_buckets)| PartitionMeta {
+            .iter()
+            .zip(&info.n_buckets)
+            .map(|(&offset, &n_buckets)| PartitionMeta {
                 index_offset: offset,
                 index_n_buckets: n_buckets,
             })
@@ -131,17 +372,12 @@ impl SnapshotWriter {
             hash_algorithm: HASH_ALGORITHM.to_string(),
             verify_seed: self.verify_seed,
             partitions,
-            stats: Some(Stats {
-                n_keys: n_keys_total,
-                created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                scatter: None,
-                index: None,
-            }),
-            encoding: None,
+            stats,
+            encoding,
         };
 
         let json = serde_json::to_string_pretty(&meta)?;
-        fs::write(root.join("meta.json"), json)?;
+        fs::write(self.root.join("meta.json"), json)?;
 
         Ok(())
     }
@@ -197,7 +433,7 @@ mod tests {
         let (dir, mut w) = temp_snapshot(4);
         w.write(b"hello", b"world").unwrap();
         w.write(b"foo", b"bar").unwrap();
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
 
         assert!(dir.path().join("meta.json").exists());
         assert!(index_path(dir.path()).exists(), "index.all missing");
@@ -211,7 +447,7 @@ mod tests {
     fn meta_json_is_valid() {
         let (dir, mut w) = temp_snapshot(4);
         w.write(b"k1", b"v1").unwrap();
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
 
         let raw = fs::read_to_string(dir.path().join("meta.json")).unwrap();
         let meta: Meta = serde_json::from_str(&raw).unwrap();
@@ -230,7 +466,7 @@ mod tests {
             let key = format!("key-{i}");
             w.write(key.as_bytes(), b"v").unwrap();
         }
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
 
         let raw = fs::read_to_string(dir.path().join("meta.json")).unwrap();
         let meta: Meta = serde_json::from_str(&raw).unwrap();
@@ -244,7 +480,7 @@ mod tests {
         for i in 0..n {
             w.write(format!("k{i}").as_bytes(), b"x").unwrap();
         }
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
 
         let raw = fs::read_to_string(dir.path().join("meta.json")).unwrap();
         let meta: Meta = serde_json::from_str(&raw).unwrap();
