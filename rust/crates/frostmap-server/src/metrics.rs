@@ -325,7 +325,7 @@ mod tests {
         for &(k, v) in pairs {
             w.write(k, v).unwrap();
         }
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
         dir
     }
 

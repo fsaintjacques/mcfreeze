@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
@@ -9,16 +9,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use frostmap_format::{
-    data::AlignedWriter,
-    index::{compact_fingerprint, fingerprint, RawEntry},
-    meta::{Layout, DEFAULT_VERIFY_SEED},
+    index::fingerprint,
+    meta::Layout,
+    writer::{PartitionBuildReady, PartitionWriter},
 };
 
-use crate::{
-    error::LoaderError,
-    source::KvBatch,
-    spill::{SpillRecord, SpillWriter},
-};
+use crate::{error::LoaderError, source::KvBatch};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,6 +26,7 @@ type PartitionBatch = Vec<(Vec<u8>, u64, Vec<u8>)>;
 pub struct ScatterStats {
     pub n_keys: u64,
     pub data_bytes: u64,
+    pub partitions_ready: Vec<PartitionBuildReady>,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +125,7 @@ pub fn new_size_histogram() -> Histogram<u64> {
 
 // Internal: what each partition_writer task returns.
 struct PartitionStats {
+    build_ready: PartitionBuildReady,
     n_keys: u64,
     sum_bytes: u64,
     histogram: Histogram<u64>,
@@ -214,23 +212,18 @@ impl ScatterPhase {
     pub fn new(
         root: &Path,
         layout: Layout,
+        writers: Vec<PartitionWriter<BufWriter<File>>>,
         channel_capacity: usize,
-        data_buf_bytes: usize,
-        spill_buf_bytes: usize,
     ) -> Result<Self, LoaderError> {
         let n = layout.n_partitions as usize;
+        assert_eq!(writers.len(), n);
 
         let mut senders = Vec::with_capacity(n);
         let mut handles = Vec::with_capacity(n);
 
-        for i in 0..n {
-            let dir = frostmap_format::meta::partition_dir(root, layout.n_partitions, i);
-            std::fs::create_dir_all(&dir)?;
-
+        for writer in writers {
             let (tx, rx) = mpsc::channel::<PartitionBatch>(channel_capacity.max(1));
-            let handle = tokio::task::spawn_blocking(move || {
-                partition_writer(dir, rx, data_buf_bytes, spill_buf_bytes)
-            });
+            let handle = tokio::task::spawn_blocking(move || partition_writer(writer, rx));
 
             senders.push(tx);
             handles.push(handle);
@@ -280,9 +273,9 @@ impl ScatterPhase {
         drop(fanouts);
         drop(self.senders);
 
-        let mut partition_stats: Vec<PartitionStats> = Vec::with_capacity(self.handles.len());
+        let mut all_partition_stats: Vec<PartitionStats> = Vec::with_capacity(self.handles.len());
         for handle in self.handles {
-            partition_stats.push(handle.await??);
+            all_partition_stats.push(handle.await??);
         }
 
         // Measure after all writers have flushed — this is the true wall time.
@@ -291,9 +284,10 @@ impl ScatterPhase {
 
         let mut merged = new_size_histogram();
         let mut total_sum = 0u64;
-        let mut partitions: Vec<PartitionDone> = Vec::with_capacity(partition_stats.len());
+        let mut partitions: Vec<PartitionDone> = Vec::with_capacity(all_partition_stats.len());
+        let mut partitions_ready = Vec::with_capacity(all_partition_stats.len());
 
-        for ps in partition_stats {
+        for ps in all_partition_stats {
             merged
                 .add(&ps.histogram)
                 .expect("all partition histograms share the same bounds");
@@ -304,6 +298,7 @@ impl ScatterPhase {
                 n_keys: ps.n_keys,
                 value_sizes: Some(part_sizes),
             });
+            partitions_ready.push(ps.build_ready);
         }
 
         let n_keys = partitions.iter().map(|p| p.n_keys).sum();
@@ -324,7 +319,11 @@ impl ScatterPhase {
             .map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
         tokio::fs::write(self.root.join("scatter.done"), json).await?;
 
-        Ok(ScatterStats { n_keys, data_bytes })
+        Ok(ScatterStats {
+            n_keys,
+            data_bytes,
+            partitions_ready,
+        })
     }
 }
 
@@ -333,16 +332,9 @@ impl ScatterPhase {
 // ---------------------------------------------------------------------------
 
 fn partition_writer(
-    dir: PathBuf,
+    mut writer: PartitionWriter<BufWriter<File>>,
     mut rx: mpsc::Receiver<PartitionBatch>,
-    data_buf_bytes: usize,
-    spill_buf_bytes: usize,
 ) -> Result<PartitionStats, LoaderError> {
-    let mut data = AlignedWriter::new(
-        BufWriter::with_capacity(data_buf_bytes, File::create(dir.join("data.bin"))?),
-        DEFAULT_VERIFY_SEED,
-    );
-    let mut spill = SpillWriter::create(&dir.join("spill.bin"), spill_buf_bytes)?;
     let mut histogram = new_size_histogram();
     let mut sum_bytes = 0u64;
     let mut n_keys = 0u64;
@@ -353,24 +345,14 @@ fn partition_writer(
             // record(0) is invalid; empty values map to 1 for histogram purposes.
             histogram.record(size.max(1)).unwrap_or_default();
             sum_bytes += size;
-            let (aligned_offset, _on_disk_size) = data.write_value(&key, &value)?;
-            // RawEntry::new validates the offset fits in u32 (max 256 GB
-            // per partition). The fingerprint is pre-compacted to 32 bits
-            // via compact_fingerprint (high 32 bits of the u64 hash, so
-            // it is uncorrelated with the partition routing bits in the
-            // low 32). The resulting record is byte-identical to Bucket.
-            let entry = RawEntry::new(compact_fingerprint(fp), aligned_offset)?;
-            spill.push(SpillRecord {
-                fingerprint: entry.fingerprint,
-                offset: entry.aligned_offset,
-            })?;
+            writer.write(&key, fp, &value)?;
             n_keys += 1;
         }
     }
 
-    data.finish()?;
-    spill.finish()?;
+    let build_ready = writer.finish_data()?;
     Ok(PartitionStats {
+        build_ready,
         n_keys,
         sum_bytes,
         histogram,
@@ -385,7 +367,8 @@ fn partition_writer(
 mod tests {
     use super::*;
     use crate::source::VecBatch;
-    use crate::spill::SpillReader;
+    use frostmap_format::meta::DEFAULT_VERIFY_SEED;
+    use frostmap_format::spill::SpillReader;
     use frostmap_format::{
         data::pread,
         meta::{VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
@@ -396,9 +379,19 @@ mod tests {
         Layout::new(n).unwrap()
     }
 
+    fn make_writers(root: &std::path::Path, n: u32) -> Vec<PartitionWriter<BufWriter<File>>> {
+        (0..n as usize)
+            .map(|i| {
+                let dir = frostmap_format::meta::partition_dir(root, n, i);
+                PartitionWriter::new_buffered(&dir, DEFAULT_VERIFY_SEED, 1024 * 1024, 4096).unwrap()
+            })
+            .collect()
+    }
+
     async fn scatter(pairs: &[(&[u8], &[u8])], n: u32) -> (TempDir, ScatterStats) {
         let dir = TempDir::new().unwrap();
-        let phase = ScatterPhase::new(dir.path(), layout(n), 4, 1024 * 1024, 4096).unwrap();
+        let writers = make_writers(dir.path(), n);
+        let phase = ScatterPhase::new(dir.path(), layout(n), writers, 4).unwrap();
         let batch = VecBatch(
             pairs
                 .iter()
@@ -481,7 +474,8 @@ mod tests {
     #[tokio::test]
     async fn multiple_batches_accumulate() {
         let dir = TempDir::new().unwrap();
-        let phase = ScatterPhase::new(dir.path(), layout(1), 4, 1024 * 1024, 4096).unwrap();
+        let phase =
+            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 4).unwrap();
         let mut fanout = phase.fanout();
 
         for i in 0u64..10 {
@@ -510,7 +504,8 @@ mod tests {
     async fn parallel_fanouts_no_data_loss() {
         // Two concurrent fanouts writing to the same partition writers.
         let dir = TempDir::new().unwrap();
-        let phase = ScatterPhase::new(dir.path(), layout(1), 8, 1024 * 1024, 4096).unwrap();
+        let phase =
+            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 8).unwrap();
         let mut f0 = phase.fanout();
         let mut f1 = phase.fanout();
 
@@ -544,7 +539,8 @@ mod tests {
     #[tokio::test]
     async fn backpressure_does_not_deadlock() {
         let dir = TempDir::new().unwrap();
-        let phase = ScatterPhase::new(dir.path(), layout(1), 1, 1024 * 1024, 4096).unwrap();
+        let phase =
+            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 1).unwrap();
         let mut fanout = phase.fanout();
         let batch = VecBatch(
             (0u64..1000)

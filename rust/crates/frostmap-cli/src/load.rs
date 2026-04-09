@@ -315,8 +315,8 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         index_parallelism: args.index_parallelism,
         ..LoaderConfig::default()
     };
-    let loader = SnapshotLoader::new(&output, loader_config)
-        .context("failed to create SnapshotLoader")?;
+    let loader =
+        SnapshotLoader::new(&output, loader_config).context("failed to create SnapshotLoader")?;
 
     let scatter_result = loader
         .scatter_result_from_done()

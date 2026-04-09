@@ -179,7 +179,7 @@ mod tests {
         for &(k, v) in pairs {
             w.write(k, v).unwrap();
         }
-        w.finish(dir.path()).unwrap();
+        w.finish().unwrap();
         dir
     }
 
@@ -222,7 +222,7 @@ mod tests {
             let d = TempDir::new().unwrap();
             let mut w = SnapshotWriter::new(d.path(), 1).unwrap();
             w.write(b"key", b"value").unwrap();
-            w.finish(d.path()).unwrap();
+            w.finish().unwrap();
             d
         };
         let reader = SnapshotReader::open(dir.path()).unwrap();

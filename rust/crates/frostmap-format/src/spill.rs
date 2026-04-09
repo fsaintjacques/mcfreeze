@@ -2,12 +2,11 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use bytemuck::{Pod, Zeroable};
-
-use crate::error::LoaderError;
+use crate::index::Bucket;
+use crate::{Error, Result};
 
 // ---------------------------------------------------------------------------
-// SpillRecord — 8-byte fixed-size on-disk entry
+// Spill file format
 // ---------------------------------------------------------------------------
 
 /// Magic bumped across two format revisions:
@@ -23,27 +22,12 @@ use crate::error::LoaderError;
 /// - `KVSPIL3\n` (current): 8-byte record where `fingerprint` is the
 ///   **high** 32 bits of the xxhash64 via `compact_fingerprint`. Decouples
 ///   partition routing (low bits) from home-position computation (high
-///   bits). Byte layout identical to `frostmap_format::index::Bucket`.
+///   bits). Each record is a `Bucket` (8 bytes, `#[repr(C)]`).
 pub const SPILL_MAGIC: [u8; 8] = *b"KVSPIL3\n";
 pub const SPILL_HEADER_SIZE: usize = 16; // magic(8) + count(8)
-pub const SPILL_RECORD_SIZE: usize = 8;
+pub const SPILL_RECORD_SIZE: usize = std::mem::size_of::<Bucket>();
 
-/// On-disk representation of one index entry accumulated during scatter.
-///
-/// Byte-layout-identical to `frostmap_format::index::Bucket`: spill is an
-/// unsorted multiset of buckets, and the index build phase hash-places them.
-#[repr(C)]
-#[derive(Clone, Copy, Default, Pod, Zeroable)]
-pub struct SpillRecord {
-    /// Compact 32-bit fingerprint (low 32 bits of the xxhash64). Already
-    /// biased away from zero by `compact_fingerprint`.
-    pub fingerprint: u32,
-    /// Aligned offset into `data.bin`, in `VALUE_ALIGNMENT` (64-byte) units.
-    /// Max addressable: 2^32 × 64 B = 256 GB per partition.
-    pub offset: u32,
-}
-
-const _: () = assert!(std::mem::size_of::<SpillRecord>() == SPILL_RECORD_SIZE);
+const _: () = assert!(SPILL_RECORD_SIZE == 8);
 
 // ---------------------------------------------------------------------------
 // SpillWriter
@@ -55,7 +39,7 @@ pub struct SpillWriter {
 }
 
 impl SpillWriter {
-    pub fn create(path: &Path, buf_bytes: usize) -> Result<Self, LoaderError> {
+    pub fn create(path: &Path, buf_bytes: usize) -> Result<Self> {
         let file = File::create(path)?;
         let mut writer = BufWriter::with_capacity(buf_bytes, file);
         // Write placeholder header; count is back-filled in finish().
@@ -64,14 +48,14 @@ impl SpillWriter {
         Ok(Self { writer, count: 0 })
     }
 
-    pub fn push(&mut self, record: SpillRecord) -> Result<(), LoaderError> {
+    pub fn push(&mut self, record: Bucket) -> Result<()> {
         self.writer.write_all(bytemuck::bytes_of(&record))?;
         self.count += 1;
         Ok(())
     }
 
     /// Flush, seek back to offset 8, overwrite the count field, return count.
-    pub fn finish(mut self) -> Result<u64, LoaderError> {
+    pub fn finish(mut self) -> Result<u64> {
         self.writer.flush()?;
         let mut file = self
             .writer
@@ -93,13 +77,13 @@ pub struct SpillReader {
 }
 
 impl SpillReader {
-    pub fn open(path: &Path) -> Result<Self, LoaderError> {
+    pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
         let mut hdr = [0u8; SPILL_HEADER_SIZE];
         file.read_exact(&mut hdr)?;
 
         if hdr[..8] != SPILL_MAGIC {
-            return Err(LoaderError::Io(std::io::Error::new(
+            return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid magic bytes in spill header",
             )));
@@ -126,7 +110,7 @@ pub struct SpillIter {
 }
 
 impl Iterator for SpillIter {
-    type Item = Result<SpillRecord, LoaderError>;
+    type Item = Result<Bucket>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
@@ -134,7 +118,7 @@ impl Iterator for SpillIter {
         }
         let mut buf = [0u8; SPILL_RECORD_SIZE];
         match self.reader.read_exact(&mut buf) {
-            Err(e) => Some(Err(LoaderError::Io(e))),
+            Err(e) => Some(Err(Error::Io(e))),
             Ok(()) => {
                 self.remaining -= 1;
                 Some(Ok(*bytemuck::from_bytes(&buf)))
@@ -157,7 +141,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn round_trip(records: &[SpillRecord]) -> Vec<SpillRecord> {
+    fn round_trip(records: &[Bucket]) -> Vec<Bucket> {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("spill.bin");
 
@@ -175,7 +159,7 @@ mod tests {
 
     #[test]
     fn spill_record_size() {
-        assert_eq!(std::mem::size_of::<SpillRecord>(), SPILL_RECORD_SIZE);
+        assert_eq!(std::mem::size_of::<Bucket>(), SPILL_RECORD_SIZE);
     }
 
     #[test]
@@ -186,7 +170,7 @@ mod tests {
 
     #[test]
     fn single_record() {
-        let r = SpillRecord {
+        let r = Bucket {
             fingerprint: 0xDEAD,
             offset: 42,
         };
@@ -198,8 +182,8 @@ mod tests {
 
     #[test]
     fn many_records() {
-        let records: Vec<SpillRecord> = (0u32..1000)
-            .map(|i| SpillRecord {
+        let records: Vec<Bucket> = (0u32..1000)
+            .map(|i| Bucket {
                 fingerprint: i + 1, // avoid zero-fingerprint sentinel
                 offset: i * 2,
             })
@@ -214,8 +198,8 @@ mod tests {
 
     #[test]
     fn spill_iter_size_hint() {
-        let records: Vec<SpillRecord> = (0u32..5)
-            .map(|i| SpillRecord {
+        let records: Vec<Bucket> = (0u32..5)
+            .map(|i| Bucket {
                 fingerprint: i + 1,
                 offset: 0,
             })
