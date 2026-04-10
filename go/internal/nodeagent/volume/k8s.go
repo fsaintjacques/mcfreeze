@@ -164,14 +164,15 @@ func (m *K8sManager) resolveDevicePath(ctx context.Context, pvName string) (stri
 	return pvName, nil
 }
 
-// findDiskByID scans /dev/disk/by-id/ for a symlink whose name contains pvName.
+// findDiskByID scans /dev/disk/by-id/ for a symlink whose name ends with the
+// PV name (e.g. "google-pvc-abc123" for PV "pvc-abc123").
 func findDiskByID(pvName string) (string, error) {
 	entries, err := os.ReadDir("/dev/disk/by-id")
 	if err != nil {
 		return "", err
 	}
 	for _, e := range entries {
-		if strings.Contains(e.Name(), pvName) {
+		if strings.HasSuffix(e.Name(), pvName) {
 			return "/dev/disk/by-id/" + e.Name(), nil
 		}
 	}

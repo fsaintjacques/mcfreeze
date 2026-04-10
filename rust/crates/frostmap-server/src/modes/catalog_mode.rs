@@ -211,9 +211,10 @@ async fn watch_catalog(
             }
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
-                let old = registry.swap(Arc::new(new_catalog));
+                let new_arc = Arc::new(new_catalog);
+                let old = registry.swap(Arc::clone(&new_arc));
 
-                log_catalog_diff(&old, &*registry.load(), next_gen);
+                log_catalog_diff(&old, &new_arc, next_gen);
                 drop(old); // release mmaps and file descriptors
 
                 generation.store(next_gen, Ordering::Relaxed);
@@ -246,25 +247,45 @@ fn log_catalog_diff(old: &ActiveCatalog, new: &ActiveCatalog, generation: u64) {
     for (prefix, (name, new_ver)) in &new_map {
         match old_map.get(prefix) {
             Some((_, old_ver)) if old_ver != new_ver => {
-                tracing::info!(generation, dataset = name, version = new_ver, prev = *old_ver, "dataset updated");
+                tracing::info!(
+                    generation,
+                    dataset = name,
+                    version = new_ver,
+                    prev = *old_ver,
+                    "dataset updated"
+                );
                 changed = true;
             }
             Some(_) => {} // unchanged
             None => {
-                tracing::info!(generation, dataset = name, version = new_ver, "dataset added");
+                tracing::info!(
+                    generation,
+                    dataset = name,
+                    version = new_ver,
+                    "dataset added"
+                );
                 changed = true;
             }
         }
     }
     for (prefix, (name, old_ver)) in &old_map {
         if !new_map.contains_key(prefix) {
-            tracing::info!(generation, dataset = name, version = old_ver, "dataset removed");
+            tracing::info!(
+                generation,
+                dataset = name,
+                version = old_ver,
+                "dataset removed"
+            );
             changed = true;
         }
     }
 
     if !changed {
-        tracing::info!(generation, datasets = new_map.len(), "catalog reloaded (no changes)");
+        tracing::info!(
+            generation,
+            datasets = new_map.len(),
+            "catalog reloaded (no changes)"
+        );
     }
 }
 
