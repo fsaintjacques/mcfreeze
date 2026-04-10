@@ -249,7 +249,7 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 			{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "get", "delete"}},
 			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list", "delete"}},
-			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets", "datasetversions"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
+			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets", "datasetversions", "datasetbindings"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
 			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets/status", "datasetversions/status"}, Verbs: []string{"get", "update", "patch"}},
 			// Phase 5: lease-based leader election + events.
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
@@ -268,6 +268,7 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 	cs.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: crName},
 		Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"persistentvolumes"}, Verbs: []string{"create", "get", "update", "delete", "list"}},
 			{APIGroups: []string{"storage.k8s.io"}, Resources: []string{"volumeattachments"}, Verbs: []string{"get", "list", "watch"}},
 		},

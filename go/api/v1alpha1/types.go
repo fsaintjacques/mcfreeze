@@ -262,3 +262,46 @@ type ProtobufEncoding struct {
 	Package       string `json:"package,omitempty"`
 	MessageName   string `json:"messageName"`
 }
+
+// ---------------------------------------------------------------------------
+// DatasetBinding CRD
+// ---------------------------------------------------------------------------
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=fmb
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// DatasetBinding selects a set of Datasets and a set of Kubernetes nodes,
+// declaring that matched nodes should serve matched datasets.
+// When no DatasetBinding matches a node, it receives all datasets (open-world default).
+// When multiple DatasetBindings match a node, their dataset sets are unioned.
+type DatasetBinding struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              DatasetBindingSpec `json:"spec"`
+}
+
+// +kubebuilder:object:generate=true
+
+// DatasetBindingSpec defines the node and dataset selectors for a binding.
+type DatasetBindingSpec struct {
+	// NodeSelector selects which Kubernetes nodes this binding applies to.
+	// A nil or empty selector matches all nodes.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
+
+	// DatasetSelector selects which Datasets this binding includes,
+	// matched against Dataset metadata.labels.
+	// A nil or empty selector matches all datasets.
+	// +optional
+	DatasetSelector *metav1.LabelSelector `json:"datasetSelector,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// DatasetBindingList contains a list of DatasetBinding resources.
+type DatasetBindingList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []DatasetBinding `json:"items"`
+}
