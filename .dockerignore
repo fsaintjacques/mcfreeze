@@ -4,3 +4,5 @@ go/bin/
 .claude/
 .worktrees/
 doc/
+bt-tx/
+tf/

@@ -1,0 +1,29 @@
+# GKE-specific Helm values. Used by `make helm-install-gke`.
+# image.repository and image.tag are set via --set at install time.
+
+image:
+  pullPolicy: Always
+
+controlPlane:
+  storageClass: hyperdisk-ml
+  diskSizeGB: 64
+  leaderElection: false
+  replicas: 1
+  builderTolerateAll: true
+  tolerations:
+    - key: kubernetes.io/arch
+      operator: Equal
+      value: arm64
+      effect: NoSchedule
+
+storageClass:
+  create: true
+  provisioner: pd.csi.storage.gke.io
+  type: hyperdisk-ml
+  volumeBindingMode: Immediate
+  reclaimPolicy: Delete
+
+nodeAgent:
+  csiDriver: pd.csi.storage.gke.io
+  mounter: linux
+  mountBase: /var/frostmap/kv
