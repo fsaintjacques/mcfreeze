@@ -2,13 +2,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/utils/ptr"
 )
 
 // DatasetReconciler aggregates child DatasetVersion status into the parent
@@ -52,6 +56,9 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	if err := r.ensureVersion(ctx, &ds, versions.Items); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.enforceRetention(ctx, &ds, versions.Items); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -59,6 +66,61 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// ensureVersion creates a new DatasetVersion if no version is currently
+// building or active. This guarantees that applying a Dataset CR always
+// kicks off a build without requiring a separate API call.
+func (r *DatasetReconciler) ensureVersion(ctx context.Context, ds *v1alpha1.Dataset, versions []v1alpha1.DatasetVersion) error {
+	for i := range versions {
+		switch versions[i].Status.State {
+		case string(api.StateBuilding), string(api.StateActive), string(api.StateReady), string(api.StateFailed):
+			return nil
+		}
+	}
+
+	versionID := fmt.Sprintf("v%d", r.nextVersion(versions))
+	v := &v1alpha1.DatasetVersion{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ds.Namespace,
+			Name:      v1alpha1.VersionCRName(ds.Name, versionID),
+			Labels:    map[string]string{v1alpha1.DatasetLabel: ds.Name},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion:         v1alpha1.GroupVersion.String(),
+				Kind:               "Dataset",
+				Name:               ds.Name,
+				UID:                ds.UID,
+				Controller:         ptr.To(true),
+				BlockOwnerDeletion: ptr.To(true),
+			}},
+		},
+		Spec: v1alpha1.DatasetVersionSpec{
+			Dataset:    ds.Name,
+			VersionID:  versionID,
+			ShardCount: ds.Spec.ShardCount,
+		},
+	}
+	if err := r.Create(ctx, v); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return fmt.Errorf("auto-create DatasetVersion for %q: %w", ds.Name, err)
+	}
+	slog.Info("auto-created DatasetVersion", "dataset", ds.Name, "version", versionID)
+	return nil
+}
+
+// nextVersion returns the next version number by scanning existing versions
+// for the highest "vN" suffix and incrementing. Returns 1 if no versions exist.
+func (r *DatasetReconciler) nextVersion(versions []v1alpha1.DatasetVersion) int {
+	max := 0
+	for i := range versions {
+		var n int
+		if _, err := fmt.Sscanf(versions[i].Spec.VersionID, "v%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return max + 1
 }
 
 // enforceRetention deletes the oldest retired versions in excess of

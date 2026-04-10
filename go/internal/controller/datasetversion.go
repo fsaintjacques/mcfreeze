@@ -129,7 +129,7 @@ func (r *DatasetVersionReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	case string(api.StateRetired):
 		return r.reconcileRetired(ctx, &v)
 	case string(api.StateFailed):
-		return ctrl.Result{}, nil
+		return r.reconcileFailed(ctx, &v)
 	default:
 		return ctrl.Result{}, fmt.Errorf("unknown state %q", state)
 	}
@@ -306,6 +306,30 @@ func (r *DatasetVersionReconciler) reconcileRetired(ctx context.Context, v *v1al
 		return ctrl.Result{}, err
 	}
 	slog.Info("retired and deleted", "dataset", v.Spec.Dataset, "version", v.Spec.VersionID)
+	return ctrl.Result{}, nil
+}
+
+// reconcileFailed cleans up build resources (Job, ConfigMap, PVC) left behind
+// by a failed build using deterministic resource names, then deletes the CR.
+// All deletions are idempotent — resources may already be gone.
+func (r *DatasetVersionReconciler) reconcileFailed(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
+	dataset := v.Spec.Dataset
+	versionID := v.Spec.VersionID
+	ns := v.Namespace
+
+	// Cancel the build via the builder interface — this deletes the Job,
+	// ConfigMap, and PVC. The builder derives resource names deterministically,
+	// so it works even after a control-plane restart.
+	handle := builder.Handle(builder.JobName(dataset, versionID))
+	if err := r.Builder.Cancel(ctx, handle); err != nil {
+		slog.Warn("reconcileFailed: builder cancel failed", "dataset", dataset, "version", versionID, "ns", ns, "err", err)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	if err := r.Delete(ctx, v); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	slog.Info("failed build cleaned up and deleted", "dataset", dataset, "version", versionID)
 	return ctrl.Result{}, nil
 }
 
