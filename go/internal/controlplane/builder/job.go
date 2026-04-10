@@ -23,13 +23,15 @@ import (
 // (dataset, versionID) pairs. Callers must serialize Start calls for the
 // same (dataset, versionID) — the orchestrator guarantees this.
 type Job struct {
-	Client          kubernetes.Interface
-	Volumes         volume.Manager
-	Namespace       string
-	Image           string            // frostmap container image (must contain both fm and fmtctl)
-	ImagePullPolicy corev1.PullPolicy // defaults to IfNotPresent
-	StorageClass    string            // StorageClass for build PVCs
-	DiskSizeGB      int64             // PVC size in GiB (defaults to 10)
+	Client             kubernetes.Interface
+	Volumes            volume.Manager
+	Namespace          string
+	Image              string            // frostmap container image (must contain both fm and fmtctl)
+	ImagePullPolicy    corev1.PullPolicy // defaults to IfNotPresent
+	StorageClass       string            // StorageClass for build PVCs
+	DiskSizeGB         int64             // PVC size in GiB (defaults to 10)
+	ServiceAccountName string            // K8s SA for build pods (e.g. for Workload Identity)
+	Tolerations        []corev1.Toleration // optional tolerations for build pods
 }
 
 func (b *Job) imagePullPolicy() corev1.PullPolicy {
@@ -162,7 +164,9 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					ServiceAccountName: b.ServiceAccountName,
+					Tolerations:        b.Tolerations,
+					RestartPolicy:      corev1.RestartPolicyNever,
 					SecurityContext: &corev1.PodSecurityContext{
 						// distroless runs as nonroot (65534); fsGroup grants
 						// group-write on PVC mounts without running as root.
