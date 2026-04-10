@@ -51,6 +51,10 @@ Per-component names. Defaults to <fullname>-control-plane / -node-agent.
 {{- printf "%s-node-agent" (include "frostmap.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "frostmap.builder.name" -}}
+{{- printf "%s-builder" (include "frostmap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{/*
 Resolve the container image. Tag defaults to Chart.AppVersion.
 */}}

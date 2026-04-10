@@ -49,8 +49,23 @@ service:
   type: ClusterIP
   port: 8080
 
+storageClass:
+  # Set to true to create the StorageClass referenced by controlPlane.storageClass.
+  create: false
+  provisioner: ""
+  type: ""
+  parameters: {}
+  volumeBindingMode: WaitForFirstConsumer
+  reclaimPolicy: Delete
+
 rbac:
   create: true
 
 serviceAccount:
   create: true
+  # Annotations applied to the control-plane ServiceAccount (e.g. Workload Identity).
+  controlPlaneAnnotations: {}
+  # Annotations applied to the node-agent ServiceAccount.
+  nodeAgentAnnotations: {}
+  # Annotations applied to the builder ServiceAccount (used by build Jobs).
+  builderAnnotations: {}
