@@ -26,11 +26,11 @@ type Job struct {
 	Client             kubernetes.Interface
 	Volumes            volume.Manager
 	Namespace          string
-	Image              string            // frostmap container image (must contain both fm and fmtctl)
-	ImagePullPolicy    corev1.PullPolicy // defaults to IfNotPresent
-	StorageClass       string            // StorageClass for build PVCs
-	DiskSizeGB         int64             // PVC size in GiB (defaults to 10)
-	ServiceAccountName string            // K8s SA for build pods (e.g. for Workload Identity)
+	Image              string              // frostmap container image (must contain both fm and fmtctl)
+	ImagePullPolicy    corev1.PullPolicy   // defaults to IfNotPresent
+	StorageClass       string              // StorageClass for build PVCs
+	DiskSizeGB         int64               // PVC size in GiB (defaults to 10)
+	ServiceAccountName string              // K8s SA for build pods (e.g. for Workload Identity)
 	Tolerations        []corev1.Toleration // optional tolerations for build pods
 }
 

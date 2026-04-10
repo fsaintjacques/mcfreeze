@@ -78,6 +78,47 @@ func TestDatasetReconciler_RetentionDeletesOldestRetired(t *testing.T) {
 	}
 }
 
+func TestDatasetReconciler_EnsureVersionCreatesWhenNoneExist(t *testing.T) {
+	ds := newDataset("users")
+	c := newFakeClient(t, ds)
+	r := &DatasetReconciler{Client: c}
+
+	if _, err := r.Reconcile(context.Background(), dsReq(ds)); err != nil {
+		t.Fatal(err)
+	}
+
+	var list v1alpha1.DatasetVersionList
+	if err := c.List(context.Background(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 auto-created version, got %d", len(list.Items))
+	}
+	if list.Items[0].Spec.VersionID != "v1" {
+		t.Fatalf("versionID = %q, want v1", list.Items[0].Spec.VersionID)
+	}
+}
+
+func TestDatasetReconciler_EnsureVersionSkipsWhenFailedExists(t *testing.T) {
+	ds := newDataset("users")
+	v1 := newDatasetVersion("users", "v1")
+	v1.Status = v1alpha1.DatasetVersionStatus{State: string(api.StateFailed)}
+	c := newFakeClient(t, ds, v1)
+	r := &DatasetReconciler{Client: c}
+
+	if _, err := r.Reconcile(context.Background(), dsReq(ds)); err != nil {
+		t.Fatal(err)
+	}
+
+	var list v1alpha1.DatasetVersionList
+	if err := c.List(context.Background(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected no new version created (failed blocks auto-create), got %d versions", len(list.Items))
+	}
+}
+
 func TestDatasetReconciler_RetentionLeavesNonRetiredAlone(t *testing.T) {
 	ds := newDataset("users")
 	ds.Spec.Retention = 1

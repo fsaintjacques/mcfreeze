@@ -10,9 +10,9 @@ import (
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"k8s.io/utils/ptr"
 )
 
 // DatasetReconciler aggregates child DatasetVersion status into the parent

@@ -310,8 +310,10 @@ func (r *DatasetVersionReconciler) reconcileRetired(ctx context.Context, v *v1al
 }
 
 // reconcileFailed cleans up build resources (Job, ConfigMap, PVC) left behind
-// by a failed build using deterministic resource names, then deletes the CR.
-// All deletions are idempotent — resources may already be gone.
+// by a failed build using deterministic resource names. The CR is kept in
+// Failed state so that ensureVersion does not auto-create a replacement
+// (which would cause an unbounded retry loop if builds fail quickly).
+// Delete the Failed CR manually to trigger a new build attempt.
 func (r *DatasetVersionReconciler) reconcileFailed(ctx context.Context, v *v1alpha1.DatasetVersion) (ctrl.Result, error) {
 	dataset := v.Spec.Dataset
 	versionID := v.Spec.VersionID
@@ -326,10 +328,7 @@ func (r *DatasetVersionReconciler) reconcileFailed(ctx context.Context, v *v1alp
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	if err := r.Delete(ctx, v); err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, err
-	}
-	slog.Info("failed build cleaned up and deleted", "dataset", dataset, "version", versionID)
+	slog.Info("failed build resources cleaned up", "dataset", dataset, "version", versionID)
 	return ctrl.Result{}, nil
 }
 

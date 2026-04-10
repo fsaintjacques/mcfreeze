@@ -60,6 +60,8 @@ resource "google_project_iam_member" "builder_disk_admin" {
   member  = "serviceAccount:${google_service_account.builder.email}"
 }
 
+# K8s SA name must match the Helm release name (default: "frostmap") via
+# the template {{ include "frostmap.builder.name" . }} → "<release>-builder".
 resource "google_service_account_iam_member" "builder_wi" {
   service_account_id = google_service_account.builder.name
   role               = "roles/iam.workloadIdentityUser"
@@ -81,6 +83,8 @@ resource "google_project_iam_member" "node_agent_disk_admin" {
   member  = "serviceAccount:${google_service_account.node_agent.email}"
 }
 
+# K8s SA name must match the Helm release name (default: "frostmap") via
+# the template {{ include "frostmap.nodeAgent.name" . }} → "<release>-node-agent".
 resource "google_service_account_iam_member" "node_agent_wi" {
   service_account_id = google_service_account.node_agent.name
   role               = "roles/iam.workloadIdentityUser"

@@ -301,6 +301,37 @@ func TestReconcile_RetiredRequeueWhenVolumeAttachmentExists(t *testing.T) {
 	}
 }
 
+func TestReconcile_FailedCleansUpButKeepsCR(t *testing.T) {
+	ds := newDataset("users")
+	v := newDatasetVersion("users", "v1")
+	handle := builder.Handle(builder.JobName("users", "v1"))
+	v.Status = v1alpha1.DatasetVersionStatus{
+		State:    string(api.StateFailed),
+		BuildJob: string(handle),
+		Error:    "boom",
+	}
+	c := newFakeClient(t, ds, v)
+	b := newStubBuilder()
+	// Pre-populate the builder so Cancel has something to delete.
+	b.statuses[handle] = builder.Status{Phase: builder.Failed}
+	r := &DatasetVersionReconciler{Client: c, Builder: b}
+
+	if _, err := r.Reconcile(context.Background(), reqFor(v)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Builder resources should be cleaned up.
+	if _, ok := b.statuses[handle]; ok {
+		t.Fatal("expected builder resources to be cancelled")
+	}
+
+	// CR must still exist in Failed state (not deleted).
+	got := getVersion(t, c, v)
+	if got.Status.State != string(api.StateFailed) {
+		t.Fatalf("state = %q, want failed", got.Status.State)
+	}
+}
+
 func TestReconcile_BuildingTimeoutMarksFailed(t *testing.T) {
 	ds := newDataset("users")
 	v := newDatasetVersion("users", "v1")

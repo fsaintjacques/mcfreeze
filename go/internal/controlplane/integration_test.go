@@ -95,8 +95,7 @@ func TestFullLoop(t *testing.T) {
 	agentDone := make(chan error, 1)
 	go func() { agentDone <- agent.Run(ctx) }()
 
-	// --- v1: kubectl-apply equivalent ---
-	cp.CreateVersion(t, "users", "v1", 4)
+	// --- v1: auto-created by DatasetReconciler.ensureVersion ---
 	cp.WaitForVersionState(t, "users", "v1", string(api.StateActive), 30*time.Second)
 
 	// Wait for the node-agent to report PhaseActive on v1.
