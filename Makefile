@@ -1,7 +1,8 @@
 CARGO_FLAGS ?=
 
 .PHONY: build release format lint check-format check-lint check test test-unit test-integration test-kind clean \
-       docker-build kind-up kind-down kind-load helm-install-kind helm-uninstall-kind generate
+       docker-build kind-up kind-down kind-load helm-install-kind helm-uninstall-kind generate \
+       gke-up gke-down gke-push gke-creds helm-install-gke helm-uninstall-gke test-gke
 
 # --- Build ---
 
@@ -88,6 +89,8 @@ FROSTMAP_IMAGE_TAG  = $(lastword $(subst :, ,$(FROSTMAP_IMAGE)))
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
+GKE_PLATFORM ?= linux/arm64
+
 docker-build:
 	$(KIND_PROVIDER) build -t $(FROSTMAP_IMAGE) -f docker/Dockerfile .
 
@@ -126,3 +129,50 @@ helm-install-kind:
 
 helm-uninstall-kind:
 	helm uninstall $(HELM_RELEASE_NAME) -n $(HELM_RELEASE_NS) --ignore-not-found
+
+# --- GKE / Terraform ---
+
+TF_DIR     := tf/e2e
+TF         := terraform -chdir=$(TF_DIR)
+GIT_SHA    ?= $(shell git rev-parse --short HEAD)
+
+# Resolve outputs once per recipe via $(shell …) so each target is self-contained.
+GKE_IMAGE_REPO = $(shell $(TF) output -raw image_repo 2>/dev/null)
+GKE_CLUSTER    = $(shell $(TF) output -raw cluster_name 2>/dev/null)
+GKE_LOCATION   = $(shell $(TF) output -raw cluster_location 2>/dev/null)
+GKE_BQ_TABLE   = $(shell $(TF) output -raw bq_table 2>/dev/null)
+GKE_BUILDER_SA = $(shell $(TF) output -raw builder_sa 2>/dev/null)
+GKE_NODE_SA    = $(shell $(TF) output -raw node_agent_sa 2>/dev/null)
+
+gke-up:
+	$(TF) init
+	$(TF) apply -auto-approve
+
+gke-creds:
+	gcloud container clusters get-credentials $(GKE_CLUSTER) --region $(GKE_LOCATION)
+
+gke-push:
+	podman build --platform $(GKE_PLATFORM) -t $(GKE_IMAGE_REPO):$(GIT_SHA) -f docker/Dockerfile .
+	podman push $(GKE_IMAGE_REPO):$(GIT_SHA)
+
+helm-install-gke: gke-creds
+	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/frostmap \
+		-n $(HELM_RELEASE_NS) --create-namespace \
+		-f $(TF_DIR)/values-gke.yaml \
+		--set image.repository=$(GKE_IMAGE_REPO) \
+		--set image.tag=$(GIT_SHA) \
+		--set-string serviceAccount.builderAnnotations.iam\\.gke\\.io/gcp-service-account=$(GKE_BUILDER_SA) \
+		--set-string serviceAccount.nodeAgentAnnotations.iam\\.gke\\.io/gcp-service-account=$(GKE_NODE_SA) \
+		--wait --timeout 5m
+
+helm-uninstall-gke: gke-creds
+	helm uninstall $(HELM_RELEASE_NAME) -n $(HELM_RELEASE_NS) --ignore-not-found
+
+test-gke: helm-install-gke
+	cd go && \
+		FROSTMAP_IMAGE=$(GKE_IMAGE_REPO):$(GIT_SHA) \
+		BQ_TABLE=$(GKE_BQ_TABLE) \
+		go test -tags gke -count=1 -v -timeout 20m ./...
+
+gke-down:
+	$(TF) destroy -auto-approve
