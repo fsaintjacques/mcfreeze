@@ -45,6 +45,8 @@ spec:
             - name: mounts
               mountPath: {{ .Values.nodeAgent.mountBase }}
               mountPropagation: Bidirectional
+            - name: host-dev
+              mountPath: /dev
             {{- if .Values.nodeAgent.csiHostPath }}
             - name: csi-data
               mountPath: {{ .Values.nodeAgent.csiHostPath }}
@@ -52,6 +54,7 @@ spec:
             {{- end }}
           securityContext:
             privileged: true
+            runAsUser: 0
           {{- with .Values.nodeAgent.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -87,7 +90,12 @@ spec:
         - name: catalog
           emptyDir: {}
         - name: mounts
-          emptyDir: {}
+          hostPath:
+            path: {{ .Values.nodeAgent.mountBase }}
+            type: DirectoryOrCreate
+        - name: host-dev
+          hostPath:
+            path: /dev
         {{- if .Values.nodeAgent.csiHostPath }}
         - name: csi-data
           hostPath:

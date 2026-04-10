@@ -1,0 +1,16 @@
+{{- if .Values.storageClass.create -}}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.controlPlane.storageClass }}
+  labels:
+    {{- include "frostmap.labels" . | nindent 4 }}
+provisioner: {{ .Values.storageClass.provisioner }}
+parameters:
+  type: {{ .Values.storageClass.type }}
+  {{- with .Values.storageClass.parameters }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode | default "WaitForFirstConsumer" }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy | default "Delete" }}
+{{- end }}
