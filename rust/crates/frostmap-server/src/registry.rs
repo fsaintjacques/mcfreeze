@@ -103,6 +103,13 @@ impl ActiveCatalog {
         self.datasets.len()
     }
 
+    /// Iterator over `(key_prefix, dataset_name, version_id)` triples.
+    pub fn datasets(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.datasets
+            .iter()
+            .map(|(prefix, h)| (prefix.as_str(), h.name.as_str(), h.version.as_str()))
+    }
+
     /// Snapshot of per-dataset version info for the `GET /version` HTTP response.
     /// Sorted by dataset name for deterministic JSON output.
     pub fn version_snapshot(&self) -> Vec<VersionEntry> {

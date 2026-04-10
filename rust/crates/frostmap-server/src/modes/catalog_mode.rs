@@ -66,8 +66,10 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         }
         Err(e) => return Err(e),
     };
-    let n_ds = initial.dataset_count() as i64;
+    let empty = ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::now());
+    log_catalog_diff(&empty, &initial, 0);
     let registry = DataRegistry::new(initial);
+    let n_ds = registry.load().dataset_count() as i64;
 
     metrics.active_datasets.set(n_ds);
     metrics.catalog_generation.set(0);
@@ -210,14 +212,59 @@ async fn watch_catalog(
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
                 let old = registry.swap(Arc::new(new_catalog));
+
+                log_catalog_diff(&old, &*registry.load(), next_gen);
                 drop(old); // release mmaps and file descriptors
 
                 generation.store(next_gen, Ordering::Relaxed);
                 metrics.catalog_generation.set(next_gen as i64);
                 metrics.active_datasets.set(n_ds);
-                tracing::info!(generation = next_gen, datasets = n_ds, "catalog swapped");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Catalog diff logging
+// ---------------------------------------------------------------------------
+
+/// Log a human-readable diff between the old and new catalog.
+fn log_catalog_diff(old: &ActiveCatalog, new: &ActiveCatalog, generation: u64) {
+    use std::collections::HashMap;
+
+    let old_map: HashMap<&str, (&str, &str)> = old
+        .datasets()
+        .map(|(prefix, name, ver)| (prefix, (name, ver)))
+        .collect();
+    let new_map: HashMap<&str, (&str, &str)> = new
+        .datasets()
+        .map(|(prefix, name, ver)| (prefix, (name, ver)))
+        .collect();
+
+    let mut changed = false;
+
+    for (prefix, (name, new_ver)) in &new_map {
+        match old_map.get(prefix) {
+            Some((_, old_ver)) if old_ver != new_ver => {
+                tracing::info!(generation, dataset = name, version = new_ver, prev = *old_ver, "dataset updated");
+                changed = true;
+            }
+            Some(_) => {} // unchanged
+            None => {
+                tracing::info!(generation, dataset = name, version = new_ver, "dataset added");
+                changed = true;
+            }
+        }
+    }
+    for (prefix, (name, old_ver)) in &old_map {
+        if !new_map.contains_key(prefix) {
+            tracing::info!(generation, dataset = name, version = old_ver, "dataset removed");
+            changed = true;
+        }
+    }
+
+    if !changed {
+        tracing::info!(generation, datasets = new_map.len(), "catalog reloaded (no changes)");
     }
 }
 
