@@ -6,11 +6,17 @@ import (
 	"github.com/fsaintjacques/frostmap/go/api"
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -103,9 +109,20 @@ func (r *NodeAssignmentReconciler) OnStateReport(ctx context.Context, _ string) 
 	}
 }
 
+// datasetAssignment pairs a NodeAssignment with the parent Dataset's labels
+// so that DatasetBinding selectors can be evaluated without re-fetching.
+type datasetAssignment struct {
+	api.NodeAssignment
+	DatasetLabels map[string]string
+}
+
 // syncBroker recomputes the desired assignments for every registered node and
 // pushes them through the broker. It is safe to call repeatedly; identical
 // pushes are no-ops thanks to the broker's diff-on-set.
+//
+// When DatasetBindings exist, each node receives only the union of datasets
+// selected by bindings whose nodeSelector matches the node. When no binding
+// matches a node, it receives all datasets (open-world default).
 func (r *NodeAssignmentReconciler) syncBroker(ctx context.Context, namespace string) error {
 	if r.Broker == nil {
 		return nil
@@ -116,54 +133,129 @@ func (r *NodeAssignmentReconciler) syncBroker(ctx context.Context, namespace str
 		return err
 	}
 
-	// Resolve KeyPrefix per dataset (cache to avoid repeated Gets).
-	keyPrefixes := map[string]string{}
+	// Cache parent Dataset lookups (KeyPrefix + labels).
+	type datasetInfo struct {
+		keyPrefix string
+		labels    map[string]string
+	}
+	datasets := map[string]*datasetInfo{}
 
-	// Build the desired assignment slice once and push it to every node.
-	// Multi-node support today is "every node serves every active dataset";
-	// per-node sharding can replace this loop later.
-	var desired []api.NodeAssignment
+	var allAssignments []datasetAssignment
 	for i := range versions.Items {
 		v := &versions.Items[i]
 		if v.Status.State != string(api.StateActive) {
 			continue
 		}
 
-		prefix, ok := keyPrefixes[v.Spec.Dataset]
+		info, ok := datasets[v.Spec.Dataset]
 		if !ok {
 			var ds v1alpha1.Dataset
 			if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: v.Spec.Dataset}, &ds); err != nil {
 				if apierrors.IsNotFound(err) {
-					// Parent Dataset gone — drop this assignment.
 					continue
 				}
 				return err
 			}
-			prefix = ds.Spec.KeyPrefix
-			keyPrefixes[v.Spec.Dataset] = prefix
+			info = &datasetInfo{keyPrefix: ds.Spec.KeyPrefix, labels: ds.Labels}
+			datasets[v.Spec.Dataset] = info
 		}
 
-		desired = append(desired, api.NodeAssignment{
-			Dataset:   v.Spec.Dataset,
-			KeyPrefix: prefix,
-			Version: api.VersionRecord{
-				ID:          v.Spec.VersionID,
-				Dataset:     v.Spec.Dataset,
-				PVName:      v.Status.PVName,
-				State:       api.StateActive,
-				ShardCount:  v.Spec.ShardCount,
-				CreatedAt:   v.CreationTimestamp.Time,
-				Descriptor:  v.Status.Descriptor,
-				MessageName: v.Status.MessageName,
-				DiskURL:     v.Status.DiskURL,
+		allAssignments = append(allAssignments, datasetAssignment{
+			NodeAssignment: api.NodeAssignment{
+				Dataset:   v.Spec.Dataset,
+				KeyPrefix: info.keyPrefix,
+				Version: api.VersionRecord{
+					ID:          v.Spec.VersionID,
+					Dataset:     v.Spec.Dataset,
+					PVName:      v.Status.PVName,
+					State:       api.StateActive,
+					ShardCount:  v.Spec.ShardCount,
+					CreatedAt:   v.CreationTimestamp.Time,
+					Descriptor:  v.Status.Descriptor,
+					MessageName: v.Status.MessageName,
+					DiskURL:     v.Status.DiskURL,
+				},
 			},
+			DatasetLabels: info.labels,
 		})
 	}
 
-	for _, node := range r.Broker.Nodes() {
-		r.Broker.SetAssignments(node, desired)
+	// List DatasetBindings.
+	var bindings v1alpha1.DatasetBindingList
+	if err := r.List(ctx, &bindings, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+
+	for _, nodeName := range r.Broker.Nodes() {
+		// Read the K8s Node object to get its labels.
+		var node corev1.Node
+		if err := r.Get(ctx, client.ObjectKey{Name: nodeName}, &node); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Node gone — push empty assignments.
+				r.Broker.SetAssignments(nodeName, nil)
+				continue
+			}
+			return err
+		}
+
+		desired := filterAssignmentsForNode(node.Labels, allAssignments, bindings.Items)
+		r.Broker.SetAssignments(nodeName, desired)
 	}
 	return nil
+}
+
+// filterAssignmentsForNode returns the assignments a node should receive based
+// on DatasetBindings. If no binding's nodeSelector matches the node, all
+// assignments are returned (open-world default). Otherwise, the union of
+// datasets selected by all matching bindings is returned.
+func filterAssignmentsForNode(
+	nodeLabels map[string]string,
+	all []datasetAssignment,
+	bindings []v1alpha1.DatasetBinding,
+) []api.NodeAssignment {
+	// Collect bindings whose nodeSelector matches this node.
+	var matchingBindings []v1alpha1.DatasetBinding
+	for _, b := range bindings {
+		if selectorMatchesLabels(b.Spec.NodeSelector, nodeLabels) {
+			matchingBindings = append(matchingBindings, b)
+		}
+	}
+
+	// Open-world default: no matching bindings → all datasets.
+	if len(matchingBindings) == 0 {
+		out := make([]api.NodeAssignment, len(all))
+		for i := range all {
+			out[i] = all[i].NodeAssignment
+		}
+		return out
+	}
+
+	// Union: a dataset is included if any matching binding's datasetSelector matches it.
+	var result []api.NodeAssignment
+	for i := range all {
+		for _, b := range matchingBindings {
+			if selectorMatchesLabels(b.Spec.DatasetSelector, all[i].DatasetLabels) {
+				result = append(result, all[i].NodeAssignment)
+				break
+			}
+		}
+	}
+	return result
+}
+
+// selectorMatchesLabels returns true if the given LabelSelector matches the
+// label set. A nil or empty selector matches everything. Malformed selectors
+// are logged and treated as non-matching.
+func selectorMatchesLabels(sel *metav1.LabelSelector, lbls map[string]string) bool {
+	if sel == nil {
+		return true
+	}
+	s, err := metav1.LabelSelectorAsSelector(sel)
+	if err != nil {
+		log.Log.Error(err, "malformed LabelSelector, treating as non-matching", "selector", sel)
+		return false
+	}
+	return s.Matches(labels.Set(lbls))
 }
 
 // patchRollout aggregates broker node states into v.Status.Rollout and
@@ -225,7 +317,29 @@ func (r *NodeAssignmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.stateReportEvents = make(chan event.TypedGenericEvent[client.Object], stateReportEventBuffer)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DatasetVersion{}).
+		// Re-sync assignments when DatasetBindings or Node labels change.
+		Watches(&v1alpha1.DatasetBinding{}, handler.EnqueueRequestsFromMapFunc(r.enqueueActiveVersions)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.enqueueActiveVersions),
+			builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Named("nodeassignment").
 		WatchesRawSource(source.Channel(r.stateReportEvents, &handler.EnqueueRequestForObject{})).
 		Complete(r)
+}
+
+// enqueueActiveVersions returns reconcile requests for every active
+// DatasetVersion in the namespace. Used by the DatasetBinding and Node watches
+// to trigger a full re-sync when binding or node labels change.
+func (r *NodeAssignmentReconciler) enqueueActiveVersions(ctx context.Context, _ client.Object) []ctrl.Request {
+	var list v1alpha1.DatasetVersionList
+	if err := r.List(ctx, &list, client.InNamespace(r.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "listing active DatasetVersions for re-sync")
+		return nil
+	}
+	var reqs []ctrl.Request
+	for i := range list.Items {
+		if list.Items[i].Status.State == string(api.StateActive) {
+			reqs = append(reqs, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+	}
+	return reqs
 }

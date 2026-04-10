@@ -21,7 +21,7 @@ rules:
     resources: ["pods"]
     verbs: ["list", "delete"]
   - apiGroups: ["frostmap.dev"]
-    resources: ["datasets", "datasetversions"]
+    resources: ["datasets", "datasetversions", "datasetbindings"]
     verbs: ["create", "get", "update", "delete", "list", "watch", "patch"]
   - apiGroups: ["frostmap.dev"]
     resources: ["datasets/status", "datasetversions/status"]
@@ -58,6 +58,9 @@ metadata:
     {{- include "frostmap.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["create", "get", "update", "delete", "list"]

@@ -22,6 +22,7 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 	"github.com/fsaintjacques/frostmap/go/internal/testutil"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -90,6 +91,13 @@ func TestFullLoop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Create the K8s Node object so that syncBroker can read its labels
+	// when evaluating DatasetBindings.
+	if err := cp.Client.Create(context.Background(), &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+	}); err != nil {
+		t.Fatalf("create Node %q: %v", nodeName, err)
+	}
 	cp.Broker.RegisterNode(nodeName)
 
 	agentDone := make(chan error, 1)

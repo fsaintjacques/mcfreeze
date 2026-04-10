@@ -23,6 +23,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DatasetList{},
 		&DatasetVersion{},
 		&DatasetVersionList{},
+		&DatasetBinding{},
+		&DatasetBindingList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
