@@ -21,6 +21,10 @@ controlPlane:
   # REQUIRED. The chart fails fast at render time if this is empty.
   storageClass: ""
   diskSizeGB: 10
+  # Scheduling and identity overrides for builder Job pods.
+  # serviceAccountName is auto-set to the builder SA; add tolerations,
+  # nodeSelector, affinity here.
+  builderPodTemplate: {}
   resources: {}
   nodeSelector: {}
   tolerations: []

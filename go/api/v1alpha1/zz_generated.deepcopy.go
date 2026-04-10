@@ -5,6 +5,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -95,6 +96,11 @@ func (in *DatasetSpec) DeepCopyInto(out *DatasetSpec) {
 	if in.Trigger != nil {
 		in, out := &in.Trigger, &out.Trigger
 		*out = new(TriggerSpec)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.BuilderResources != nil {
+		in, out := &in.BuilderResources, &out.BuilderResources
+		*out = new(corev1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
 }
