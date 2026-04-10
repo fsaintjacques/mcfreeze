@@ -9,7 +9,9 @@ controlPlane:
   diskSizeGB: 64
   leaderElection: false
   replicas: 1
-  builderTolerateAll: true
+  builderPodTemplate:
+    tolerations:
+      - operator: Exists
   tolerations:
     - key: kubernetes.io/arch
       operator: Equal

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/fsaintjacques/frostmap/go/api"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // VersionCRName returns the deterministic Kubernetes resource name for a
@@ -19,13 +20,17 @@ const DatasetLabel = "frostmap.dev/dataset"
 
 // ToAPIDatasetSpec converts a Dataset CR to the canonical api.DatasetSpec.
 func ToAPIDatasetSpec(cr *Dataset) api.DatasetSpec {
-	return api.DatasetSpec{
+	spec := api.DatasetSpec{
 		Name:       cr.Name,
 		KeyPrefix:  cr.Spec.KeyPrefix,
 		Source:     toAPISourceSpec(cr.Spec.Source),
 		ShardCount: cr.Spec.ShardCount,
 		Retention:  cr.Spec.Retention,
 	}
+	if r := cr.Spec.BuilderResources; r != nil {
+		spec.BuilderResources = toAPIBuilderResources(r)
+	}
+	return spec
 }
 
 // FromAPIDatasetSpec builds a Dataset CR from an api.DatasetSpec. The CR's
@@ -71,6 +76,23 @@ func toAPISourceSpec(s SourceSpec) api.SourceSpec {
 		}
 	}
 	return out
+}
+
+func toAPIBuilderResources(r *corev1.ResourceRequirements) *api.BuilderResources {
+	br := &api.BuilderResources{}
+	if q, ok := r.Requests[corev1.ResourceCPU]; ok {
+		br.CPURequest = q.String()
+	}
+	if q, ok := r.Requests[corev1.ResourceMemory]; ok {
+		br.MemoryRequest = q.String()
+	}
+	if q, ok := r.Limits[corev1.ResourceCPU]; ok {
+		br.CPULimit = q.String()
+	}
+	if q, ok := r.Limits[corev1.ResourceMemory]; ok {
+		br.MemoryLimit = q.String()
+	}
+	return br
 }
 
 func fromAPISourceSpec(s api.SourceSpec) SourceSpec {

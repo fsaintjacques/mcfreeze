@@ -97,6 +97,18 @@ Validation: storageClass is required.
 {{- end -}}
 
 {{/*
+Builder pod template: merge the builder SA name with user-provided overrides
+and serialize to compact JSON for the --builder-pod-template flag.
+*/}}
+{{- define "frostmap.builderPodTemplate" -}}
+{{- $tmpl := dict "serviceAccountName" (include "frostmap.builder.name" .) -}}
+{{- with .Values.controlPlane.builderPodTemplate -}}
+{{- $tmpl = merge . $tmpl -}}
+{{- end -}}
+{{- $tmpl | toJson -}}
+{{- end -}}
+
+{{/*
 Validation: leader-election must be on when running >1 replica.
 */}}
 {{- define "frostmap.checkLeaderElection" -}}

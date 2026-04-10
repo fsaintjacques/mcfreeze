@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -51,6 +52,11 @@ type DatasetSpec struct {
 	// future webhooks, manual kubectl apply).
 	// +optional
 	Trigger *TriggerSpec `json:"trigger,omitempty"`
+
+	// BuilderResources overrides CPU/memory requests and limits for this
+	// dataset's builder Jobs. When nil, cluster-wide defaults apply.
+	// +optional
+	BuilderResources *corev1.ResourceRequirements `json:"builderResources,omitempty"`
 }
 
 // +kubebuilder:object:generate=true

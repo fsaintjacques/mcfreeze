@@ -38,8 +38,7 @@ spec:
             - --leader-elect={{ .Values.controlPlane.leaderElection }}
             - --metrics-bind-address={{ .Values.controlPlane.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.controlPlane.healthProbeBindAddress }}
-            - --builder-service-account={{ include "frostmap.builder.name" . }}
-            - --builder-tolerate-all={{ .Values.controlPlane.builderTolerateAll | default false }}
+            - --builder-pod-template={{ include "frostmap.builderPodTemplate" . }}
           env:
             - name: NAMESPACE
               valueFrom:

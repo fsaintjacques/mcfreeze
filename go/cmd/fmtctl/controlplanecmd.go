@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -53,8 +54,7 @@ func runControlPlane(args []string) {
 	pullPolicy := fs.String("image-pull-policy", "IfNotPresent", "image pull policy (Always, IfNotPresent, Never)")
 	storageClass := fs.String("storage-class", "", "StorageClass for build PVCs (required)")
 	diskSizeGB := fs.Int64("disk-size-gb", 10, "PVC size in GiB")
-	builderSA := fs.String("builder-service-account", "", "Kubernetes ServiceAccount for build Job pods (e.g. for Workload Identity)")
-	builderTolerateAll := fs.Bool("builder-tolerate-all", false, "add an Exists toleration to build Job pods (schedule on any node)")
+	builderPodTemplate := fs.String("builder-pod-template", "{}", "JSON-encoded BuilderPodTemplate for build Job pods")
 	buildTimeout := fs.Duration("build-timeout", 30*time.Minute, "max build duration before cancellation")
 	leaderElect := fs.Bool("leader-elect", true, "enable leader election (Lease-based)")
 	metricsAddr := fs.String("metrics-bind-address", ":8081", "metrics server bind address")
@@ -105,20 +105,20 @@ func runControlPlane(args []string) {
 	broker := controlplane.NewAssignmentBroker()
 
 	volumes := &volume.LocalPathManager{Client: kubeClient, Namespace: *namespace}
-	var builderTolerations []corev1.Toleration
-	if *builderTolerateAll {
-		builderTolerations = []corev1.Toleration{{Operator: corev1.TolerationOpExists}}
+	var podTmpl builder.BuilderPodTemplate
+	if err := json.Unmarshal([]byte(*builderPodTemplate), &podTmpl); err != nil {
+		log.Error(err, "parse --builder-pod-template")
+		os.Exit(1)
 	}
 	jb := &builder.Job{
-		Client:             kubeClient,
-		Volumes:            volumes,
-		Namespace:          *namespace,
-		Image:              *image,
-		ImagePullPolicy:    corev1.PullPolicy(*pullPolicy),
-		StorageClass:       *storageClass,
-		DiskSizeGB:         *diskSizeGB,
-		ServiceAccountName: *builderSA,
-		Tolerations:        builderTolerations,
+		Client:          kubeClient,
+		Volumes:         volumes,
+		Namespace:       *namespace,
+		Image:           *image,
+		ImagePullPolicy: corev1.PullPolicy(*pullPolicy),
+		StorageClass:    *storageClass,
+		DiskSizeGB:      *diskSizeGB,
+		PodTemplate:     podTmpl,
 	}
 
 	if err := (&controller.DatasetVersionReconciler{

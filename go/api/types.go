@@ -4,6 +4,14 @@ package api
 
 import "time"
 
+// BuilderResources specifies CPU/memory requests and limits for builder Jobs.
+type BuilderResources struct {
+	CPURequest    string `json:"cpu_request,omitempty"`
+	CPULimit      string `json:"cpu_limit,omitempty"`
+	MemoryRequest string `json:"memory_request,omitempty"`
+	MemoryLimit   string `json:"memory_limit,omitempty"`
+}
+
 // DatasetSpec describes a dataset and its build configuration.
 type DatasetSpec struct {
 	Name string `json:"name"`
@@ -14,6 +22,10 @@ type DatasetSpec struct {
 	Source     SourceSpec `json:"source"`
 	ShardCount int        `json:"shard_count"`
 	Retention  int        `json:"retention"` // number of ready versions to keep
+
+	// BuilderResources overrides CPU/memory for this dataset's builder Jobs.
+	// When nil, the cluster-wide defaults from BuilderPodTemplate apply.
+	BuilderResources *BuilderResources `json:"builder_resources,omitempty"`
 }
 
 // SourceSpec describes how to produce key-value pairs from a tabular source.

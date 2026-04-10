@@ -9,12 +9,23 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
 )
+
+// BuilderPodTemplate contains scheduling and identity overrides applied to
+// every builder Job's pod spec. Configured via Helm values and passed to the
+// control-plane as a JSON flag.
+type BuilderPodTemplate struct {
+	ServiceAccountName string              `json:"serviceAccountName,omitempty"`
+	Tolerations        []corev1.Toleration `json:"tolerations,omitempty"`
+	NodeSelector       map[string]string   `json:"nodeSelector,omitempty"`
+	Affinity           *corev1.Affinity    `json:"affinity,omitempty"`
+}
 
 // Job implements Async by creating Kubernetes Jobs. Each build
 // writes to a PVC that is finalized into a read-only PV on completion.
@@ -23,15 +34,14 @@ import (
 // (dataset, versionID) pairs. Callers must serialize Start calls for the
 // same (dataset, versionID) — the orchestrator guarantees this.
 type Job struct {
-	Client             kubernetes.Interface
-	Volumes            volume.Manager
-	Namespace          string
-	Image              string              // frostmap container image (must contain both fm and fmtctl)
-	ImagePullPolicy    corev1.PullPolicy   // defaults to IfNotPresent
-	StorageClass       string              // StorageClass for build PVCs
-	DiskSizeGB         int64               // PVC size in GiB (defaults to 10)
-	ServiceAccountName string              // K8s SA for build pods (e.g. for Workload Identity)
-	Tolerations        []corev1.Toleration // optional tolerations for build pods
+	Client          kubernetes.Interface
+	Volumes         volume.Manager
+	Namespace       string
+	Image           string            // frostmap container image (must contain both fm and fmtctl)
+	ImagePullPolicy corev1.PullPolicy // defaults to IfNotPresent
+	StorageClass    string            // StorageClass for build PVCs
+	DiskSizeGB      int64             // PVC size in GiB (defaults to 10)
+	PodTemplate     BuilderPodTemplate
 }
 
 func (b *Job) imagePullPolicy() corev1.PullPolicy {
@@ -164,8 +174,10 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					ServiceAccountName: b.ServiceAccountName,
-					Tolerations:        b.Tolerations,
+					ServiceAccountName: b.PodTemplate.ServiceAccountName,
+					Tolerations:        b.PodTemplate.Tolerations,
+					NodeSelector:       b.PodTemplate.NodeSelector,
+					Affinity:           b.PodTemplate.Affinity,
 					RestartPolicy:      corev1.RestartPolicyNever,
 					SecurityContext: &corev1.PodSecurityContext{
 						// distroless runs as nonroot (65534); fsGroup grants
@@ -178,6 +190,7 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 							Image:           b.Image,
 							ImagePullPolicy: b.imagePullPolicy(),
 							Command:         []string{"fmtctl", "job", "--config", "/config/" + workerConfigFile},
+							Resources:       builderResources(spec.BuilderResources),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "output", MountPath: "/output"},
 								{Name: "config", MountPath: "/config", ReadOnly: true},
@@ -345,6 +358,34 @@ func (b *Job) deleteJobPods(ctx context.Context, jobName string) {
 	for _, p := range pods.Items {
 		b.Client.CoreV1().Pods(b.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{})
 	}
+}
+
+// builderResources converts per-dataset resource overrides to a K8s
+// ResourceRequirements. Returns an empty struct (no constraints) when br is nil.
+func builderResources(br *api.BuilderResources) corev1.ResourceRequirements {
+	if br == nil {
+		return corev1.ResourceRequirements{}
+	}
+	rr := corev1.ResourceRequirements{}
+	if br.CPURequest != "" || br.MemoryRequest != "" {
+		rr.Requests = corev1.ResourceList{}
+		if br.CPURequest != "" {
+			rr.Requests[corev1.ResourceCPU] = resource.MustParse(br.CPURequest)
+		}
+		if br.MemoryRequest != "" {
+			rr.Requests[corev1.ResourceMemory] = resource.MustParse(br.MemoryRequest)
+		}
+	}
+	if br.CPULimit != "" || br.MemoryLimit != "" {
+		rr.Limits = corev1.ResourceList{}
+		if br.CPULimit != "" {
+			rr.Limits[corev1.ResourceCPU] = resource.MustParse(br.CPULimit)
+		}
+		if br.MemoryLimit != "" {
+			rr.Limits[corev1.ResourceMemory] = resource.MustParse(br.MemoryLimit)
+		}
+	}
+	return rr
 }
 
 func ptrInt64(v int64) *int64 { return &v }
