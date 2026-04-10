@@ -17,6 +17,8 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	"log/slog"
+
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -62,7 +63,7 @@ func runControlPlane(args []string) {
 	volumeBase := fs.String("volume-base", "", "FSVolumeManager base directory (legacy fork-builder; leave empty for K8s Job builder)")
 	fs.Parse(args)
 
-	ctrllog.SetLogger(zap.New(zap.UseDevMode(false)))
+	ctrllog.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
 	log := ctrl.Log.WithName("control-plane")
 
 	if *image == "" || *storageClass == "" {

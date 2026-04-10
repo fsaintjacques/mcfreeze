@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"log/slog"
+
+	"github.com/go-logr/logr"
+
 	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
 	"github.com/fsaintjacques/frostmap/go/internal/controller"
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
@@ -23,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 // ControlPlane is a fully wired in-process control-plane backed by a real
@@ -52,7 +55,7 @@ type ControlPlane struct {
 func NewControlPlane(t *testing.T, b builder.Async, volumeBase string) *ControlPlane {
 	t.Helper()
 
-	logf.SetLogger(zap.New(zap.UseDevMode(true), zap.WriteTo(testWriter{t})))
+	logf.SetLogger(logr.FromSlogHandler(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	scheme := apiruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
