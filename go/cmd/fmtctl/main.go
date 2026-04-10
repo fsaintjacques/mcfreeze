@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
