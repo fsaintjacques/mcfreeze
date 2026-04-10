@@ -1,199 +1,159 @@
 # frostmap
 
-Immutable key-value snapshots built from BigQuery, served at sub-millisecond latency over the memcache meta protocol.
+Immutable key-value snapshots built from BigQuery, served at sub-millisecond
+latency across thousands of nodes. Attach a disk — that's the deployment.
 
-## Quick start
+## How It Works
+
+Frostmap separates compute from storage. A snapshot is built once onto a
+Hyperdisk ML volume, attached read-only to every node in the fleet, and served
+locally over the memcache meta protocol. No cache cluster, no replication, no
+state to manage.
+
+```
+                    ┌───────────────────────────┐
+                    │       Control Plane       │  Go · Deployment
+                    │   - dataset registry      │
+                    │   - version lifecycle     │
+                    │   - rollout / rollback    │
+                    └─────────────┬─────────────┘
+                                  │ watched API
+              ┌───────────────────┴───────────────────┐
+              │                                       │
+              ▼                                       ▼
+   ┌─────────────────────┐        ┌────────────────────────────────────┐
+   │   Snapshot Builder  │        │     DaemonSet Pod  (per node)      │
+   │      Rust · Job     │        │                                    │
+   │                     │        │  ┌──────────────────────────────┐  │
+   │  - parallel BQ read │        │  │   node-agent                 │  │
+   │  - write kv format  │        │  │   Go · privileged            │  │
+   │                     │        │  │  - attach / detach disks     │  │
+   └──────────┬──────────┘        │  │  - mount / umount            │  │
+              │ provisions disk   │  │  - write catalog.json        │  │
+              ▼                   │  └──────────────┬───────────────┘  │
+   ┌─────────────────────┐        │                 │ shared EmptyDir  │
+   │    Hyperdisk ML     │        │  ┌──────────────▼───────────────┐  │
+   │    per version      │        │  │   KV Server                  │  │
+   │                     │        │  │   Rust · unprivileged        │  │
+   │    data/part-NN/    │        │  │  - mmap index.all            │  │
+   │      data.bin       │        │  │  - pread data.bin            │  │
+   │    index.all        │        │  │  - MGET over UDS + TCP       │  │
+   │    meta.json        │        │  │  - atomic version swap       │  │
+   └─────────────────────┘        │  └──────────────────────────────┘  │
+                                  └────────────────────────────────────┘
+```
+
+## Quick Start
 
 ```bash
 # Build
 make all
 
-# Load a snapshot from CSV
-echo "aGVsbG8=,d29ybGQ=" | fm load csv --output /tmp/snap --partitions 4
+# Load a snapshot from CSV (columns: key, value)
+printf "key,value\nhello,world\nfoo,bar\n" | fm load --output /tmp/snap --partitions 4 csv
 
 # Look up a key
 fm get --snapshot /tmp/snap hello
 
 # Serve it
 fm serve snapshot --dir /tmp/snap --tcp 0.0.0.0:7777
+
+# Query (memcache meta protocol)
+echo -ne "mg hello v\r\n" | nc localhost 7777
 ```
 
-## Usage
+## Kubernetes Deployment
 
-### `fm load` — build a snapshot
+Frostmap is Kubernetes-native. Users declare a `Dataset` CR and the platform
+handles builds, disk provisioning, fleet-wide rollout, and version retirement.
 
-From BigQuery:
+```yaml
+apiVersion: frostmap.dev/v1alpha1
+kind: Dataset
+metadata:
+  name: users
+spec:
+  keyPrefix: users
+  shardCount: 64
+  retention: 2
+  source:
+    keyColumn: user_id
+    encoding:
+      protobuf:
+        messageName: users.UserProfile
+    bigquery:
+      project: my-project
+      table: my-project.prod.users
+  trigger:
+    cron:
+      schedule: "0 2 * * *"
+```
+
+Deploy with Helm:
 
 ```bash
-fm load bq \
-  --table myproject.dataset.table \
-  --key-column key --value-column value \
-  --output /data/snap \
-  --partitions 64 \
-  --streams 8
+helm install frostmap k8s/charts/frostmap \
+  --set controlPlane.storageClass=hyperdisk-ml \
+  --set controlPlane.image=frostmap/fm:latest
 ```
 
-From CSV (two columns: base64-encoded key, base64-encoded value):
+Target datasets to specific nodes with `DatasetBinding`:
+
+```yaml
+apiVersion: frostmap.dev/v1alpha1
+kind: DatasetBinding
+metadata:
+  name: gpu-nodes-users
+spec:
+  nodeSelector:
+    matchLabels:
+      pool: gpu
+  datasetSelector:
+    matchLabels:
+      team: recommendations
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [High-Level Architecture](doc/high-level.md) | System overview, components, data flow |
+| [KV Snapshot Format](doc/format.md) | On-disk format: index, data, hashing, construction |
+| [KV Server](doc/kv-server.md) | Memcache meta protocol, catalog hot-swap, observability |
+| [Node Agent](doc/node-agent.md) | Disk attachment, mounting, reconciliation loop |
+| [Control Plane](doc/control-plane.md) | Controllers, HTTP API, build system, assignment broker |
+| [Kubernetes Resources](doc/kubernetes.md) | CRDs, RBAC, Helm chart, ownership model |
+
+## Project Layout
+
+```
+rust/crates/
+  frostmap-format/       on-disk snapshot format (reader + writer)
+  frostmap-loader/       parallel scatter-gather build pipeline
+  frostmap-bq/           BigQuery Storage Read API source adapter
+  frostmap-encode/       Arrow → protobuf transcoding
+  frostmap-server/       KV server: memcache meta protocol, catalog hot-swap
+  frostmap-cli/          fm binary: load, get, serve
+
+go/
+  api/                   shared wire types (HTTP + catalog.json)
+  api/v1alpha1/          Kubernetes CRD type definitions
+  cmd/fmtctl/            single binary: control-plane, node-agent, job
+  internal/
+    controlplane/        HTTP server, assignment broker, builder orchestration
+    controller/          Kubernetes reconcilers
+    nodeagent/           agent loop, volume/mount subsystems
+
+k8s/charts/frostmap/    Helm chart
+```
+
+## Building
 
 ```bash
-fm load csv --file data.csv --output /data/snap
-cat data.csv | fm load csv --output /data/snap
+make all           # release Rust + Go binaries
+make test          # unit + integration tests
+make test-kind     # e2e tests in KIND cluster
 ```
-
-Common flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--output` | required | Snapshot directory |
-| `--partitions` | 64 | Hash partitions (power of 2) |
-| `--index-parallelism` | 2 | Parallel index build threads |
-| `-v` | off | Debug logging (overridden by `RUST_LOG`) |
-
-### `fm get` — point lookup
-
-```bash
-fm get --snapshot /data/snap my-key
-fm get --snapshot /data/snap my-key --hex   # binary values
-```
-
-### `fm serve` — start the server
-
-Single snapshot (development):
-
-```bash
-fm serve snapshot --dir /data/snap --tcp 0.0.0.0:7777
-```
-
-Catalog mode (production) — serves multiple datasets with atomic hot-swap:
-
-```bash
-fm serve catalog --catalog /run/kv/catalog.json \
-  --uds /run/kv/kv.sock \
-  --tcp 0.0.0.0:7777 \
-  --metrics 0.0.0.0:9090
-```
-
-Catalog JSON format:
-
-```json
-{
-  "entries": [
-    { "dataset": "users", "version": "v42", "snapshot_dir": "/mnt/kv/users/v42" }
-  ]
-}
-```
-
-In catalog mode, keys are prefixed with the dataset name: `users:alice`.
-
-### Protocol
-
-The server speaks memcache meta commands (memcached 1.6+):
-
-```
-mg users:alice v\r\n        # meta-get with value flag
-VA 5\r\n                    # hit: 5-byte value
-hello\r\n
-
-mg users:missing v\r\n
-EN\r\n                      # miss
-```
-
-Write commands (`ms`, `md`, `ma`) are rejected — snapshots are immutable.
-
-## Library API
-
-### Writing a snapshot
-
-```rust
-use frostmap_format::writer::SnapshotWriter;
-
-let mut w = SnapshotWriter::new("/data/snap", 64)?;
-w.write(b"hello", b"world")?;
-w.write(b"foo", b"bar")?;
-w.finish("/data/snap")?;
-```
-
-### Reading a snapshot
-
-```rust
-use frostmap_format::reader::SnapshotReader;
-
-let r = SnapshotReader::open("/data/snap")?;
-if let Some(value) = r.get(b"hello")? {
-    println!("{}", String::from_utf8_lossy(&value));
-}
-```
-
-### Parallel loading from a custom source
-
-```rust
-use frostmap_loader::{SnapshotLoader, LoaderConfig, KvSource, KvBatch};
-
-let config = LoaderConfig { n_partitions: 64, ..Default::default() };
-let loader = SnapshotLoader::new("/data/snap", config)?;
-let stats = loader.load(&mut my_source).await?;
-println!("loaded {} keys in {:?}", stats.n_keys, stats.scatter_duration + stats.index_duration);
-```
-
-Implement `KvSource` + `KvBatch` to plug in any data source. Built-in sources: `CsvSource`, `BqReadSession`.
-
-## On-disk format
-
-```
-<snapshot>/
-  meta.json           Partition count, key stats, index offsets
-  index.all           Robin Hood hash tables (2 MiB-aligned per partition)
-  data/
-    part-00/data.bin  Values with 12-byte headers, 64-byte aligned
-    part-01/data.bin
-    ...
-```
-
-- **Hash**: xxhash64, partition routing via `hash & (n_partitions - 1)`
-- **Index**: 8-byte compact buckets (32-bit fingerprint + 32-bit offset), Robin Hood probing, SIMD group compare (AVX2/NEON)
-- **Values**: 12-byte header (8-byte verify fingerprint + 4-byte length), padded to 64-byte alignment
-- **Capacity**: 256 GB per partition, up to 64 TB total (256 partitions)
-
-Read path: partition lookup + SIMD fingerprint compare in mmap'd RAM, then a single `pread` for the value. A fingerprint miss avoids disk entirely.
-
-## Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐
-│  fm load    │────▶│  Snapshot    │◀────│  fm serve    │
-│  (builder)  │     │  (on disk)   │     │  (server)    │
-└─────────────┘     └──────────────┘     └──────────────┘
-```
-
-**Crates:**
-
-| Crate | Purpose |
-|-------|---------|
-| `frostmap-format` | On-disk format: Robin Hood index, aligned values, reader/writer |
-| `frostmap-loader` | Parallel scatter/gather build pipeline |
-| `frostmap-bq` | BigQuery Storage Read API adapter |
-| `frostmap-server` | Memcache meta protocol server (snapshot + catalog modes) |
-| `frostmap-cli` | CLI (`fm load`, `fm get`, `fm serve`) |
-
-**Orchestration** (Go, `fmtctl`): node-agent DaemonSet attaches Hyperdisk ML volumes, writes `catalog.json`, the Rust server hot-swaps via inotify.
-
-## Contributing
-
-```bash
-# Build everything
-make all
-
-# Run all tests (unit + integration + Go)
-make test
-
-# Unit tests only (no binary build)
-make test-unit
-
-# Just the format crate
-cd rust && cargo test -p frostmap-format
-```
-
-The project is a Rust workspace (`rust/`) + Go modules (`go/`). Rust builds produce the `fm` binary; Go builds produce `fmtctl`.
 
 ## License
 
