@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -133,12 +134,19 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 }
 
 // resolveDevicePath looks up the PV to derive a usable device path when the
-// VolumeAttachment metadata does not include one. For CSI volumes provisioned
-// by csi-driver-host-path, the data lives at /var/lib/csi-hostpath-data/<volumeHandle>.
+// VolumeAttachment metadata does not include one.
 //
-// This heuristic is KIND-specific. In production (GKE), the CSI driver
-// populates attachmentMetadata["devicePath"] and this function is not called.
+// It first scans /dev/disk/by-id/ for a symlink containing the PV name (works
+// for any block-device CSI driver: GCE PD, EBS, etc.). If no match is found,
+// it falls back to CSI hostpath conventions (KIND) or hostPath PVs.
 func (m *K8sManager) resolveDevicePath(ctx context.Context, pvName string) (string, error) {
+	// Try /dev/disk/by-id/ first — works for any real block-device CSI driver.
+	if path, err := findDiskByID(pvName); err == nil {
+		slog.Info("resolveDevicePath: found block device", "pv", pvName, "path", path)
+		return path, nil
+	}
+
+	// Fallback: look up PV spec for hostpath-style CSI drivers (KIND).
 	pv, err := m.Client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
 		slog.Warn("resolveDevicePath: PV lookup failed, using PV name as fallback", "pv", pvName, "err", err)
@@ -154,6 +162,20 @@ func (m *K8sManager) resolveDevicePath(ctx context.Context, pvName string) (stri
 	}
 	slog.Warn("resolveDevicePath: no CSI or hostPath spec, using PV name as fallback", "pv", pvName)
 	return pvName, nil
+}
+
+// findDiskByID scans /dev/disk/by-id/ for a symlink whose name contains pvName.
+func findDiskByID(pvName string) (string, error) {
+	entries, err := os.ReadDir("/dev/disk/by-id")
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), pvName) {
+			return "/dev/disk/by-id/" + e.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no /dev/disk/by-id entry for %s", pvName)
 }
 
 // DetachDisk deletes the VolumeAttachment for the given PV.
