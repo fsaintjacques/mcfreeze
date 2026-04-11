@@ -21,7 +21,7 @@ func TestCreateBuildPVC(t *testing.T) {
 	dm, cs := newTestManager()
 	ctx := context.Background()
 
-	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10); err != nil {
+	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10, nil); err != nil {
 		t.Fatalf("CreateBuildPVC: %v", err)
 	}
 
@@ -43,14 +43,34 @@ func TestCreateBuildPVC(t *testing.T) {
 	}
 }
 
+func TestCreateBuildPVC_WithProvisionedThroughput(t *testing.T) {
+	dm, cs := newTestManager()
+	ctx := context.Background()
+
+	throughput := resource.MustParse("1200Mi")
+	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10, &throughput); err != nil {
+		t.Fatalf("CreateBuildPVC: %v", err)
+	}
+
+	pvc, err := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "test-pvc", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get PVC: %v", err)
+	}
+
+	got := pvc.Annotations["disk.csi.storage.gke.io/provisioned-throughput-on-create"]
+	if got != "1200Mi" {
+		t.Errorf("provisioned-throughput annotation = %q, want %q", got, "1200Mi")
+	}
+}
+
 func TestCreateBuildPVC_Idempotent(t *testing.T) {
 	dm, _ := newTestManager()
 	ctx := context.Background()
 
-	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10); err != nil {
+	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10, nil); err != nil {
 		t.Fatalf("first CreateBuildPVC: %v", err)
 	}
-	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10); err != nil {
+	if err := dm.CreateBuildPVC(ctx, "test-pvc", "local-path", 10, nil); err != nil {
 		t.Fatalf("second CreateBuildPVC should be idempotent: %v", err)
 	}
 }

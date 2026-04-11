@@ -130,7 +130,15 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 	handle := Handle(jobName)
 
 	// 1. Create PVC for build output.
-	if err := b.Volumes.CreateBuildPVC(ctx, pvcName, b.StorageClass, b.diskSizeGB()); err != nil {
+	diskSizeGB := b.diskSizeGB()
+	var provisionedThroughput *resource.Quantity
+	if spec.Storage != nil {
+		if spec.Storage.DiskSizeGB > 0 {
+			diskSizeGB = spec.Storage.DiskSizeGB
+		}
+		provisionedThroughput = spec.Storage.ProvisionedThroughput
+	}
+	if err := b.Volumes.CreateBuildPVC(ctx, pvcName, b.StorageClass, diskSizeGB, provisionedThroughput); err != nil {
 		return "", fmt.Errorf("job builder: create PVC %q: %w", pvcName, err)
 	}
 

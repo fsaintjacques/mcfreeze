@@ -1,6 +1,10 @@
 package volume
 
-import "context"
+import (
+	"context"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 // Manager manages PVC and PV lifecycle for build output. Implementations
 // handle the storage-class-specific details of creating build storage,
@@ -8,7 +12,9 @@ import "context"
 type Manager interface {
 	// CreateBuildPVC creates a RWO PersistentVolumeClaim for a build to write
 	// its output to. Idempotent: if the PVC already exists, returns nil.
-	CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64) error
+	// provisionedThroughput is optional; when non-nil it is set as the CSI
+	// "provisioned-throughput-on-create" StorageClass parameter annotation.
+	CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64, provisionedThroughput *resource.Quantity) error
 
 	// FinalizeBuild transitions a build PVC into a read-only PV suitable for
 	// multi-attach by node-agents. It waits for the PVC to be bound, patches

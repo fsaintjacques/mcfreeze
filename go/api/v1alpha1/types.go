@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -53,10 +54,30 @@ type DatasetSpec struct {
 	// +optional
 	Trigger *TriggerSpec `json:"trigger,omitempty"`
 
+	// Storage configures the PersistentVolume backing this dataset.
+	// When nil, cluster-wide defaults apply.
+	// +optional
+	Storage *StorageSpec `json:"storage,omitempty"`
+
 	// BuilderResources overrides CPU/memory requests and limits for this
 	// dataset's builder Jobs. When nil, cluster-wide defaults apply.
 	// +optional
 	BuilderResources *corev1.ResourceRequirements `json:"builderResources,omitempty"`
+}
+
+// +kubebuilder:object:generate=true
+
+// StorageSpec configures the PersistentVolume for a dataset.
+type StorageSpec struct {
+	// DiskSizeGB is the PVC size in GiB.
+	// +kubebuilder:validation:Minimum=1
+	DiskSizeGB int64 `json:"diskSizeGB"`
+
+	// ProvisionedThroughput is the throughput to provision for the disk,
+	// passed directly as the CSI "provisioned-throughput-on-create" parameter.
+	// Example: "1200Mi" for 1200 MiB/s.
+	// +optional
+	ProvisionedThroughput *resource.Quantity `json:"provisionedThroughput,omitempty"`
 }
 
 // +kubebuilder:object:generate=true

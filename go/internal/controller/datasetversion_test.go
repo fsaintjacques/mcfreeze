@@ -11,6 +11,7 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -74,7 +75,7 @@ type stubVolume struct {
 	deleted []string
 }
 
-func (v *stubVolume) CreateBuildPVC(_ context.Context, _, _ string, _ int64) error {
+func (v *stubVolume) CreateBuildPVC(_ context.Context, _, _ string, _ int64, _ *resource.Quantity) error {
 	return nil
 }
 func (v *stubVolume) FinalizeBuild(_ context.Context, _ string) (string, error) { return "", nil }

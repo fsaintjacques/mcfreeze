@@ -5,6 +5,7 @@ import (
 
 	"github.com/fsaintjacques/frostmap/go/api"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // VersionCRName returns the deterministic Kubernetes resource name for a
@@ -27,6 +28,12 @@ func ToAPIDatasetSpec(cr *Dataset) api.DatasetSpec {
 		ShardCount: cr.Spec.ShardCount,
 		Retention:  cr.Spec.Retention,
 	}
+	if s := cr.Spec.Storage; s != nil {
+		spec.Storage = &api.StorageSpec{
+			DiskSizeGB:            s.DiskSizeGB,
+			ProvisionedThroughput: s.ProvisionedThroughput,
+		}
+	}
 	if r := cr.Spec.BuilderResources; r != nil {
 		spec.BuilderResources = toAPIBuilderResources(r)
 	}
@@ -36,7 +43,7 @@ func ToAPIDatasetSpec(cr *Dataset) api.DatasetSpec {
 // FromAPIDatasetSpec builds a Dataset CR from an api.DatasetSpec. The CR's
 // metadata.name is set to spec.Name; namespace is the caller's responsibility.
 func FromAPIDatasetSpec(spec api.DatasetSpec) *Dataset {
-	return &Dataset{
+	ds := &Dataset{
 		Spec: DatasetSpec{
 			KeyPrefix:  spec.KeyPrefix,
 			Source:     fromAPISourceSpec(spec.Source),
@@ -44,6 +51,16 @@ func FromAPIDatasetSpec(spec api.DatasetSpec) *Dataset {
 			Retention:  spec.Retention,
 		},
 	}
+	if s := spec.Storage; s != nil {
+		ds.Spec.Storage = &StorageSpec{
+			DiskSizeGB:            s.DiskSizeGB,
+			ProvisionedThroughput: s.ProvisionedThroughput,
+		}
+	}
+	if r := spec.BuilderResources; r != nil {
+		ds.Spec.BuilderResources = fromAPIBuilderResources(r)
+	}
+	return ds
 }
 
 func toAPISourceSpec(s SourceSpec) api.SourceSpec {
@@ -93,6 +110,29 @@ func toAPIBuilderResources(r *corev1.ResourceRequirements) *api.BuilderResources
 		br.MemoryLimit = q.String()
 	}
 	return br
+}
+
+func fromAPIBuilderResources(r *api.BuilderResources) *corev1.ResourceRequirements {
+	rr := &corev1.ResourceRequirements{}
+	if r.CPURequest != "" || r.MemoryRequest != "" {
+		rr.Requests = corev1.ResourceList{}
+		if r.CPURequest != "" {
+			rr.Requests[corev1.ResourceCPU] = resource.MustParse(r.CPURequest)
+		}
+		if r.MemoryRequest != "" {
+			rr.Requests[corev1.ResourceMemory] = resource.MustParse(r.MemoryRequest)
+		}
+	}
+	if r.CPULimit != "" || r.MemoryLimit != "" {
+		rr.Limits = corev1.ResourceList{}
+		if r.CPULimit != "" {
+			rr.Limits[corev1.ResourceCPU] = resource.MustParse(r.CPULimit)
+		}
+		if r.MemoryLimit != "" {
+			rr.Limits[corev1.ResourceMemory] = resource.MustParse(r.MemoryLimit)
+		}
+	}
+	return rr
 }
 
 func fromAPISourceSpec(s api.SourceSpec) SourceSpec {
