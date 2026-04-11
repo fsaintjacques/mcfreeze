@@ -32,11 +32,19 @@ const pvcPollTimeout = 2 * time.Minute
 // pvcDeleteTimeout is the maximum time FinalizeBuild waits for PVC deletion.
 const pvcDeleteTimeout = 30 * time.Second
 
-func (m *LocalPathManager) CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64) error {
+func (m *LocalPathManager) CreateBuildPVC(ctx context.Context, name, storageClass string, sizeGB int64, provisionedThroughput *resource.Quantity) error {
+	var annotations map[string]string
+	if provisionedThroughput != nil {
+		annotations = map[string]string{
+			"disk.csi.storage.gke.io/provisioned-throughput-on-create": provisionedThroughput.String(),
+		}
+	}
+
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: m.Namespace,
+			Name:        name,
+			Namespace:   m.Namespace,
+			Annotations: annotations,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},

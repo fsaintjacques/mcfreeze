@@ -2,7 +2,11 @@
 // contracts.  Both the control-plane and the node-agent import this package.
 package api
 
-import "time"
+import (
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 // BuilderResources specifies CPU/memory requests and limits for builder Jobs.
 type BuilderResources struct {
@@ -23,9 +27,24 @@ type DatasetSpec struct {
 	ShardCount int        `json:"shard_count"`
 	Retention  int        `json:"retention"` // number of ready versions to keep
 
+	// Storage configures the PersistentVolume backing this dataset.
+	// When nil, cluster-wide defaults apply.
+	Storage *StorageSpec `json:"storage,omitempty"`
+
 	// BuilderResources overrides CPU/memory for this dataset's builder Jobs.
 	// When nil, the cluster-wide defaults from BuilderPodTemplate apply.
 	BuilderResources *BuilderResources `json:"builder_resources,omitempty"`
+}
+
+// StorageSpec configures the PersistentVolume for a dataset.
+type StorageSpec struct {
+	// DiskSizeGB is the PVC size in GiB.
+	DiskSizeGB int64 `json:"disk_size_gb"`
+
+	// ProvisionedThroughput is the throughput to provision for the disk,
+	// passed directly as the CSI "provisioned-throughput-on-create" parameter.
+	// Example: "1200Mi" for 1200 MiB/s.
+	ProvisionedThroughput *resource.Quantity `json:"provisioned_throughput,omitempty"`
 }
 
 // SourceSpec describes how to produce key-value pairs from a tabular source.
