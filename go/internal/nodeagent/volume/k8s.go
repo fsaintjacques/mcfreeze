@@ -106,21 +106,29 @@ func (m *K8sManager) WaitForDevice(ctx context.Context, pvName string) (string, 
 	ticker := time.NewTicker(m.pollInterval())
 	defer ticker.Stop()
 
+	seen := false
 	for {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
 
 		va, err := m.Client.StorageV1().VolumeAttachments().Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", fmt.Errorf("k8s wait-for-device %s: %w", pvName, err)
-		}
-
-		if va.Status.Attached {
-			if dp, ok := va.Status.AttachmentMetadata["devicePath"]; ok && dp != "" {
-				return dp, nil
+		if errors.IsNotFound(err) {
+			if seen {
+				// VA existed before but was deleted externally.
+				return "", fmt.Errorf("k8s wait-for-device %s: %w", pvName, err)
 			}
-			return m.resolveDevicePath(ctx, pvName)
+			// VA may not have propagated yet; keep polling.
+		} else if err != nil {
+			return "", fmt.Errorf("k8s wait-for-device %s: %w", pvName, err)
+		} else {
+			seen = true
+			if va.Status.Attached {
+				if dp, ok := va.Status.AttachmentMetadata["devicePath"]; ok && dp != "" {
+					return dp, nil
+				}
+				return m.resolveDevicePath(ctx, pvName)
+			}
 		}
 
 		select {
