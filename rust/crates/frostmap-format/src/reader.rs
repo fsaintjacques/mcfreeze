@@ -80,7 +80,10 @@ impl<'a> PartitionReader<'a> {
     fn read_and_verify(&self, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
         const PAGE_SIZE: u64 = 4096;
         let page_remaining = PAGE_SIZE - (byte_offset % PAGE_SIZE);
-        let speculative_size = page_remaining.max(VALUE_ALIGNMENT) as u32;
+        // byte_offset is VALUE_ALIGNMENT-aligned and PAGE_SIZE % VALUE_ALIGNMENT == 0,
+        // so page_remaining is always >= VALUE_ALIGNMENT.
+        debug_assert!(page_remaining >= VALUE_ALIGNMENT);
+        let speculative_size = page_remaining as u32;
 
         let first_read = pread_up_to(self.data, byte_offset, speculative_size)?;
         if first_read.len() < VALUE_HEADER_SIZE {
@@ -292,6 +295,49 @@ mod tests {
         for &(k, v) in pairs {
             assert_eq!(r.get(k).unwrap().as_deref(), Some(v));
         }
+    }
+
+    // --- speculative read ---
+
+    #[test]
+    fn speculative_read_covers_typical_value() {
+        // 200-byte value + 12-byte header = 212 bytes, fits in one 4KB page read.
+        let val = vec![0xCCu8; 200];
+        let dir = build_snapshot(&[(b"k", &val)], 1);
+        let r = SnapshotReader::open(dir.path()).unwrap();
+        assert_eq!(r.get(b"k").unwrap(), Some(val));
+    }
+
+    #[test]
+    fn speculative_read_falls_back_to_second_pread() {
+        // Value larger than 4KB forces the second pread path.
+        let val = vec![0xDDu8; 8192];
+        let dir = build_snapshot(&[(b"big", &val)], 1);
+        let r = SnapshotReader::open(dir.path()).unwrap();
+        assert_eq!(r.get(b"big").unwrap(), Some(val));
+    }
+
+    #[test]
+    fn speculative_read_near_eof() {
+        // Single small value: data.bin is only one 64-byte block.
+        // The speculative read requests up to 4KB but the file is smaller.
+        let dir = build_snapshot(&[(b"tiny", b"x")], 1);
+        let r = SnapshotReader::open(dir.path()).unwrap();
+        assert_eq!(r.get(b"tiny").unwrap().as_deref(), Some(b"x".as_slice()));
+    }
+
+    #[test]
+    fn truncated_data_file_returns_error() {
+        let dir = build_snapshot(&[(b"k", b"v")], 1);
+        let r = SnapshotReader::open(dir.path()).unwrap();
+        // Truncate data.bin to 0 — should error, not silently miss.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("data/part-0/data.bin"))
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        assert!(r.get(b"k").is_err());
     }
 
     // --- 32-bit fingerprint collision ---
