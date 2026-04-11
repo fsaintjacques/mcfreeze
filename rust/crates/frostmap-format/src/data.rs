@@ -102,6 +102,18 @@ pub fn pread(file: &File, byte_offset: u64, size: u32) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Read up to `size` bytes from `file` at `byte_offset`.
+///
+/// Like [`pread`] but tolerates short reads (e.g. near end-of-file).
+/// Returns the bytes actually read.
+#[cfg(unix)]
+pub fn pread_up_to(file: &File, byte_offset: u64, size: u32) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; size as usize];
+    let n = file.read_at(&mut buf, byte_offset)?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

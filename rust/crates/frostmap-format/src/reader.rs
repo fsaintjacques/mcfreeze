@@ -4,7 +4,7 @@ use std::path::Path;
 use memmap2::MmapOptions;
 
 use crate::{
-    data::pread,
+    data::{pread, pread_up_to},
     index::{
         self, compact_fingerprint, fingerprint, home_position, probe_group, verify_fingerprint,
         Bucket, GROUP_SIZE, NO_MATCH,
@@ -14,94 +14,36 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// PartitionSlice — per-partition view into the unified index mmap
+// PartitionReader — index probe + data read for a single partition
 // ---------------------------------------------------------------------------
 
-/// Per-partition metadata: byte range within the shared index mmap + data file.
-struct PartitionSlice {
-    /// Byte offset of this partition's bucket array within the index mmap.
-    bucket_offset: usize,
-    /// Number of logical buckets in this partition.
-    n_buckets: usize,
-    /// Open file descriptor for `pread` calls into `data.bin`.
-    data: File,
-}
-
-// ---------------------------------------------------------------------------
-// SnapshotReader
-// ---------------------------------------------------------------------------
-
-/// Read-only handle to a complete snapshot directory.
+/// Per-partition state: a borrowed bucket table and an open data file.
 ///
-/// The unified `index.all` is memory-mapped once; each partition is a slice
-/// within that mapping. `data.bin` files are opened for on-demand `pread`.
-///
-/// ```text
-/// let r = SnapshotReader::open("/snapshots/v42")?;
-/// if let Some(val) = r.get(b"my-key")? {
-///     // use val
-/// }
-/// ```
-pub struct SnapshotReader {
-    layout: Layout,
+/// The bucket slice can come from any source (mmap, heap, local SSD cache).
+pub struct PartitionReader<'a> {
+    buckets: &'a [Bucket],
+    data: &'a File,
     verify_seed: u64,
-    /// Single mmap of `index.all` (all partitions, 2MB-aligned).
-    index_mmap: memmap2::Mmap,
-    partitions: Vec<PartitionSlice>,
 }
 
-impl SnapshotReader {
-    /// Open a snapshot directory.  Reads `meta.json`, validates the format,
-    /// mmaps `index.all`, then opens every partition's `data.bin`.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref();
-
-        let json = fs::read_to_string(root.join("meta.json"))?;
-        let meta: Meta = serde_json::from_str(&json)?;
-        let layout = meta.layout()?;
-
-        // Single mmap of index.all.
-        let idx_file = File::open(index_path(root))?;
-        let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
-
-        // Advise huge pages on Linux for TLB efficiency (best-effort;
-        // MADV_HUGEPAGE returns EINVAL on older kernels / some filesystems).
-        #[cfg(target_os = "linux")]
-        let _ = index_mmap.advise(memmap2::Advice::HugePage);
-
-        let n = layout.n_partitions as usize;
-        let mut partitions = Vec::with_capacity(n);
-        for (i, pm) in meta.partitions.iter().enumerate() {
-            let data = File::open(partition_dir(root, layout.n_partitions, i).join("data.bin"))?;
-            partitions.push(PartitionSlice {
-                bucket_offset: pm.index_offset as usize,
-                n_buckets: pm.index_n_buckets as usize,
-                data,
-            });
+impl<'a> PartitionReader<'a> {
+    pub fn new(buckets: &'a [Bucket], data: &'a File, verify_seed: u64) -> Self {
+        Self {
+            buckets,
+            data,
+            verify_seed,
         }
-
-        Ok(Self {
-            layout,
-            verify_seed: meta.verify_seed,
-            index_mmap,
-            partitions,
-        })
     }
 
     /// Look up `key` and return its value, or `None` if not present.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let fp = fingerprint(key);
-        let idx = self.layout.partition_of(fp);
-        let ps = &self.partitions[idx];
-
-        let n = ps.n_buckets;
+    ///
+    /// The caller must supply the full 64-bit `fingerprint` so that
+    /// `compact_fingerprint` and `home_position` can be derived.
+    pub fn get(&self, key: &[u8], fp: u64) -> Result<Option<Vec<u8>>> {
+        let n = self.buckets.len();
         if n == 0 {
             return Ok(None);
         }
-
-        let bucket_bytes = &self.index_mmap
-            [ps.bucket_offset..ps.bucket_offset + n * std::mem::size_of::<Bucket>()];
-        let table: &[Bucket] = bytemuck::cast_slice(bucket_bytes);
 
         let cfp = compact_fingerprint(fp);
         let expected_vfp = verify_fingerprint(key, self.verify_seed);
@@ -109,14 +51,14 @@ impl SnapshotReader {
         let mut steps = 0usize;
 
         while steps < n {
-            let result = probe_group(table, cfp, pos);
+            let result = probe_group(self.buckets, cfp, pos);
 
             for i in 0..GROUP_SIZE {
                 if result.offsets[i] == NO_MATCH {
                     continue;
                 }
                 let byte_offset = result.offsets[i] as u64 * VALUE_ALIGNMENT;
-                if let Some(value) = read_and_verify(&ps.data, byte_offset, expected_vfp)? {
+                if let Some(value) = self.read_and_verify(byte_offset, expected_vfp)? {
                     return Ok(Some(value));
                 }
             }
@@ -131,37 +73,123 @@ impl SnapshotReader {
 
         Ok(None)
     }
+
+    /// Speculatively read to the next 4KB page boundary. This avoids a
+    /// second pread for values that fit within the remainder of the page
+    /// (the common case for values under ~4KB).
+    fn read_and_verify(&self, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
+        const PAGE_SIZE: u64 = 4096;
+        let page_remaining = PAGE_SIZE - (byte_offset % PAGE_SIZE);
+        let speculative_size = page_remaining.max(VALUE_ALIGNMENT) as u32;
+
+        let first_read = pread_up_to(self.data, byte_offset, speculative_size)?;
+        if first_read.len() < VALUE_HEADER_SIZE {
+            return Err(crate::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short read: value header truncated",
+            )));
+        }
+
+        let stored_vfp = u64::from_le_bytes(first_read[..8].try_into().unwrap());
+        if stored_vfp != expected_vfp {
+            return Ok(None);
+        }
+
+        let byte_len = u32::from_le_bytes(first_read[8..12].try_into().unwrap()) as usize;
+        let on_disk_size = VALUE_HEADER_SIZE.saturating_add(byte_len);
+
+        if on_disk_size <= first_read.len() {
+            Ok(Some(
+                first_read[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
+            ))
+        } else {
+            let total = match u32::try_from(on_disk_size) {
+                Ok(s) => index::aligned_size(s) as u32,
+                Err(_) => return Ok(None),
+            };
+            let raw = pread(self.data, byte_offset, total)?;
+            Ok(Some(
+                raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
+            ))
+        }
+    }
 }
 
-/// Read the value at `byte_offset`, check the verify fingerprint, and
-/// return the value bytes (without the header) on match.
-fn read_and_verify(data: &File, byte_offset: u64, expected_vfp: u64) -> Result<Option<Vec<u8>>> {
-    let first_block = pread(data, byte_offset, VALUE_ALIGNMENT as u32)?;
-    if first_block.len() < VALUE_HEADER_SIZE {
-        return Ok(None);
+// ---------------------------------------------------------------------------
+// SnapshotReader
+// ---------------------------------------------------------------------------
+
+/// Read-only handle to a complete snapshot directory.
+///
+/// The unified `index.all` is memory-mapped once; each partition's bucket
+/// table is a slice within that mapping. `data.bin` files are opened for
+/// on-demand `pread`.
+///
+/// ```text
+/// let r = SnapshotReader::open("/snapshots/v42")?;
+/// if let Some(val) = r.get(b"my-key")? {
+///     // use val
+/// }
+/// ```
+pub struct SnapshotReader {
+    layout: Layout,
+    verify_seed: u64,
+    index_mmap: memmap2::Mmap,
+    data_files: Vec<File>,
+    /// Per-partition bucket range within `index_mmap`: (byte_offset, n_buckets).
+    ranges: Vec<(usize, usize)>,
+}
+
+impl SnapshotReader {
+    /// Open a snapshot directory.  Reads `meta.json`, validates the format,
+    /// mmaps `index.all`, then opens every partition's `data.bin`.
+    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref();
+
+        let json = fs::read_to_string(root.join("meta.json"))?;
+        let meta: Meta = serde_json::from_str(&json)?;
+        let layout = meta.layout()?;
+
+        let idx_file = File::open(index_path(root))?;
+        let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
+
+        #[cfg(target_os = "linux")]
+        let _ = index_mmap.advise(memmap2::Advice::HugePage);
+
+        let mut data_files = Vec::with_capacity(layout.n_partitions as usize);
+        let mut ranges = Vec::with_capacity(layout.n_partitions as usize);
+        for (i, pm) in meta.partitions.iter().enumerate() {
+            data_files.push(File::open(
+                partition_dir(root, layout.n_partitions, i).join("data.bin"),
+            )?);
+            ranges.push((pm.index_offset as usize, pm.index_n_buckets as usize));
+        }
+
+        Ok(Self {
+            layout,
+            verify_seed: meta.verify_seed,
+            index_mmap,
+            data_files,
+            ranges,
+        })
     }
 
-    let stored_vfp = u64::from_le_bytes(first_block[..8].try_into().unwrap());
-    if stored_vfp != expected_vfp {
-        return Ok(None);
+    /// Borrow the `PartitionReader` for the given partition index.
+    pub fn partition(&self, idx: usize) -> PartitionReader<'_> {
+        let (offset, n_buckets) = self.ranges[idx];
+        let bucket_bytes =
+            &self.index_mmap[offset..offset + n_buckets * std::mem::size_of::<Bucket>()];
+        PartitionReader::new(
+            bytemuck::cast_slice(bucket_bytes),
+            &self.data_files[idx],
+            self.verify_seed,
+        )
     }
 
-    let byte_len = u32::from_le_bytes(first_block[8..12].try_into().unwrap()) as usize;
-    let on_disk_size = VALUE_HEADER_SIZE.saturating_add(byte_len);
-
-    if on_disk_size <= VALUE_ALIGNMENT as usize {
-        Ok(Some(
-            first_block[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
-        ))
-    } else {
-        let total = match u32::try_from(on_disk_size) {
-            Ok(s) => index::aligned_size(s) as u32,
-            Err(_) => return Ok(None),
-        };
-        let raw = pread(data, byte_offset, total)?;
-        Ok(Some(
-            raw[VALUE_HEADER_SIZE..VALUE_HEADER_SIZE + byte_len].to_vec(),
-        ))
+    /// Look up `key` and return its value, or `None` if not present.
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let fp = fingerprint(key);
+        self.partition(self.layout.partition_of(fp)).get(key, fp)
     }
 }
 
