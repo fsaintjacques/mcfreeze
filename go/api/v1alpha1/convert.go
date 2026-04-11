@@ -65,8 +65,9 @@ func FromAPIDatasetSpec(spec api.DatasetSpec) *Dataset {
 
 func toAPISourceSpec(s SourceSpec) api.SourceSpec {
 	out := api.SourceSpec{
-		KeyColumn:   s.KeyColumn,
-		ValueColumn: s.ValueColumn,
+		KeyColumn:         s.KeyColumn,
+		ValueColumn:       s.ValueColumn,
+		IncludeKeyInValue: s.IncludeKeyInValue,
 	}
 	if s.Encoding != nil && s.Encoding.Protobuf != nil {
 		out.Encoding = &api.EncodingSpec{
@@ -137,8 +138,9 @@ func fromAPIBuilderResources(r *api.BuilderResources) *corev1.ResourceRequiremen
 
 func fromAPISourceSpec(s api.SourceSpec) SourceSpec {
 	out := SourceSpec{
-		KeyColumn:   s.KeyColumn,
-		ValueColumn: s.ValueColumn,
+		KeyColumn:         s.KeyColumn,
+		ValueColumn:       s.ValueColumn,
+		IncludeKeyInValue: s.IncludeKeyInValue,
 	}
 	if s.Encoding != nil && s.Encoding.Protobuf != nil {
 		out.Encoding = &EncodingSpec{

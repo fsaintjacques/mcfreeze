@@ -57,6 +57,10 @@ pub struct LoadArgs {
     #[arg(long, default_value = "value")]
     pub value_column: String,
 
+    /// Include the key column in the encoded value payload.
+    #[arg(long)]
+    pub include_key_in_value: bool,
+
     // -- Protobuf encoding (optional) ---------------------------------------
     /// Protobuf message name — enables protobuf encoding.
     /// When set, all non-key columns are transcoded into a protobuf message.
@@ -140,6 +144,7 @@ struct Pipeline {
     estimated_rows: Option<u64>,
     key_column: String,
     value_column: String,
+    include_key_in_value: bool,
     encoding: Option<ProtobufEncoding>,
     progress_secs: u64,
 }
@@ -153,6 +158,7 @@ impl Pipeline {
             estimated_rows,
             key_column,
             value_column,
+            include_key_in_value,
             encoding,
             progress_secs,
         } = self;
@@ -162,8 +168,13 @@ impl Pipeline {
 
         match encoding {
             Some(proto_config) => {
-                let (sources, desc) =
-                    apply_protobuf_encoding(sources, &schema, key_col_idx, &proto_config)?;
+                let (sources, desc) = apply_protobuf_encoding(
+                    sources,
+                    &schema,
+                    key_col_idx,
+                    include_key_in_value,
+                    &proto_config,
+                )?;
                 load_sources(
                     output,
                     partitions,
@@ -204,6 +215,7 @@ impl Pipeline {
             estimated_rows,
             key_column,
             value_column,
+            include_key_in_value,
             encoding,
             progress_secs,
         } = self;
@@ -213,8 +225,13 @@ impl Pipeline {
 
         match encoding {
             Some(proto_config) => {
-                let (sources, _) =
-                    apply_protobuf_encoding(sources, &schema, key_col_idx, &proto_config)?;
+                let (sources, _) = apply_protobuf_encoding(
+                    sources,
+                    &schema,
+                    key_col_idx,
+                    include_key_in_value,
+                    &proto_config,
+                )?;
                 benchmark_download(sources, estimated_rows, progress_secs).await
             }
             None => {
@@ -387,6 +404,7 @@ async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) ->
                 estimated_rows,
                 key_column: args.key_column.clone(),
                 value_column: args.value_column.clone(),
+                include_key_in_value: args.include_key_in_value,
                 encoding,
                 progress_secs: args.progress_secs,
             })
@@ -417,6 +435,7 @@ async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) ->
                 estimated_rows: None,
                 key_column: args.key_column.clone(),
                 value_column: args.value_column.clone(),
+                include_key_in_value: args.include_key_in_value,
                 encoding,
                 progress_secs: args.progress_secs,
             })
@@ -452,6 +471,7 @@ async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) ->
                     estimated_rows: None,
                     key_column: wc.source.key_column,
                     value_column,
+                    include_key_in_value: wc.source.include_key_in_value,
                     encoding,
                     progress_secs: args.progress_secs,
                 });
@@ -492,6 +512,7 @@ async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) ->
                 estimated_rows,
                 key_column: wc.source.key_column,
                 value_column,
+                include_key_in_value: wc.source.include_key_in_value,
                 encoding,
                 progress_secs: args.progress_secs,
             })
@@ -503,6 +524,7 @@ fn apply_protobuf_encoding(
     sources: Vec<BoxedRecordBatchSource>,
     schema: &arrow::datatypes::Schema,
     key_col_idx: usize,
+    include_key_in_value: bool,
     proto_config: &ProtobufEncoding,
 ) -> Result<(
     Vec<frostmap_encode::ProtobufEncodingSource<BoxedRecordBatchSource>>,
@@ -512,7 +534,7 @@ fn apply_protobuf_encoding(
         .fields()
         .iter()
         .enumerate()
-        .filter(|&(i, _)| i != key_col_idx)
+        .filter(|&(i, _)| include_key_in_value || i != key_col_idx)
         .map(|(_, f)| f.clone())
         .collect();
     let value_schema = arrow::datatypes::Schema::new(value_fields);
@@ -533,7 +555,14 @@ fn apply_protobuf_encoding(
     let transcoder = Arc::new(tc_output.transcoder);
     let sources = sources
         .into_iter()
-        .map(|s| frostmap_encode::ProtobufEncodingSource::new(s, key_col_idx, transcoder.clone()))
+        .map(|s| {
+            frostmap_encode::ProtobufEncodingSource::new(
+                s,
+                key_col_idx,
+                include_key_in_value,
+                transcoder.clone(),
+            )
+        })
         .collect();
     Ok((sources, desc))
 }

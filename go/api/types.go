@@ -60,6 +60,10 @@ type SourceSpec struct {
 	// ValueColumn is the Arrow column name whose bytes become the KV value.
 	// Required when Encoding is nil (raw mode); must be empty when Encoding is set.
 	ValueColumn string `json:"value_column,omitempty"`
+	// IncludeKeyInValue includes the key column in the encoded value payload.
+	// When true, all columns (including the key) are encoded into the value.
+	// Default false: the key column is excluded from the value.
+	IncludeKeyInValue bool `json:"include_key_in_value,omitempty"`
 	// Encoding specifies how to transcode non-key columns into the KV value.
 	// When nil, values are taken raw from ValueColumn.
 	Encoding *EncodingSpec `json:"encoding,omitempty"`

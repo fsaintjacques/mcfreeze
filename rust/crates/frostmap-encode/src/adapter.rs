@@ -82,6 +82,7 @@ fn validate_key_column(col: &dyn Array) -> Result<(), EncodeError> {
 pub fn encode_batch(
     batch: &RecordBatch,
     key_col_idx: usize,
+    include_key_in_value: bool,
     transcoder: &Transcoder,
 ) -> Result<EncodedBatch, EncodeError> {
     let key_col = batch.column(key_col_idx).clone();
@@ -94,9 +95,9 @@ pub fn encode_batch(
         ));
     }
 
-    // Project value columns (everything except key).
+    // Project value columns.
     let value_col_indices: Vec<usize> = (0..batch.num_columns())
-        .filter(|&i| i != key_col_idx)
+        .filter(|&i| include_key_in_value || i != key_col_idx)
         .collect();
     let value_batch = batch
         .project(&value_col_indices)
@@ -123,6 +124,7 @@ pub fn encode_batch(
 pub struct ProtobufEncodingSource<S> {
     inner: S,
     key_col_idx: usize,
+    include_key_in_value: bool,
     transcoder: Arc<Transcoder>,
 }
 
@@ -131,11 +133,18 @@ impl<S> ProtobufEncodingSource<S> {
     ///
     /// - `inner`: source producing Arrow `RecordBatch`es
     /// - `key_col_idx`: index of the column to extract as the KV key
+    /// - `include_key_in_value`: whether to include the key column in the encoded value
     /// - `transcoder`: pre-built apb `Transcoder`, shared via `Arc` (it is `Sync`)
-    pub fn new(inner: S, key_col_idx: usize, transcoder: Arc<Transcoder>) -> Self {
+    pub fn new(
+        inner: S,
+        key_col_idx: usize,
+        include_key_in_value: bool,
+        transcoder: Arc<Transcoder>,
+    ) -> Self {
         Self {
             inner,
             key_col_idx,
+            include_key_in_value,
             transcoder,
         }
     }
@@ -155,7 +164,13 @@ where
             Err(e) => return Err(EncodeError::Source(Box::new(e))),
         };
 
-        encode_batch(&batch, self.key_col_idx, &self.transcoder).map(Some)
+        encode_batch(
+            &batch,
+            self.key_col_idx,
+            self.include_key_in_value,
+            &self.transcoder,
+        )
+        .map(Some)
     }
 
     fn metadata(&self) -> SourceMetadata {
@@ -207,7 +222,7 @@ mod tests {
         let mapping = infer_mapping(&value_schema, &msg, &InferOptions::default()).unwrap();
         let transcoder = Transcoder::new(&mapping).unwrap();
 
-        let encoded = encode_batch(&batch, 0, &transcoder).unwrap();
+        let encoded = encode_batch(&batch, 0, false, &transcoder).unwrap();
         assert_eq!(encoded.len(), 2);
 
         let pairs: Vec<_> = encoded.iter().collect();

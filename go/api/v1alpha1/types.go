@@ -242,6 +242,12 @@ type SourceSpec struct {
 	// Required when Encoding is nil; must be empty when Encoding is set.
 	ValueColumn string `json:"valueColumn,omitempty"`
 
+	// IncludeKeyInValue includes the key column in the encoded value payload.
+	// When true, all columns (including the key) are encoded into the value.
+	// Default false: the key column is excluded from the value.
+	// +optional
+	IncludeKeyInValue bool `json:"includeKeyInValue,omitempty"`
+
 	// Encoding specifies how to transcode non-key columns into the KV value.
 	// +optional
 	Encoding *EncodingSpec `json:"encoding,omitempty"`
