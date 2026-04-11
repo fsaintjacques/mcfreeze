@@ -6,7 +6,7 @@ image:
 
 controlPlane:
   storageClass: hyperdisk-ml
-  diskSizeGB: 64
+  diskSizeGB: 4
   leaderElection: false
   replicas: 1
   builderPodTemplate:
