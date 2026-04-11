@@ -122,6 +122,62 @@ func TestK8sManager_WaitForDevice_Timeout(t *testing.T) {
 	}
 }
 
+func TestK8sManager_WaitForDevice_TransientNotFound(t *testing.T) {
+	m, cs := newTestK8sManager()
+	ctx := context.Background()
+
+	// Start WaitForDevice before the VA exists (simulates propagation delay).
+	// Create the VA after a short delay in a goroutine.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		m.AttachDisk(ctx, testNode, testPV)
+		va, _ := cs.StorageV1().VolumeAttachments().Get(ctx, vaName(testPV), metav1.GetOptions{})
+		va.Status.Attached = true
+		va.Status.AttachmentMetadata = map[string]string{"devicePath": "/dev/sdc"}
+		cs.StorageV1().VolumeAttachments().Update(ctx, va, metav1.UpdateOptions{})
+	}()
+
+	device, err := m.WaitForDevice(ctx, testPV)
+	if err != nil {
+		t.Fatalf("WaitForDevice: %v", err)
+	}
+	if device != "/dev/sdc" {
+		t.Errorf("device = %q, want %q", device, "/dev/sdc")
+	}
+}
+
+func TestK8sManager_WaitForDevice_PersistentNotFound(t *testing.T) {
+	m, _ := newTestK8sManager()
+	m.PollTimeout = 50 * time.Millisecond
+
+	// Never create the VA — should timeout (not error immediately).
+	_, err := m.WaitForDevice(context.Background(), "nonexistent-pv")
+	if err == nil {
+		t.Fatal("WaitForDevice should have timed out")
+	}
+}
+
+func TestK8sManager_WaitForDevice_DeletedAfterSeen(t *testing.T) {
+	m, cs := newTestK8sManager()
+	ctx := context.Background()
+
+	if err := m.AttachDisk(ctx, testNode, testPV); err != nil {
+		t.Fatalf("AttachDisk: %v", err)
+	}
+
+	// Delete the VA after a short delay (simulates external deletion).
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cs.StorageV1().VolumeAttachments().Delete(ctx, vaName(testPV), metav1.DeleteOptions{})
+	}()
+
+	// VA exists but is not attached; then gets deleted — should fail immediately.
+	_, err := m.WaitForDevice(ctx, testPV)
+	if err == nil {
+		t.Fatal("WaitForDevice should fail when VA is deleted after being seen")
+	}
+}
+
 func TestK8sManager_DetachDisk(t *testing.T) {
 	m, cs := newTestK8sManager()
 	ctx := context.Background()
