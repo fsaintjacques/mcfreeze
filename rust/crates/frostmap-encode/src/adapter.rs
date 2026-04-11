@@ -234,6 +234,56 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_batch_include_key_in_value() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("age", DataType::Int32, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["alice"])),
+                Arc::new(Int32Array::from(vec![30])),
+            ],
+        )
+        .unwrap();
+
+        // Value schema includes all columns (key + age).
+        let value_schema = Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("age", DataType::Int32, false),
+        ]);
+        let fd = generate_file_descriptor(&value_schema, "test", "Row").unwrap();
+        let fds = FileDescriptorSet { file: vec![fd] };
+        let desc_bytes = fds.encode_to_vec();
+        let proto_schema = ProtoSchema::from_bytes(&desc_bytes).unwrap();
+        let msg = proto_schema.message("test.Row").unwrap();
+        let mapping = infer_mapping(&value_schema, &msg, &InferOptions::default()).unwrap();
+        let transcoder = Transcoder::new(&mapping).unwrap();
+
+        let encoded = encode_batch(&batch, 0, true, &transcoder).unwrap();
+        assert_eq!(encoded.len(), 1);
+
+        let pairs: Vec<_> = encoded.iter().collect();
+        assert_eq!(pairs[0].0, b"alice");
+        // Decode the protobuf value and verify the key field is present.
+        let dynamic_msg = prost_reflect::DynamicMessage::decode(msg, pairs[0].1).unwrap();
+        assert_eq!(
+            dynamic_msg.get_field_by_name("key").unwrap().as_str(),
+            Some("alice")
+        );
+        assert_eq!(
+            dynamic_msg
+                .get_field_by_name("age")
+                .unwrap()
+                .as_i32()
+                .unwrap(),
+            30
+        );
+    }
+
+    #[test]
     fn test_build_transcoder_auto_generate() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;

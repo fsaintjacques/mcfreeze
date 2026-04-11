@@ -187,6 +187,9 @@ impl Pipeline {
                 patch_meta_descriptor(output, &desc.descriptor_bytes, &desc.message_fqn).await
             }
             None => {
+                if include_key_in_value {
+                    tracing::warn!("--include-key-in-value has no effect in raw encoding mode");
+                }
                 let val_col_idx = schema.index_of(&value_column).with_context(|| {
                     format!("value column {:?} not found in schema", value_column)
                 })?;
@@ -235,6 +238,9 @@ impl Pipeline {
                 benchmark_download(sources, estimated_rows, progress_secs).await
             }
             None => {
+                if include_key_in_value {
+                    tracing::warn!("--include-key-in-value has no effect in raw encoding mode");
+                }
                 let val_col_idx = schema.index_of(&value_column).with_context(|| {
                     format!("value column {:?} not found in schema", value_column)
                 })?;
