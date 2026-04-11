@@ -39,6 +39,11 @@ pub struct SourceSpec {
     /// `encoding` is set.
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub value_column: Option<String>,
+    /// Include the key column in the encoded value payload.
+    /// When true, all columns (including the key) are encoded into the value.
+    /// Default false: the key column is excluded from the value.
+    #[serde(default)]
+    pub include_key_in_value: bool,
     /// Value encoding. When absent, values are taken raw from `value_column`.
     #[serde(default)]
     pub encoding: Option<EncodingSpec>,
