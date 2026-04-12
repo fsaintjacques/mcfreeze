@@ -313,8 +313,8 @@ mod tests {
         assert!(encoded.total_bytes() > 0);
     }
 
-    #[test]
-    fn test_build_transcoder_auto_generate() {
+    #[tokio::test]
+    async fn test_build_transcoder_auto_generate() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -330,7 +330,7 @@ mod tests {
             message_name: "Row".into(),
         };
 
-        let output = build_transcoder(&config, &value_schema).unwrap();
+        let output = build_transcoder(&config, &value_schema).await.unwrap();
         assert_eq!(output.message_fqn, "test.Row");
         assert!(!output.descriptor_bytes.is_empty());
 
@@ -348,8 +348,8 @@ mod tests {
         assert!(!result.value(0).is_empty());
     }
 
-    #[test]
-    fn test_build_transcoder_inline_descriptor() {
+    #[tokio::test]
+    async fn test_build_transcoder_inline_descriptor() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
         use prost_reflect::prost::Message;
@@ -373,7 +373,7 @@ mod tests {
             message_name: "pkg.Msg".into(),
         };
 
-        let output = build_transcoder(&config, &value_schema).unwrap();
+        let output = build_transcoder(&config, &value_schema).await.unwrap();
         assert_eq!(output.message_fqn, "pkg.Msg");
 
         let batch = RecordBatch::try_new(
@@ -390,8 +390,8 @@ mod tests {
         assert!(!result.value(0).is_empty());
     }
 
-    #[test]
-    fn test_build_transcoder_mutual_exclusion_error() {
+    #[tokio::test]
+    async fn test_build_transcoder_mutual_exclusion_error() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -404,7 +404,7 @@ mod tests {
             message_name: "Msg".into(),
         };
 
-        let result = build_transcoder(&config, &value_schema);
+        let result = build_transcoder(&config, &value_schema).await;
         assert!(result.is_err());
         assert!(result
             .err()
@@ -413,8 +413,8 @@ mod tests {
             .contains("mutually exclusive"));
     }
 
-    #[test]
-    fn test_build_transcoder_missing_package_error() {
+    #[tokio::test]
+    async fn test_build_transcoder_missing_package_error() {
         use crate::builder::build_transcoder;
         use crate::config::ProtobufEncoding;
 
@@ -427,7 +427,7 @@ mod tests {
             message_name: "Msg".into(),
         };
 
-        let result = build_transcoder(&config, &value_schema);
+        let result = build_transcoder(&config, &value_schema).await;
         assert!(result.is_err());
         assert!(result
             .err()

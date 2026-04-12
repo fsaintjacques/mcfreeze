@@ -174,7 +174,8 @@ impl Pipeline {
                     key_col_idx,
                     include_key_in_value,
                     &proto_config,
-                )?;
+                )
+                .await?;
                 load_sources(
                     output,
                     partitions,
@@ -234,7 +235,8 @@ impl Pipeline {
                     key_col_idx,
                     include_key_in_value,
                     &proto_config,
-                )?;
+                )
+                .await?;
                 benchmark_download(sources, estimated_rows, progress_secs).await
             }
             None => {
@@ -526,7 +528,7 @@ async fn build_pipeline(args: &LoadArgs, worker_config: Option<WorkerConfig>) ->
     }
 }
 
-fn apply_protobuf_encoding(
+async fn apply_protobuf_encoding(
     sources: Vec<BoxedRecordBatchSource>,
     schema: &arrow::datatypes::Schema,
     key_col_idx: usize,
@@ -545,6 +547,7 @@ fn apply_protobuf_encoding(
         .collect();
     let value_schema = arrow::datatypes::Schema::new(value_fields);
     let tc_output = frostmap_encode::build_transcoder(proto_config, &value_schema)
+        .await
         .context("failed to build protobuf transcoder")?;
 
     info!(
