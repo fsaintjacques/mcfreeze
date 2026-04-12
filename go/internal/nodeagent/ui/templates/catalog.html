@@ -1,0 +1,58 @@
+{{template "head" .}}
+
+<h1>Catalog vs KV Server</h1>
+
+<div class="two-col">
+    <div>
+        <h2>catalog.json (node agent)</h2>
+        {{if .Data.CatalogError}}
+            <div class="card"><span class="error-msg">{{.Data.CatalogError}}</span></div>
+        {{else if .Data.CatalogEntries}}
+            <table>
+                <thead>
+                    <tr><th>Dataset</th><th>Key Prefix</th><th>Version</th><th>Mount</th></tr>
+                </thead>
+                <tbody>
+                {{range .Data.CatalogEntries}}
+                    <tr>
+                        <td><strong>{{.Dataset}}</strong></td>
+                        <td><code>{{.KeyPrefix}}</code></td>
+                        <td><code>{{.VersionID}}</code></td>
+                        <td><code>{{.MountPath}}</code></td>
+                    </tr>
+                {{end}}
+                </tbody>
+            </table>
+        {{else}}
+            <div class="card"><span class="meta">Empty catalog.</span></div>
+        {{end}}
+    </div>
+
+    <div>
+        <h2>KV Server /version</h2>
+        {{if .Data.KVError}}
+            <div class="card"><span class="error-msg">{{.Data.KVError}}</span></div>
+        {{else if .Data.KVVersions}}
+            <table>
+                <thead>
+                    <tr><th>Dataset</th><th>Version</th><th>Loaded At</th></tr>
+                </thead>
+                <tbody>
+                {{range .Data.KVVersions}}
+                    <tr>
+                        <td><strong>{{.Dataset}}</strong></td>
+                        <td><code>{{.VersionID}}</code></td>
+                        <td>{{.LoadedAt}}</td>
+                    </tr>
+                {{end}}
+                </tbody>
+            </table>
+        {{else}}
+            <div class="card"><span class="meta">No datasets loaded.</span></div>
+        {{end}}
+    </div>
+</div>
+
+<script>setTimeout(function(){location.reload()}, 5000);</script>
+
+{{template "foot"}}

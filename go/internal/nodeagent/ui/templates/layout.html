@@ -1,0 +1,55 @@
+{{define "head"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>frostmap node agent</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; background: #0d1117; color: #c9d1d9; padding: 1rem; font-size: 14px; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        nav { margin-bottom: 1.5rem; padding-bottom: 0.75rem; border-bottom: 1px solid #21262d; }
+        nav a { margin-right: 1.5rem; font-weight: 500; }
+        nav a.active { color: #f0f6fc; border-bottom: 2px solid #58a6ff; padding-bottom: 0.5rem; }
+        h1 { font-size: 1.25rem; margin-bottom: 0.5rem; color: #f0f6fc; }
+        h2 { font-size: 1rem; margin: 1.5rem 0 0.75rem; color: #f0f6fc; }
+        .meta { color: #8b949e; font-size: 0.85rem; margin-bottom: 1rem; }
+        .meta span { margin-right: 1.5rem; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+        th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #21262d; }
+        th { color: #8b949e; font-weight: 500; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .phase-active { color: #3fb950; }
+        .phase-error { color: #f85149; }
+        .phase-progress { color: #d29922; }
+        .error-msg { color: #f85149; font-size: 0.85rem; }
+        pre { background: #161b22; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; margin: 0.5rem 0; }
+        code { font-family: "SF Mono", "Fira Code", monospace; }
+        form { margin: 1rem 0; }
+        input[type="text"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; width: 400px; font-family: monospace; }
+        input[type="text"]:focus { border-color: #58a6ff; outline: none; }
+        button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-left: 0.5rem; }
+        button:hover { background: #30363d; }
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 500; }
+        .badge-hit { background: #238636; color: #fff; }
+        .badge-miss { background: #6e7681; color: #fff; }
+        .card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+        .mismatch { background: #f8514922; }
+        .match { background: #3fb95022; }
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    </style>
+</head>
+<body>
+<nav>
+    <a href="/" {{if eq .Nav "index"}}class="active"{{end}}>Datasets</a>
+    <a href="/catalog" {{if eq .Nav "catalog"}}class="active"{{end}}>Catalog</a>
+    <a href="/query" {{if eq .Nav "query"}}class="active"{{end}}>Query</a>
+    <a href="/metrics" {{if eq .Nav "metrics"}}class="active"{{end}}>Metrics</a>
+</nav>
+{{end}}
+
+{{define "foot"}}
+</body>
+</html>
+{{end}}

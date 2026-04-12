@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +17,7 @@ import (
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/ui"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
 	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
 )
@@ -30,6 +33,10 @@ func runNodeAgent(args []string) {
 
 	csiDriver := fs.String("csi-driver", "pd.csi.storage.gke.io", "CSI driver name for VolumeAttachment")
 	mounterType := fs.String("mounter", "linux", "mount implementation: linux (real mount syscall) or fs (symlinks, for KIND)")
+
+	uiAddr := fs.String("ui-addr", ":8090", "address for the web UI (empty to disable)")
+	kvMemcacheAddr := fs.String("kv-memcache-addr", "localhost:11211", "kv-server memcache protocol address")
+	kvMetricsAddr := fs.String("kv-metrics-addr", "localhost:9090", "kv-server HTTP metrics address")
 	fs.Parse(args)
 
 	if cfg.ControlPlaneURL == "" || cfg.NodeName == "" {
@@ -63,7 +70,37 @@ func runNodeAgent(args []string) {
 	reporter := assignment.NewHTTPStateReporter(cfg.ControlPlaneURL, cfg.NodeName)
 	versions := version.NewHTTPChecker("http://localhost:7777")
 
+	startTime := time.Now()
 	agent := nodeagent.New(cfg, disks, mounter, assignments, reporter, versions)
+
+	// Start the web UI server if enabled.
+	if *uiAddr != "" {
+		uiCfg := ui.Config{
+			KVMemcacheAddr:       *kvMemcacheAddr,
+			KVMetricsAddr:        *kvMetricsAddr,
+			CatalogDir:           cfg.CatalogDir,
+			AgentNodeName:        cfg.NodeName,
+			AgentControlPlaneURL: cfg.ControlPlaneURL,
+			AgentStartTime:       startTime,
+		}
+		handler := ui.NewHandler(agent, uiCfg)
+		mux := http.NewServeMux()
+		handler.RegisterRoutes(mux)
+
+		l, err := net.Listen("tcp", *uiAddr)
+		if err != nil {
+			slog.Error("start UI server", "addr", *uiAddr, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("UI server listening", "addr", l.Addr().String())
+		srv := &http.Server{Handler: mux}
+		go srv.Serve(l)
+		go func() {
+			<-ctx.Done()
+			srv.Close()
+		}()
+	}
+
 	if err := agent.Run(ctx); err != nil {
 		slog.Info("agent stopped", "reason", err)
 	}

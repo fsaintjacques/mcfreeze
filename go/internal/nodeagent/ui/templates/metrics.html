@@ -1,0 +1,49 @@
+{{template "head" .}}
+
+<h1>Metrics</h1>
+
+<h2>Node Agent</h2>
+<table>
+    <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>Node</td><td><code>{{.Data.NodeAgent.NodeName}}</code></td></tr>
+        <tr><td>Uptime</td><td><code>{{.Data.NodeAgent.Uptime}}</code></td></tr>
+        <tr><td>Active datasets</td><td><code>{{.Data.NodeAgent.NumDatasets}}</code></td></tr>
+        {{range .Data.NodeAgent.Datasets}}
+        <tr>
+            <td>&nbsp;&nbsp;{{.Dataset}}</td>
+            <td><code class="{{phaseClass .Phase}}">{{.Phase}}</code> &mdash; <code>{{.VersionID}}</code> ({{since .UpdatedAt}})</td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
+
+<h2>KV Server</h2>
+{{if .Data.KVServer.Error}}
+    <div class="card">
+        <span class="error-msg">{{.Data.KVServer.Error}}</span>
+    </div>
+{{else if .Data.KVServer.Metrics}}
+    <table>
+        <thead>
+            <tr><th>Metric</th><th>Value</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+        {{range .Data.KVServer.Metrics}}
+            <tr>
+                <td><code>{{.Name}}</code></td>
+                <td><code>{{.Value}}</code></td>
+                <td class="meta">{{.Help}}</td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+{{else}}
+    <div class="card"><span class="meta">No metrics available.</span></div>
+{{end}}
+
+<script>setTimeout(function(){location.reload()}, 5000);</script>
+
+{{template "foot"}}
