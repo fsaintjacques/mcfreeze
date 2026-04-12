@@ -161,13 +161,13 @@ impl Fanout {
     /// Blocks (async-awaits) only if the target partition's channel is full,
     /// providing natural backpressure from slow writers to the source.
     pub async fn scatter_batch(&mut self, batch: &impl KvBatch) -> Result<(), LoaderError> {
-        for (key, value) in batch.iter() {
+        batch.for_each_kv(|key, value| {
             let fp = fingerprint(key);
             let idx = self.layout.partition_of(fp);
             self.sub_batches[idx].push((key.to_vec(), fp, value.to_vec()));
             self.n_keys += 1;
             self.data_bytes += value.len() as u64;
-        }
+        });
 
         for (idx, slot) in self.sub_batches.iter_mut().enumerate() {
             if slot.is_empty() {

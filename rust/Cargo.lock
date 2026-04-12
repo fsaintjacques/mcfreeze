@@ -99,7 +99,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "apb-core"
 version = "0.1.0"
-source = "git+https://github.com/fsaintjacques/apb?tag=v1.0.0#d3c61afd2659b29708c7d5c276451dcd1f81d723"
+source = "git+https://github.com/fsaintjacques/apb?tag=v1.1.0#22912f52d67fdda322498cfd765379e83402d7b1"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -912,6 +912,7 @@ dependencies = [
  "arrow-schema",
  "base64 0.22.1",
  "frostmap-loader",
+ "itoa",
  "prost-reflect",
  "serde",
  "serde_json",
@@ -947,6 +948,7 @@ dependencies = [
  "frostmap-format",
  "hdrhistogram",
  "hex",
+ "itoa",
  "rand",
  "rayon",
  "serde",

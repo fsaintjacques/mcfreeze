@@ -40,14 +40,21 @@ pub trait KvBatch {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])>;
+
+    /// Visit each `(key, value)` pair in the batch.
+    ///
+    /// Callback-based instead of iterator-based so implementations can format
+    /// keys lazily into a stack-allocated buffer (e.g. integer-typed Arrow
+    /// columns stringified via `itoa`) without materializing the whole column
+    /// upfront. The `&[u8]` borrows are valid only for the duration of each
+    /// callback invocation.
+    fn for_each_kv<F: FnMut(&[u8], &[u8])>(&self, f: F);
 
     /// Total byte size of all keys + values in this batch.
-    ///
-    /// Implementations backed by columnar formats (e.g. Arrow) can return this
-    /// in O(1) from the column buffers. The default falls back to iterating.
     fn total_bytes(&self) -> u64 {
-        self.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum()
+        let mut sum = 0u64;
+        self.for_each_kv(|k, v| sum += (k.len() + v.len()) as u64);
+        sum
     }
 }
 
@@ -177,8 +184,10 @@ impl KvBatch for VecBatch {
         self.0.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
-        self.0.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
+    fn for_each_kv<F: FnMut(&[u8], &[u8])>(&self, mut f: F) {
+        for (k, v) in &self.0 {
+            f(k, v);
+        }
     }
 }
 
@@ -205,7 +214,7 @@ impl ArrowKvBatch {
     ) -> Result<Self, LoaderError> {
         let keys = batch.column(key_col_idx).clone();
         let values = batch.column(val_col_idx).clone();
-        validate_byte_column(&keys, batch.schema().field(key_col_idx).name())?;
+        validate_key_column(&keys, batch.schema().field(key_col_idx).name())?;
         validate_byte_column(&values, batch.schema().field(val_col_idx).name())?;
         Ok(Self { keys, values })
     }
@@ -216,17 +225,133 @@ impl KvBatch for ArrowKvBatch {
         self.keys.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
-        (0..self.keys.len()).map(|i| {
-            (
-                byte_value(self.keys.as_ref(), i),
-                byte_value(self.values.as_ref(), i),
-            )
-        })
+    fn for_each_kv<F: FnMut(&[u8], &[u8])>(&self, mut f: F) {
+        let values = self.values.as_ref();
+        for_each_key(self.keys.as_ref(), |i, key| {
+            f(key, byte_value(values, i));
+        });
     }
 
     fn total_bytes(&self) -> u64 {
-        byte_column_size(&self.keys) + byte_column_size(&self.values)
+        key_column_size(self.keys.as_ref()) + byte_value_buffer_size(&self.values)
+    }
+}
+
+/// O(1) byte size of a key column. For byte columns this is the values
+/// buffer length; for integer columns it is the raw element width times
+/// row count (matches the on-the-wire Arrow buffer, not the stringified
+/// representation — appropriate for benchmark/ingest accounting).
+pub(crate) fn key_column_size(col: &dyn arrow_array::Array) -> u64 {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{BinaryType, LargeBinaryType};
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
+        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
+        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
+        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
+        DataType::Int32 | DataType::UInt32 => col.len() as u64 * 4,
+        DataType::Int64 | DataType::UInt64 => col.len() as u64 * 8,
+        _ => unreachable!("key column type validated in construction"),
+    }
+}
+
+fn byte_value_buffer_size(col: &ArrayRef) -> u64 {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{BinaryType, LargeBinaryType};
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
+        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
+        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
+        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
+        _ => unreachable!("value column type validated in ArrowKvBatch construction"),
+    }
+}
+
+/// Validate that a column is a supported key type.
+fn validate_key_column(col: &ArrayRef, name: &str) -> Result<(), LoaderError> {
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt32
+        | DataType::UInt64 => Ok(()),
+        dt => Err(LoaderError::Arrow(arrow_schema::ArrowError::SchemaError(
+            format!(
+                "key column {name:?} has type {dt}; expected Binary, LargeBinary, \
+                 Utf8, LargeUtf8, Int32, Int64, UInt32, or UInt64"
+            ),
+        ))),
+    }
+}
+
+/// Visit each row of a key column. Byte columns are borrowed zero-copy;
+/// integer columns are formatted lazily into a stack-allocated `itoa::Buffer`,
+/// so the `&[u8]` lives only for the duration of the callback.
+pub(crate) fn for_each_key<F: FnMut(usize, &[u8])>(col: &dyn arrow_array::Array, mut f: F) {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{BinaryType, Int32Type, Int64Type, LargeBinaryType, UInt32Type, UInt64Type};
+    use arrow_array::Array;
+    use arrow_schema::DataType;
+    match col.data_type() {
+        DataType::Binary => {
+            let a = col.as_bytes::<BinaryType>();
+            for i in 0..a.len() {
+                f(i, a.value(i));
+            }
+        }
+        DataType::LargeBinary => {
+            let a = col.as_bytes::<LargeBinaryType>();
+            for i in 0..a.len() {
+                f(i, a.value(i));
+            }
+        }
+        DataType::Utf8 => {
+            let a = col.as_string::<i32>();
+            for i in 0..a.len() {
+                f(i, a.value(i).as_bytes());
+            }
+        }
+        DataType::LargeUtf8 => {
+            let a = col.as_string::<i64>();
+            for i in 0..a.len() {
+                f(i, a.value(i).as_bytes());
+            }
+        }
+        DataType::Int32 => {
+            let a = col.as_primitive::<Int32Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::Int64 => {
+            let a = col.as_primitive::<Int64Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::UInt32 => {
+            let a = col.as_primitive::<UInt32Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::UInt64 => {
+            let a = col.as_primitive::<UInt64Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        _ => unreachable!("key column type validated in ArrowKvBatch construction"),
     }
 }
 
@@ -253,20 +378,6 @@ fn byte_value(col: &dyn arrow_array::Array, i: usize) -> &[u8] {
         DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().value(i),
         DataType::Utf8 => col.as_string::<i32>().value(i).as_bytes(),
         DataType::LargeUtf8 => col.as_string::<i64>().value(i).as_bytes(),
-        _ => unreachable!("column type validated in ArrowKvBatch construction"),
-    }
-}
-
-/// O(1) total byte size of a byte column via the values buffer.
-fn byte_column_size(col: &ArrayRef) -> u64 {
-    use arrow_array::cast::AsArray;
-    use arrow_array::types::{BinaryType, LargeBinaryType};
-    use arrow_schema::DataType;
-    match col.data_type() {
-        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
-        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
-        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
-        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
         _ => unreachable!("column type validated in ArrowKvBatch construction"),
     }
 }
@@ -514,7 +625,8 @@ mod tests {
 
         let kv = ArrowKvBatch::from_record_batch(&batch, 0, 1).unwrap();
         assert_eq!(kv.len(), 2);
-        let pairs: Vec<_> = kv.iter().collect();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        kv.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
         assert_eq!(pairs[0].0, b"alice");
         assert_eq!(pairs[0].1, b"val_a");
         assert_eq!(pairs[1].0, b"bob");
@@ -542,6 +654,32 @@ mod tests {
         let result = ArrowKvBatch::from_record_batch(&batch, 0, 1);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Int32"));
+    }
+
+    #[test]
+    fn arrow_kv_batch_int64_key_stringified() {
+        use arrow_array::{Int64Array, StringArray};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("v", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, -42, 1234567890])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+
+        let kv = ArrowKvBatch::from_record_batch(&batch, 0, 1).unwrap();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        kv.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
+        assert_eq!(pairs[0].0, b"1");
+        assert_eq!(pairs[1].0, b"-42");
+        assert_eq!(pairs[2].0, b"1234567890");
+        assert_eq!(pairs[2].1, b"c");
     }
 
     #[test]
@@ -576,7 +714,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let kv = rt.block_on(src.next_batch()).unwrap().unwrap();
-        let pairs: Vec<_> = kv.iter().collect();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        kv.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
         assert_eq!(pairs[0].0, b"k1");
         assert_eq!(pairs[0].1, b"v1");
 

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
-use arrow_array::types::{BinaryType, LargeBinaryType};
+use arrow_array::types::{
+    BinaryType, Int32Type, Int64Type, LargeBinaryType, UInt32Type, UInt64Type,
+};
 use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_schema::DataType;
 
@@ -28,34 +30,105 @@ impl KvBatch for EncodedBatch {
         self.keys.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
-        (0..self.keys.len()).map(|i| {
-            let key = key_bytes_at(self.keys.as_ref(), i);
-            let value = self.values.value(i);
-            (key, value)
-        })
+    fn for_each_kv<F: FnMut(&[u8], &[u8])>(&self, mut f: F) {
+        let values = &self.values;
+        for_each_key(self.keys.as_ref(), |i, key| {
+            f(key, values.value(i));
+        });
     }
 
     fn total_bytes(&self) -> u64 {
-        let key_bytes: u64 = match self.keys.data_type() {
-            DataType::Binary => self.keys.as_bytes::<BinaryType>().values().len() as u64,
-            DataType::LargeBinary => self.keys.as_bytes::<LargeBinaryType>().values().len() as u64,
-            DataType::Utf8 => self.keys.as_string::<i32>().values().len() as u64,
-            DataType::LargeUtf8 => self.keys.as_string::<i64>().values().len() as u64,
-            _ => unreachable!("key column type validated in encode_batch"),
-        };
-        key_bytes + self.values.values().len() as u64
+        key_column_size(self.keys.as_ref()) + self.values.values().len() as u64
     }
 }
 
-/// Zero-copy key access by row index. Panics on unsupported type (caller
-/// must validate via `validate_key_column` first).
-fn key_bytes_at(col: &dyn Array, row: usize) -> &[u8] {
+/// O(1) byte size of a key column (raw Arrow buffer width, not stringified).
+fn key_column_size(col: &dyn Array) -> u64 {
     match col.data_type() {
-        DataType::Binary => col.as_bytes::<BinaryType>().value(row),
-        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().value(row),
-        DataType::Utf8 => col.as_string::<i32>().value(row).as_bytes(),
-        DataType::LargeUtf8 => col.as_string::<i64>().value(row).as_bytes(),
+        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
+        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
+        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
+        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
+        DataType::Int32 | DataType::UInt32 => col.len() as u64 * 4,
+        DataType::Int64 | DataType::UInt64 => col.len() as u64 * 8,
+        _ => unreachable!("key column type validated in encode_batch"),
+    }
+}
+
+/// Validate that a key column type is supported.
+fn validate_key_column(col: &dyn Array) -> Result<(), EncodeError> {
+    match col.data_type() {
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt32
+        | DataType::UInt64 => Ok(()),
+        dt => Err(EncodeError::Config(format!(
+            "key column has unsupported type {dt}; expected Binary, LargeBinary, \
+             Utf8, LargeUtf8, Int32, Int64, UInt32, or UInt64"
+        ))),
+    }
+}
+
+/// Visit each row of a key column. Byte columns are borrowed zero-copy;
+/// integer columns are formatted lazily into a stack-allocated `itoa::Buffer`.
+fn for_each_key<F: FnMut(usize, &[u8])>(col: &dyn Array, mut f: F) {
+    match col.data_type() {
+        DataType::Binary => {
+            let a = col.as_bytes::<BinaryType>();
+            for i in 0..a.len() {
+                f(i, a.value(i));
+            }
+        }
+        DataType::LargeBinary => {
+            let a = col.as_bytes::<LargeBinaryType>();
+            for i in 0..a.len() {
+                f(i, a.value(i));
+            }
+        }
+        DataType::Utf8 => {
+            let a = col.as_string::<i32>();
+            for i in 0..a.len() {
+                f(i, a.value(i).as_bytes());
+            }
+        }
+        DataType::LargeUtf8 => {
+            let a = col.as_string::<i64>();
+            for i in 0..a.len() {
+                f(i, a.value(i).as_bytes());
+            }
+        }
+        DataType::Int32 => {
+            let a = col.as_primitive::<Int32Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::Int64 => {
+            let a = col.as_primitive::<Int64Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::UInt32 => {
+            let a = col.as_primitive::<UInt32Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
+        DataType::UInt64 => {
+            let a = col.as_primitive::<UInt64Type>();
+            let mut buf = itoa::Buffer::new();
+            for (i, v) in a.values().iter().enumerate() {
+                f(i, buf.format(*v).as_bytes());
+            }
+        }
         _ => unreachable!("key column type validated in encode_batch"),
     }
 }
@@ -64,21 +137,12 @@ fn key_bytes_at(col: &dyn Array, row: usize) -> &[u8] {
 // encode_batch
 // ---------------------------------------------------------------------------
 
-/// Validate that the key column type is supported.
-fn validate_key_column(col: &dyn Array) -> Result<(), EncodeError> {
-    match col.data_type() {
-        DataType::Binary | DataType::LargeBinary | DataType::Utf8 | DataType::LargeUtf8 => Ok(()),
-        dt => Err(EncodeError::Config(format!(
-            "key column has unsupported type {dt}; expected Binary, LargeBinary, Utf8, or LargeUtf8"
-        ))),
-    }
-}
-
 /// Encode a `RecordBatch` into an [`EncodedBatch`] of key-value pairs where
 /// each value is a serialized protobuf message.
 ///
-/// Zero per-row allocation: the key column is borrowed from the input batch
-/// and the value column is the `BinaryArray` produced by apb's transcoder.
+/// Byte key columns are borrowed zero-copy from the input batch; integer
+/// key columns are stringified into a packed buffer. The value column is
+/// the `BinaryArray` produced by apb's transcoder.
 pub fn encode_batch(
     batch: &RecordBatch,
     key_col_idx: usize,
@@ -225,7 +289,8 @@ mod tests {
         let encoded = encode_batch(&batch, 0, false, &transcoder).unwrap();
         assert_eq!(encoded.len(), 2);
 
-        let pairs: Vec<_> = encoded.iter().collect();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        encoded.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
         assert_eq!(pairs[0].0, b"alice");
         assert_eq!(pairs[1].0, b"bob");
         assert!(!pairs[0].1.is_empty());
@@ -265,10 +330,11 @@ mod tests {
         let encoded = encode_batch(&batch, 0, true, &transcoder).unwrap();
         assert_eq!(encoded.len(), 1);
 
-        let pairs: Vec<_> = encoded.iter().collect();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        encoded.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
         assert_eq!(pairs[0].0, b"alice");
         // Decode the protobuf value and verify the key field is present.
-        let dynamic_msg = prost_reflect::DynamicMessage::decode(msg, pairs[0].1).unwrap();
+        let dynamic_msg = prost_reflect::DynamicMessage::decode(msg, &*pairs[0].1).unwrap();
         assert_eq!(
             dynamic_msg.get_field_by_name("key").unwrap().as_str(),
             Some("alice")
