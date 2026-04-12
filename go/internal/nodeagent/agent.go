@@ -127,6 +127,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		backoff = 0 // reset on success
 
 		a.mu.Lock()
+		clear(a.lastAssigns)
 		for _, assign := range resp.Assignments {
 			a.lastAssigns[assign.Dataset] = assign
 		}

@@ -12,6 +12,13 @@ import (
 // memcacheGet performs a single memcache meta-protocol get against addr.
 // It returns the value bytes and true on a hit, nil and false on a miss.
 func memcacheGet(addr, key string) ([]byte, bool, error) {
+	if strings.ContainsAny(key, " \r\n") {
+		return nil, false, fmt.Errorf("invalid key: contains space or control characters")
+	}
+	if len(key) == 0 {
+		return nil, false, fmt.Errorf("invalid key: empty")
+	}
+
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
 		return nil, false, fmt.Errorf("connect to kv-server %s: %w", addr, err)

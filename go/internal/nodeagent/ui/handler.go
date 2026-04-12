@@ -5,6 +5,7 @@
 package ui
 
 import (
+	"bytes"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -292,10 +294,13 @@ func (h *Handler) handleAPIState(w http.ResponseWriter, r *http.Request) {
 // --- helpers ---
 
 func (h *Handler) render(w http.ResponseWriter, name string, nav string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpls.ExecuteTemplate(w, name, page{Nav: nav, Data: data}); err != nil {
+	var buf bytes.Buffer
+	if err := h.tmpls.ExecuteTemplate(&buf, name, page{Nav: nav, Data: data}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(buf.Bytes())
 }
 
 func containsControl(b []byte) bool {
@@ -308,7 +313,10 @@ func containsControl(b []byte) bool {
 }
 
 func readCatalogFile(catalogDir string) (*api.CatalogFile, error) {
-	path := catalogDir + "/catalog.json"
+	if catalogDir == "" {
+		return nil, fmt.Errorf("catalog directory not configured")
+	}
+	path := filepath.Join(catalogDir, "catalog.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
