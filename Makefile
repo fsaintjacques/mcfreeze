@@ -137,12 +137,14 @@ TF         := terraform -chdir=$(TF_DIR)
 GIT_SHA    ?= $(shell git rev-parse --short HEAD)
 
 # Resolve outputs once per recipe via $(shell …) so each target is self-contained.
+GCP_PROJECT    = $(shell gcloud config get-value project 2>/dev/null)
 GKE_IMAGE_REPO = $(shell $(TF) output -raw image_repo 2>/dev/null)
 GKE_CLUSTER    = $(shell $(TF) output -raw cluster_name 2>/dev/null)
 GKE_LOCATION   = $(shell $(TF) output -raw cluster_location 2>/dev/null)
 GKE_BQ_TABLE   = $(shell $(TF) output -raw bq_table 2>/dev/null)
 GKE_BUILDER_SA = $(shell $(TF) output -raw builder_sa 2>/dev/null)
 GKE_NODE_SA    = $(shell $(TF) output -raw node_agent_sa 2>/dev/null)
+GKE_DESC_URI   = $(shell $(TF) output -raw stackoverflow_descriptor_uri 2>/dev/null)
 
 gke-up:
 	$(TF) init
@@ -170,8 +172,11 @@ helm-uninstall-gke: gke-creds
 
 test-gke: helm-install-gke
 	cd go && \
+		GCP_PROJECT=$(GCP_PROJECT) \
 		FROSTMAP_IMAGE=$(GKE_IMAGE_REPO):$(GIT_SHA) \
 		BQ_TABLE=$(GKE_BQ_TABLE) \
+		FROSTMAP_E2E_DESCRIPTOR_URI=$(GKE_DESC_URI) \
+		FROSTMAP_E2E_BUILDER_SA=$(GKE_BUILDER_SA) \
 		go test -tags gke -count=1 -v -timeout 20m ./...
 
 gke-down:

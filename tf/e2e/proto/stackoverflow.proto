@@ -1,0 +1,19 @@
+syntax = "proto3";
+package stackoverflow;
+
+import "google/protobuf/timestamp.proto";
+
+// UserProfile represents the value payload for rows keyed by id
+// from bigquery-public-data.stackoverflow.users.
+message UserProfile {
+  optional int64                    id               = 1;
+  optional string                   display_name     = 2;
+  optional string                   age              = 3;
+  optional google.protobuf.Timestamp creation_date    = 4;
+  optional google.protobuf.Timestamp last_access_date = 5;
+  optional string                   location         = 6;
+  optional int64                    reputation       = 7;
+  optional int64                    up_votes         = 8;
+  optional int64                    down_votes       = 9;
+  optional int64                    views            = 10;
+}

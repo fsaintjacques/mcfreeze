@@ -27,3 +27,13 @@ output "node_agent_sa" {
   description = "GCP service account email for the node-agent (annotate K8s SA for WI)."
   value       = google_service_account.node_agent.email
 }
+
+output "gcs_bucket" {
+  description = "GCS bucket for e2e test artifacts (descriptors, etc.)."
+  value       = google_storage_bucket.e2e_artifacts.name
+}
+
+output "stackoverflow_descriptor_uri" {
+  description = "GCS URI of the compiled stackoverflow.desc FileDescriptorSet."
+  value       = "gs://${google_storage_bucket.e2e_artifacts.name}/${google_storage_bucket_object.stackoverflow_desc.name}"
+}
