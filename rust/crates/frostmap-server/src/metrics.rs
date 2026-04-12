@@ -94,8 +94,9 @@ impl Metrics {
     pub fn new(registry: &mut Registry) -> Arc<Self> {
         macro_rules! reg {
             ($registry:expr, $name:expr, $help:expr, $metric:expr) => {{
-                $registry.register($name, $help, $metric.clone());
-                $metric
+                let m = $metric;
+                $registry.register($name, $help, m.clone());
+                m
             }};
         }
 

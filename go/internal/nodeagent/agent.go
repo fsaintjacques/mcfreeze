@@ -56,8 +56,9 @@ type Agent struct {
 	versions    version.Checker
 	log         *slog.Logger
 
-	mu       sync.Mutex
-	datasets map[string]api.DatasetState // keyed by dataset name
+	mu          sync.Mutex
+	datasets    map[string]api.DatasetState   // keyed by dataset name
+	lastAssigns map[string]api.NodeAssignment // keyed by dataset name; last received
 }
 
 // New creates an Agent.  All dependencies are injected to allow testing with
@@ -82,6 +83,7 @@ func New(
 		versions:    versions,
 		log:         slog.Default().With("component", "node-agent", "node", cfg.NodeName),
 		datasets:    make(map[string]api.DatasetState),
+		lastAssigns: make(map[string]api.NodeAssignment),
 	}
 }
 
@@ -124,6 +126,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		backoff = 0 // reset on success
 
+		a.mu.Lock()
+		for _, assign := range resp.Assignments {
+			a.lastAssigns[assign.Dataset] = assign
+		}
+		a.mu.Unlock()
+
 		for _, assign := range resp.Assignments {
 			a.reconcile(ctx, assign)
 		}
@@ -153,7 +161,7 @@ func (a *Agent) reportLoop(ctx context.Context) {
 }
 
 func (a *Agent) doReport(ctx context.Context) {
-	if err := a.reporter.ReportState(ctx, a.nodeState()); err != nil {
+	if err := a.reporter.ReportState(ctx, a.NodeState()); err != nil {
 		a.log.Error("report state failed", "err", err)
 	}
 }
@@ -320,8 +328,22 @@ func (a *Agent) unmountWithRetry(ctx context.Context, path string) error {
 	}
 }
 
-// nodeState returns a snapshot of the current NodeState.
-func (a *Agent) nodeState() api.NodeState {
+// Config returns the agent's configuration.
+func (a *Agent) Config() Config { return a.cfg }
+
+// Assignments returns a snapshot of the last-received node assignments.
+func (a *Agent) Assignments() []api.NodeAssignment {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]api.NodeAssignment, 0, len(a.lastAssigns))
+	for _, assign := range a.lastAssigns {
+		out = append(out, assign)
+	}
+	return out
+}
+
+// NodeState returns a snapshot of the current NodeState.
+func (a *Agent) NodeState() api.NodeState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	datasets := make([]api.DatasetState, 0, len(a.datasets))

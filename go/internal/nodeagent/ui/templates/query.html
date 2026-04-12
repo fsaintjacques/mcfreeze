@@ -1,0 +1,35 @@
+{{template "head" .}}
+
+<h1>Key Query</h1>
+
+<form method="GET" action="/query">
+    <input type="text" name="key" value="{{.Data.Key}}" placeholder="dataset:key (e.g. users:alice)" autofocus>
+    <button type="submit">Lookup</button>
+</form>
+
+{{if .Data.Queried}}
+    {{if .Data.Error}}
+        <div class="card">
+            <span class="error-msg">{{.Data.Error}}</span>
+        </div>
+    {{else if .Data.Hit}}
+        <p><span class="badge badge-hit">HIT</span> <code>{{.Data.Key}}</code></p>
+
+        {{if .Data.JSON}}
+        <h2>Decoded (protobuf)</h2>
+        <pre><code>{{.Data.JSON}}</code></pre>
+        {{end}}
+
+        {{if .Data.RawUTF8}}
+        <h2>UTF-8</h2>
+        <pre><code>{{.Data.RawUTF8}}</code></pre>
+        {{end}}
+
+        <h2>Hex Dump</h2>
+        <pre><code>{{.Data.RawHex}}</code></pre>
+    {{else}}
+        <p><span class="badge badge-miss">MISS</span> <code>{{.Data.Key}}</code></p>
+    {{end}}
+{{end}}
+
+{{template "foot"}}

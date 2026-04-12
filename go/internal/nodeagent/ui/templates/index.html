@@ -1,0 +1,45 @@
+{{template "head" .}}
+
+<h1>Node Agent</h1>
+<div class="meta">
+    <span>Node: <strong>{{.Data.NodeName}}</strong></span>
+    <span>Control-plane: <code>{{.Data.ControlPlaneURL}}</code></span>
+    <span>Uptime: {{.Data.Uptime}}</span>
+</div>
+
+{{if .Data.State.Datasets}}
+<table>
+    <thead>
+        <tr>
+            <th>Dataset</th>
+            <th>Key Prefix</th>
+            <th>Version</th>
+            <th>Phase</th>
+            <th>PV</th>
+            <th>Mount</th>
+            <th>Age</th>
+            <th>Error</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{range .Data.State.Datasets}}
+        <tr>
+            <td><strong>{{.Dataset}}</strong></td>
+            <td><code>{{.KeyPrefix}}</code></td>
+            <td><code>{{.VersionID}}</code></td>
+            <td class="{{phaseClass .Phase}}">{{.Phase}}</td>
+            <td><code>{{.PVName}}</code></td>
+            <td><code>{{.MountPath}}</code></td>
+            <td>{{since .UpdatedAt}}</td>
+            <td>{{if .Error}}<span class="error-msg">{{.Error}}</span>{{end}}</td>
+        </tr>
+    {{end}}
+    </tbody>
+</table>
+{{else}}
+<p class="meta">No datasets assigned to this node.</p>
+{{end}}
+
+<script>setTimeout(function(){location.reload()}, 5000);</script>
+
+{{template "foot"}}
