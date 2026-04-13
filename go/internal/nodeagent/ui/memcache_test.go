@@ -69,6 +69,31 @@ func TestParseMetaGetResponse_ServerError(t *testing.T) {
 	}
 }
 
+func TestMemcacheGet_RejectsInvalidKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"empty", ""},
+		{"contains space", "bad key"},
+		{"contains CR", "bad\rkey"},
+		{"contains LF", "bad\nkey"},
+		{"contains CRLF", "inject\r\ndelete foo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Should reject without attempting a TCP connection.
+			_, _, err := memcacheGet("localhost:0", tt.key)
+			if err == nil {
+				t.Fatal("expected error for invalid key")
+			}
+			if !strings.Contains(err.Error(), "invalid key") {
+				t.Fatalf("expected 'invalid key' error, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseMetaGetResponse_BinaryValue(t *testing.T) {
 	// Binary payload: 4 bytes
 	payload := "\x00\x01\x02\x03"
