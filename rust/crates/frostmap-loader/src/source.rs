@@ -50,12 +50,12 @@ pub trait KvBatch {
     /// callback invocation.
     fn for_each_kv<F: FnMut(&[u8], &[u8])>(&self, f: F);
 
-    /// Total byte size of all keys + values in this batch.
-    fn total_bytes(&self) -> u64 {
-        let mut sum = 0u64;
-        self.for_each_kv(|k, v| sum += (k.len() + v.len()) as u64);
-        sum
-    }
+    /// Approximate total byte size of all keys + values in this batch.
+    ///
+    /// Used for ingest accounting and backpressure, not exact wire-size
+    /// calculation. Implementations backed by Arrow columns should return
+    /// the raw buffer size (O(1)) rather than iterating rows.
+    fn total_bytes(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +189,10 @@ impl KvBatch for VecBatch {
             f(k, v);
         }
     }
+
+    fn total_bytes(&self) -> u64 {
+        self.0.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +245,7 @@ impl KvBatch for ArrowKvBatch {
 /// buffer length; for integer columns it is the raw element width times
 /// row count (matches the on-the-wire Arrow buffer, not the stringified
 /// representation — appropriate for benchmark/ingest accounting).
-pub(crate) fn key_column_size(col: &dyn arrow_array::Array) -> u64 {
+pub fn key_column_size(col: &dyn arrow_array::Array) -> u64 {
     use arrow_array::cast::AsArray;
     use arrow_array::types::{BinaryType, LargeBinaryType};
     use arrow_schema::DataType;
@@ -293,9 +297,11 @@ fn validate_key_column(col: &ArrayRef, name: &str) -> Result<(), LoaderError> {
 /// Visit each row of a key column. Byte columns are borrowed zero-copy;
 /// integer columns are formatted lazily into a stack-allocated `itoa::Buffer`,
 /// so the `&[u8]` lives only for the duration of the callback.
-pub(crate) fn for_each_key<F: FnMut(usize, &[u8])>(col: &dyn arrow_array::Array, mut f: F) {
+pub fn for_each_key<F: FnMut(usize, &[u8])>(col: &dyn arrow_array::Array, mut f: F) {
     use arrow_array::cast::AsArray;
-    use arrow_array::types::{BinaryType, Int32Type, Int64Type, LargeBinaryType, UInt32Type, UInt64Type};
+    use arrow_array::types::{
+        BinaryType, Int32Type, Int64Type, LargeBinaryType, UInt32Type, UInt64Type,
+    };
     use arrow_array::Array;
     use arrow_schema::DataType;
     match col.data_type() {
@@ -680,6 +686,54 @@ mod tests {
         assert_eq!(pairs[1].0, b"-42");
         assert_eq!(pairs[2].0, b"1234567890");
         assert_eq!(pairs[2].1, b"c");
+    }
+
+    #[test]
+    fn arrow_kv_batch_uint32_key_stringified() {
+        use arrow_array::{StringArray, UInt32Array};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::UInt32, false),
+            Field::new("v", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt32Array::from(vec![0u32, 4294967295])),
+                Arc::new(StringArray::from(vec!["x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let kv = ArrowKvBatch::from_record_batch(&batch, 0, 1).unwrap();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        kv.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
+        assert_eq!(pairs[0].0, b"0");
+        assert_eq!(pairs[1].0, b"4294967295");
+    }
+
+    #[test]
+    fn arrow_kv_batch_uint64_key_stringified() {
+        use arrow_array::{StringArray, UInt64Array};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::UInt64, false),
+            Field::new("v", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![0u64, 18446744073709551615])),
+                Arc::new(StringArray::from(vec!["x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let kv = ArrowKvBatch::from_record_batch(&batch, 0, 1).unwrap();
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        kv.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
+        assert_eq!(pairs[0].0, b"0");
+        assert_eq!(pairs[1].0, b"18446744073709551615");
     }
 
     #[test]

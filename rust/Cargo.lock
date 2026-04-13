@@ -912,7 +912,6 @@ dependencies = [
  "arrow-schema",
  "base64 0.22.1",
  "frostmap-loader",
- "itoa",
  "prost-reflect",
  "serde",
  "serde_json",
