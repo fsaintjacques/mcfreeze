@@ -6,8 +6,8 @@ mod scatter;
 
 pub use error::LoaderError;
 pub use source::{
-    ArrowKvBatch, BoxedRecordBatchSource, CsvSource, KvBatch, KvSource, RawEncodingSource,
-    RecordBatchSource, SourceMetadata, VecBatch,
+    for_each_key, key_column_size, ArrowKvBatch, BoxedRecordBatchSource, CsvSource, KvBatch,
+    KvSource, RawEncodingSource, RecordBatchSource, SourceMetadata, VecBatch,
 };
 
 use std::path::Path;

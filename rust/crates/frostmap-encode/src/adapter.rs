@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use arrow_array::cast::AsArray;
-use arrow_array::types::{
-    BinaryType, Int32Type, Int64Type, LargeBinaryType, UInt32Type, UInt64Type,
-};
 use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_schema::DataType;
 
 use apb_core::transcode::Transcoder;
-use frostmap_loader::{KvBatch, KvSource, RecordBatchSource, SourceMetadata};
+use frostmap_loader::{
+    for_each_key, key_column_size, KvBatch, KvSource, RecordBatchSource, SourceMetadata,
+};
 
 use crate::error::EncodeError;
 
@@ -42,19 +40,6 @@ impl KvBatch for EncodedBatch {
     }
 }
 
-/// O(1) byte size of a key column (raw Arrow buffer width, not stringified).
-fn key_column_size(col: &dyn Array) -> u64 {
-    match col.data_type() {
-        DataType::Binary => col.as_bytes::<BinaryType>().values().len() as u64,
-        DataType::LargeBinary => col.as_bytes::<LargeBinaryType>().values().len() as u64,
-        DataType::Utf8 => col.as_string::<i32>().values().len() as u64,
-        DataType::LargeUtf8 => col.as_string::<i64>().values().len() as u64,
-        DataType::Int32 | DataType::UInt32 => col.len() as u64 * 4,
-        DataType::Int64 | DataType::UInt64 => col.len() as u64 * 8,
-        _ => unreachable!("key column type validated in encode_batch"),
-    }
-}
-
 /// Validate that a key column type is supported.
 fn validate_key_column(col: &dyn Array) -> Result<(), EncodeError> {
     match col.data_type() {
@@ -70,66 +55,6 @@ fn validate_key_column(col: &dyn Array) -> Result<(), EncodeError> {
             "key column has unsupported type {dt}; expected Binary, LargeBinary, \
              Utf8, LargeUtf8, Int32, Int64, UInt32, or UInt64"
         ))),
-    }
-}
-
-/// Visit each row of a key column. Byte columns are borrowed zero-copy;
-/// integer columns are formatted lazily into a stack-allocated `itoa::Buffer`.
-fn for_each_key<F: FnMut(usize, &[u8])>(col: &dyn Array, mut f: F) {
-    match col.data_type() {
-        DataType::Binary => {
-            let a = col.as_bytes::<BinaryType>();
-            for i in 0..a.len() {
-                f(i, a.value(i));
-            }
-        }
-        DataType::LargeBinary => {
-            let a = col.as_bytes::<LargeBinaryType>();
-            for i in 0..a.len() {
-                f(i, a.value(i));
-            }
-        }
-        DataType::Utf8 => {
-            let a = col.as_string::<i32>();
-            for i in 0..a.len() {
-                f(i, a.value(i).as_bytes());
-            }
-        }
-        DataType::LargeUtf8 => {
-            let a = col.as_string::<i64>();
-            for i in 0..a.len() {
-                f(i, a.value(i).as_bytes());
-            }
-        }
-        DataType::Int32 => {
-            let a = col.as_primitive::<Int32Type>();
-            let mut buf = itoa::Buffer::new();
-            for (i, v) in a.values().iter().enumerate() {
-                f(i, buf.format(*v).as_bytes());
-            }
-        }
-        DataType::Int64 => {
-            let a = col.as_primitive::<Int64Type>();
-            let mut buf = itoa::Buffer::new();
-            for (i, v) in a.values().iter().enumerate() {
-                f(i, buf.format(*v).as_bytes());
-            }
-        }
-        DataType::UInt32 => {
-            let a = col.as_primitive::<UInt32Type>();
-            let mut buf = itoa::Buffer::new();
-            for (i, v) in a.values().iter().enumerate() {
-                f(i, buf.format(*v).as_bytes());
-            }
-        }
-        DataType::UInt64 => {
-            let a = col.as_primitive::<UInt64Type>();
-            let mut buf = itoa::Buffer::new();
-            for (i, v) in a.values().iter().enumerate() {
-                f(i, buf.format(*v).as_bytes());
-            }
-        }
-        _ => unreachable!("key column type validated in encode_batch"),
     }
 }
 
@@ -347,6 +272,45 @@ mod tests {
                 .unwrap(),
             30
         );
+    }
+
+    #[test]
+    fn test_encode_batch_int64_key() {
+        use arrow_array::Int64Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("score", DataType::Float64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, -42, 9999999999])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let value_schema = Schema::new(vec![Field::new("score", DataType::Float64, false)]);
+        let fd = generate_file_descriptor(&value_schema, "test", "Row").unwrap();
+        let fds = FileDescriptorSet { file: vec![fd] };
+        let desc_bytes = fds.encode_to_vec();
+        let proto_schema = ProtoSchema::from_bytes(&desc_bytes).unwrap();
+        let msg = proto_schema.message("test.Row").unwrap();
+        let mapping = infer_mapping(&value_schema, &msg, &InferOptions::default()).unwrap();
+        let transcoder = Transcoder::new(&mapping).unwrap();
+
+        let encoded = encode_batch(&batch, 0, false, &transcoder).unwrap();
+        assert_eq!(encoded.len(), 3);
+
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        encoded.for_each_kv(|k, v| pairs.push((k.to_vec(), v.to_vec())));
+        assert_eq!(pairs[0].0, b"1");
+        assert_eq!(pairs[1].0, b"-42");
+        assert_eq!(pairs[2].0, b"9999999999");
+        assert!(!pairs[0].1.is_empty());
+        assert!(encoded.total_bytes() > 0);
     }
 
     #[test]
