@@ -954,6 +954,7 @@ dependencies = [
  "base64 0.22.1",
  "frostmap-loader",
  "gcloud-sdk",
+ "percent-encoding",
  "prost-reflect",
  "serde",
  "serde_json",

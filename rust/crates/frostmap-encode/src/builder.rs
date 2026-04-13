@@ -1,5 +1,6 @@
 use arrow_schema::Schema;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use prost_reflect::prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 
@@ -103,33 +104,31 @@ async fn download_gcs_descriptor(uri: &str) -> Result<Vec<u8>, EncodeError> {
 
     let api = gcloud_sdk::GoogleRestApi::new()
         .await
-        .map_err(|e| EncodeError::Config(format!("GCS auth init: {e}")))?;
+        .map_err(|e| EncodeError::Source(format!("GCS auth init: {e}").into()))?;
 
-    let encoded_object = object.replace('/', "%2F");
+    let encoded_object = utf8_percent_encode(object, NON_ALPHANUMERIC).to_string();
     let url = format!(
-        "https://storage.googleapis.com/storage/v1/b/{}/o/{}?alt=media",
-        bucket, encoded_object,
+        "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{encoded_object}?alt=media",
     );
 
     let resp = api
         .get(&url)
         .await
-        .map_err(|e| EncodeError::Config(format!("GCS auth token: {e}")))?
+        .map_err(|e| EncodeError::Source(format!("GCS auth token: {e}").into()))?
         .send()
         .await
-        .map_err(|e| EncodeError::Config(format!("GCS GET {uri}: {e}")))?;
+        .map_err(|e| EncodeError::Source(format!("GCS GET {uri}: {e}").into()))?;
 
     if !resp.status().is_success() {
-        return Err(EncodeError::Config(format!(
-            "GCS GET {uri}: HTTP {}",
-            resp.status()
-        )));
+        return Err(EncodeError::Source(
+            format!("GCS GET {uri}: HTTP {}", resp.status()).into(),
+        ));
     }
 
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| EncodeError::Config(format!("GCS read body {uri}: {e}")))?;
+        .map_err(|e| EncodeError::Source(format!("GCS read body {uri}: {e}").into()))?;
 
     if bytes.is_empty() {
         return Err(EncodeError::Config(format!("GCS object is empty: {uri}")));
@@ -143,5 +142,48 @@ fn fully_qualified_name(config: &ProtobufEncoding) -> String {
     match &config.package {
         Some(pkg) if !pkg.is_empty() => format!("{}.{}", pkg, config.message_name),
         _ => config.message_name.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_gcs_uri_ok() {
+        let (b, o) = parse_gcs_uri("gs://my-bucket/path/to/file.desc").unwrap();
+        assert_eq!(b, "my-bucket");
+        assert_eq!(o, "path/to/file.desc");
+    }
+
+    #[test]
+    fn test_parse_gcs_uri_single_object() {
+        let (b, o) = parse_gcs_uri("gs://bucket/file.desc").unwrap();
+        assert_eq!(b, "bucket");
+        assert_eq!(o, "file.desc");
+    }
+
+    #[test]
+    fn test_parse_gcs_uri_missing_prefix() {
+        let err = parse_gcs_uri("s3://bucket/file").unwrap_err();
+        assert!(err.to_string().contains("must start with gs://"));
+    }
+
+    #[test]
+    fn test_parse_gcs_uri_no_object() {
+        let err = parse_gcs_uri("gs://bucket-only").unwrap_err();
+        assert!(err.to_string().contains("missing object path"));
+    }
+
+    #[test]
+    fn test_parse_gcs_uri_empty_bucket() {
+        let err = parse_gcs_uri("gs:///object").unwrap_err();
+        assert!(err.to_string().contains("empty bucket or object"));
+    }
+
+    #[test]
+    fn test_parse_gcs_uri_empty_object() {
+        let err = parse_gcs_uri("gs://bucket/").unwrap_err();
+        assert!(err.to_string().contains("empty bucket or object"));
     }
 }

@@ -1,3 +1,7 @@
+// Regenerate the compiled descriptor after editing:
+//   protoc --proto_path=/opt/homebrew/include -I. \
+//     --descriptor_set_out=stackoverflow.desc --include_imports \
+//     stackoverflow.proto
 syntax = "proto3";
 package stackoverflow;
 
