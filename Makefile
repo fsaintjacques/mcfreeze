@@ -176,7 +176,6 @@ test-gke: helm-install-gke
 		FROSTMAP_IMAGE=$(GKE_IMAGE_REPO):$(GIT_SHA) \
 		BQ_TABLE=$(GKE_BQ_TABLE) \
 		FROSTMAP_E2E_DESCRIPTOR_URI=$(GKE_DESC_URI) \
-		FROSTMAP_E2E_BUILDER_SA=$(GKE_BUILDER_SA) \
 		go test -tags gke -count=1 -v -timeout 20m ./...
 
 gke-down:

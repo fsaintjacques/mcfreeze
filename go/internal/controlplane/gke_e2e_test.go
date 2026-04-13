@@ -360,13 +360,7 @@ func gkePortForwardPod(t *testing.T, ctx context.Context, cs kubernetes.Interfac
 	}
 
 	go func() {
-		if err := fw.ForwardPorts(); err != nil {
-			select {
-			case <-stopCh:
-			default:
-				t.Logf("port-forward error: %v", err)
-			}
-		}
+		_ = fw.ForwardPorts()
 	}()
 
 	select {
