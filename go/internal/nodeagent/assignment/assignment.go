@@ -5,7 +5,7 @@ package assignment
 import (
 	"context"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // Source provides dataset assignments for a node.

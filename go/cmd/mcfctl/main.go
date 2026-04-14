@@ -24,19 +24,19 @@ func main() {
 	case "ui":
 		runUI(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "fmtctl: unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "mcfctl: unknown command %q\n\n", os.Args[1])
 		usage()
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: fmtctl <command> [flags]
+	fmt.Fprintf(os.Stderr, `Usage: mcfctl <command> [flags]
 
 Commands:
   node-agent      Run the node-side dataset lifecycle agent
   control-plane   Run the control-plane server
-  job             Run an fm build job (wrapper for fm load config)
+  job             Run an mcf build job (wrapper for mcf load config)
   ui              Run the web UI standalone (for local testing without Kubernetes)
 `)
 }

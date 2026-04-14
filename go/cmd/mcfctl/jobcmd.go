@@ -14,7 +14,7 @@ func runJob(args []string) {
 	fs := flag.NewFlagSet("job", flag.ExitOnError)
 
 	configPath := fs.String("config", "", "path to worker.json config file (required)")
-	fmBinary := fs.String("fm-binary", "fm", "path to fm binary")
+	mcfBinary := fs.String("mcf-binary", "mcf", "path to mcf binary")
 	fs.Parse(args)
 
 	if *configPath == "" {
@@ -26,14 +26,14 @@ func runJob(args []string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 
-	cmd := exec.Command(*fmBinary, "load", "config", "--config", *configPath)
+	cmd := exec.Command(*mcfBinary, "load", "config", "--config", *configPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	slog.Info("starting fm build", "config", *configPath, "binary", *fmBinary)
+	slog.Info("starting mcf build", "config", *configPath, "binary", *mcfBinary)
 
 	if err := cmd.Start(); err != nil {
-		slog.Error("failed to start fm", "err", err)
+		slog.Error("failed to start mcf", "err", err)
 		os.Exit(1)
 	}
 
@@ -51,9 +51,9 @@ func runJob(args []string) {
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.ExitCode())
 		}
-		slog.Error("fm process failed", "err", err)
+		slog.Error("mcf process failed", "err", err)
 		os.Exit(1)
 	}
 
-	slog.Info("fm build completed successfully")
+	slog.Info("mcf build completed successfully")
 }

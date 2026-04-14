@@ -10,7 +10,7 @@ output "cluster_location" {
 
 output "image_repo" {
   description = "Full Artifact Registry image path (without tag)."
-  value       = "${var.region}-docker.pkg.dev/${var.project}/${google_artifact_registry_repository.frostmap.repository_id}/frostmap"
+  value       = "${var.region}-docker.pkg.dev/${var.project}/${google_artifact_registry_repository.mcfreeze.repository_id}/mcfreeze"
 }
 
 output "bq_table" {

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 const maxBodySize = 1 << 20 // 1 MiB

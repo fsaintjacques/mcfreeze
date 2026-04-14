@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // HTTPChecker implements Checker by polling the KV server's

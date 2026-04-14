@@ -2,7 +2,7 @@
 
 ## Overview
 
-`fm serve` is a stateless, read-only key-value server. It serves the memcache
+`mcf serve` is a stateless, read-only key-value server. It serves the memcache
 meta protocol over a Unix domain socket (UDS) and TCP. It is meant to run as an
 unprivileged container in a DaemonSet pod alongside the node-agent.
 
@@ -19,7 +19,7 @@ The server never writes or builds snapshot data. It only:
 ### `snapshot` (development / testing)
 
 ```
-fm serve snapshot --dir /mnt/snapshots/v42 --uds /run/kv/kv.sock --tcp 0.0.0.0:7777
+mcf serve snapshot --dir /mnt/snapshots/v42 --uds /run/kv/kv.sock --tcp 0.0.0.0:7777
 ```
 
 - Opens a single `SnapshotReader` at startup; never changes
@@ -30,7 +30,7 @@ fm serve snapshot --dir /mnt/snapshots/v42 --uds /run/kv/kv.sock --tcp 0.0.0.0:7
 ### `catalog` (production)
 
 ```
-fm serve catalog --catalog /run/kv/catalog.json --uds /run/kv/kv.sock --tcp 0.0.0.0:7777
+mcf serve catalog --catalog /run/kv/catalog.json --uds /run/kv/kv.sock --tcp 0.0.0.0:7777
 ```
 
 - Watches `catalog.json` via filesystem notifications (`notify` crate)
@@ -229,7 +229,7 @@ No `Mutex` or `RwLock` on the hot path.
 `pread(2)` is a blocking syscall. `SnapshotLookup` offloads it to tokio's
 blocking thread pool via `spawn_blocking`. The `Lookup` trait is async;
 `spawn_blocking` is the adapter inside the implementation. The
-`frostmap-format` crate remains a zero-runtime synchronous library.
+`mcfreeze-format` crate remains a zero-runtime synchronous library.
 
 ---
 

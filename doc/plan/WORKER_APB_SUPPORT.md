@@ -97,15 +97,15 @@ encoding:
 
 The Go operator serializes `DatasetSpec` to JSON, creates a ConfigMap, and
 mounts it as a volume in the worker Job at a well-known path
-(`/etc/frostmap/config.json`). This is the standard K8s operator pattern
+(`/etc/mcfreeze/config.json`). This is the standard K8s operator pattern
 (Spark Operator, Flink Operator, Strimzi, Prometheus Operator all do this).
 
-The Rust worker reads the config via `fm load config --config <path>`.
+The Rust worker reads the config via `mcf load config --config <path>`.
 Same binary, same flag for local dev — no K8s dependency.
 
 ### Rust pipeline architecture
 
-`frostmap-loader` stays Arrow-free. A new `frostmap-encode` crate bridges
+`mcfreeze-loader` stays Arrow-free. A new `mcfreeze-encode` crate bridges
 Arrow sources with protobuf encoding.
 
 **Raw encoding (unchanged):**
@@ -122,18 +122,18 @@ BqReadSession → BqRecordBatchSource → ProtobufEncodingSource (KvSource) → 
 
 Key new types:
 
-- **`BqRecordBatchSource`** (in `frostmap-bq`): same gRPC streaming as
+- **`BqRecordBatchSource`** (in `mcfreeze-bq`): same gRPC streaming as
   `BqStreamSource` but yields full `RecordBatch` without key/value
   extraction. Add `BqReadSession::into_record_batch_sources()` and
   `schema()` accessor.
 
-- **`ProtobufEncodingSource<S>`** (in `frostmap-encode`): wraps any source
+- **`ProtobufEncodingSource<S>`** (in `mcfreeze-encode`): wraps any source
   that yields `RecordBatch`es, extracts the key column, transcodes remaining
   columns via `apb Transcoder`, yields `(key_bytes, proto_bytes)` as a
   `KvSource`. One extra copy vs the zero-copy raw path, but unavoidable
   since protobuf bytes must be materialized.
 
-- **Config serde types** (in `frostmap-encode`): `WorkerConfig`,
+- **Config serde types** (in `mcfreeze-encode`): `WorkerConfig`,
   `SourceSpec`, `EncodingSpec` — wire-compatible with Go's JSON serialization.
 
 ### Auto-generate flow
@@ -142,7 +142,7 @@ When `encoding.protobuf` is set but `descriptor` is empty:
 
 1. `BqReadSession::open()` → get Arrow schema
 2. Remove key column from schema
-3. `apb_core::generate::generate_file_descriptor(&schema, "frostmap", "Value")`
+3. `apb_core::generate::generate_file_descriptor(&schema, "mcfreeze", "Value")`
 4. Build `ProtoSchema` from generated descriptor
 5. `apb_core::mapping::infer_mapping(&schema, &msg, &InferOptions::default())`
 6. `Transcoder::new(&mapping)`
@@ -160,9 +160,9 @@ that construct `DatasetSpec`. No behavioral change.
 
 **Exit criterion:** All existing Go tests pass with the new type hierarchy.
 
-### Phase 2 — `frostmap-bq` RecordBatch source
+### Phase 2 — `mcfreeze-bq` RecordBatch source
 
-Add `BqRecordBatchSource` to `frostmap-bq`: same streaming logic as
+Add `BqRecordBatchSource` to `mcfreeze-bq`: same streaming logic as
 `BqStreamSource` but yields `RecordBatch` directly. Add
 `BqReadSession::into_record_batch_sources()` and `schema()`. Make
 `BinaryCol` public for reuse.
@@ -170,7 +170,7 @@ Add `BqRecordBatchSource` to `frostmap-bq`: same streaming logic as
 **Exit criterion:** `BqRecordBatchSource` compiles, existing `BqStreamSource`
 tests unchanged.
 
-### Phase 3 — `frostmap-encode` crate
+### Phase 3 — `mcfreeze-encode` crate
 
 New crate with:
 - `config.rs` — serde config types (wire-compatible with Go JSON)
@@ -185,10 +185,10 @@ key-value pairs contain valid protobuf.
 
 ### Phase 4 — CLI config-driven load
 
-Add `Config` variant to the CLI `Source` enum in `frostmap-cli/src/load.rs`.
+Add `Config` variant to the CLI `Source` enum in `mcfreeze-cli/src/load.rs`.
 Reads JSON config file, dispatches to raw or protobuf pipeline based on
 encoding spec.
 
-**Exit criterion:** `fm load config --config test.json --output /tmp/snap`
+**Exit criterion:** `mcf load config --config test.json --output /tmp/snap`
 produces a valid snapshot from a BigQuery table with protobuf-encoded values.
 Values decode correctly with `protoc --decode_raw`.

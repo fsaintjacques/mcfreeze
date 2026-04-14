@@ -34,7 +34,7 @@ use nom::{
 pub struct MgFlags {
     /// `v` — return value bytes (always honoured by this server).
     pub v: bool,
-    /// `t` — return TTL remaining; server returns `t-1` (no expiry in frostmap).
+    /// `t` — return TTL remaining; server returns `t-1` (no expiry in mcfreeze).
     pub t: bool,
     /// `h` — return hit-before flag; not tracked, omitted from the response.
     pub h: bool,
@@ -189,7 +189,7 @@ pub fn parse_command(src: &mut BytesMut) -> Result<Option<Command>, ProtoError> 
 /// Write a `VA` (hit) response.
 ///
 /// Echoes `k<key>` if `flags.k` is set; appends `t-1` if `flags.t` is set
-/// (frostmap snapshots have no TTL).
+/// (mcfreeze snapshots have no TTL).
 pub fn write_va(dst: &mut BytesMut, value: &[u8], flags: &MgFlags, key: &[u8]) {
     dst.put_slice(b"VA ");
     dst.put_slice(value.len().to_string().as_bytes());

@@ -1,6 +1,6 @@
 apiVersion: v2
-name: frostmap
-description: Frostmap KV control plane and node-agent for Kubernetes.
+name: mcfreeze
+description: McFreeze KV control plane and node-agent for Kubernetes.
 type: application
 # Chart.version is locked to appVersion — bump them together.
 version: 0.1.0

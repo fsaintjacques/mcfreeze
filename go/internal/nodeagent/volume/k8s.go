@@ -45,7 +45,7 @@ func (m *K8sManager) pollTimeout() time.Duration {
 
 // vaName returns a deterministic, DNS-safe VolumeAttachment name for a PV.
 func vaName(pvName string) string {
-	name := "fm-va-" + strings.ToLower(pvName)
+	name := "mcf-va-" + strings.ToLower(pvName)
 
 	var b strings.Builder
 	prevHyphen := false

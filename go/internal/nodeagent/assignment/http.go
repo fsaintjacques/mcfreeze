@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // HTTPSource implements Source via the control-plane HTTP API.

@@ -10,7 +10,7 @@ pub const FORMAT_VERSION: u32 = 4;
 
 /// Default seed for the value-header verification fingerprint.
 /// Must be != 0 so it is independent of the index fingerprint (seed 0).
-pub const DEFAULT_VERIFY_SEED: u64 = 0x517cc1b727220a95; // xxhash64("frostmap-verify")
+pub const DEFAULT_VERIFY_SEED: u64 = 0x517cc1b727220a95; // xxhash64("mcfreeze-verify")
 pub const HASH_ALGORITHM: &str = "xxhash64";
 
 /// Value alignment in bytes. Every value in `data.bin` starts at a multiple of this.

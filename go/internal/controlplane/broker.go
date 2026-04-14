@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // AssignmentBroker owns the ephemeral per-node state shared between the HTTP

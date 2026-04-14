@@ -14,18 +14,18 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/volume"
 )
 
-// kindImage returns the frostmap image ref used by kind tests, honoring the
-// FROSTMAP_IMAGE env var so podman-based local dev (which tags images as
-// localhost/frostmap:dev) can override the docker-provider default.
+// kindImage returns the mcfreeze image ref used by kind tests, honoring the
+// MCFREEZE_IMAGE env var so podman-based local dev (which tags images as
+// localhost/mcfreeze:dev) can override the docker-provider default.
 func kindImage() string {
-	if v := os.Getenv("FROSTMAP_IMAGE"); v != "" {
+	if v := os.Getenv("MCFREEZE_IMAGE"); v != "" {
 		return v
 	}
-	return "frostmap:dev"
+	return "mcfreeze:dev"
 }
 
 // kindClientset creates a Kubernetes clientset from the default kubeconfig.
@@ -81,7 +81,7 @@ func kindNamespace(t *testing.T, cs kubernetes.Interface) string {
 // validates the full PVC → finalize → PV → delete lifecycle.
 //
 // Prerequisites:
-//   - KIND cluster running with fm image loaded (make kind-up kind-load)
+//   - KIND cluster running with mcf image loaded (make kind-up kind-load)
 //   - local-path StorageClass available (default in KIND)
 func TestKindJob_FullLifecycle(t *testing.T) {
 	cs := kindClientset(t)
@@ -226,11 +226,11 @@ func TestKindJob_Cancel(t *testing.T) {
 	if err == nil {
 		t.Error("Job should be deleted after Cancel")
 	}
-	_, err = cs.CoreV1().ConfigMaps(ns).Get(ctx, "fm-config-canceltest-v1", metav1.GetOptions{})
+	_, err = cs.CoreV1().ConfigMaps(ns).Get(ctx, "mcf-config-canceltest-v1", metav1.GetOptions{})
 	if err == nil {
 		t.Error("ConfigMap should be deleted after Cancel")
 	}
-	pvc, pvcErr := cs.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "fm-pvc-canceltest-v1", metav1.GetOptions{})
+	pvc, pvcErr := cs.CoreV1().PersistentVolumeClaims(ns).Get(ctx, "mcf-pvc-canceltest-v1", metav1.GetOptions{})
 	if pvcErr == nil && pvc.DeletionTimestamp == nil {
 		t.Error("PVC should be deleted or terminating after Cancel")
 	}

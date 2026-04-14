@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
-// workerConfig is the JSON config consumed by `fm load config --config`.
-// Wire-compatible with the Rust WorkerConfig type in frostmap-encode.
+// workerConfig is the JSON config consumed by `mcf load config --config`.
+// Wire-compatible with the Rust WorkerConfig type in mcfreeze-encode.
 type workerConfig struct {
 	Source     api.SourceSpec `json:"source"`
 	Output     string         `json:"output"`
@@ -26,7 +26,7 @@ type workerConfig struct {
 
 const workerConfigFile = "worker.json"
 
-// Fork implements Async by forking an fm subprocess.
+// Fork implements Async by forking an mcf subprocess.
 // The build handle is the output directory path, which is deterministic
 // from (OutputBase, dataset, versionID), making Start naturally idempotent.
 //
@@ -39,8 +39,8 @@ const workerConfigFile = "worker.json"
 // Cancel to kill a wrong process. This is acceptable for the fork builder's
 // expected lifetime (transitional until K8s Job builder).
 type Fork struct {
-	// FMBinary is the path to the fm binary. Defaults to "fm".
-	FMBinary string
+	// MCFBinary is the path to the mcf binary. Defaults to "mcf".
+	MCFBinary string
 	// OutputBase is the root directory for build output.
 	// Each build writes to <OutputBase>/<dataset>/<versionID>/.
 	OutputBase string
@@ -62,14 +62,14 @@ func (b *Fork) gracePeriod() time.Duration {
 	return 10 * time.Second
 }
 
-func (b *Fork) fmBinary() string {
-	if b.FMBinary != "" {
-		return b.FMBinary
+func (b *Fork) mcfBinary() string {
+	if b.MCFBinary != "" {
+		return b.MCFBinary
 	}
-	return "fm"
+	return "mcf"
 }
 
-// Start kicks off an fm subprocess. Idempotent: if the build already
+// Start kicks off an mcf subprocess. Idempotent: if the build already
 // completed (meta.json exists) or is still running (pid alive), returns
 // the existing handle.
 func (b *Fork) Start(ctx context.Context, spec api.DatasetSpec, versionID string) (Handle, error) {
@@ -110,14 +110,14 @@ func (b *Fork) Start(ctx context.Context, spec api.DatasetSpec, versionID string
 		return "", fmt.Errorf("fork builder: write config: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, b.fmBinary(), "load", "config", "--config", configPath)
+	cmd := exec.CommandContext(ctx, b.mcfBinary(), "load", "config", "--config", configPath)
 	// Detach from parent process group so the child survives if the
 	// control-plane exits.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		os.RemoveAll(dir)
-		return "", fmt.Errorf("fork builder: start fm: %w", err)
+		return "", fmt.Errorf("fork builder: start mcf: %w", err)
 	}
 
 	// Reap the child in the background so we don't leak a zombie or the

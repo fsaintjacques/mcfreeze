@@ -35,20 +35,20 @@ func TestLoadAndGet(t *testing.T) {
 	}
 
 	dir := BuildSnapshot(t, pairs, 4)
-	fm := FMBinary(t)
+	mcf := MCFBinary(t)
 
 	for _, p := range pairs {
-		got := fmGet(t, fm, dir, string(p.Key))
+		got := mcfGet(t, mcf, dir, string(p.Key))
 		if got != string(p.Value) {
-			t.Errorf("fm get %q: got %q, want %q", p.Key, got, p.Value)
+			t.Errorf("mcf get %q: got %q, want %q", p.Key, got, p.Value)
 		}
 	}
 
 	// A missing key must produce a non-zero exit.
-	cmd := exec.Command(fm, "get", "--snapshot", dir, "nonexistent")
+	cmd := exec.Command(mcf, "get", "--snapshot", dir, "nonexistent")
 	cmd.Stderr = nil
 	if err := cmd.Run(); err == nil {
-		t.Error("fm get nonexistent: expected non-zero exit, got success")
+		t.Error("mcf get nonexistent: expected non-zero exit, got success")
 	}
 }
 
@@ -63,25 +63,25 @@ func TestLoadAndGetLargeSnapshot(t *testing.T) {
 	}
 
 	dir := BuildSnapshot(t, pairs, 16)
-	fm := FMBinary(t)
+	mcf := MCFBinary(t)
 
 	// Spot-check a sample of keys across the range.
 	for _, idx := range []int{0, 1, 100, 999, 5000, 9999} {
-		got := fmGet(t, fm, dir, string(pairs[idx].Key))
+		got := mcfGet(t, mcf, dir, string(pairs[idx].Key))
 		want := string(pairs[idx].Value)
 		if got != want {
-			t.Errorf("fm get %q: got %q, want %q", pairs[idx].Key, got, want)
+			t.Errorf("mcf get %q: got %q, want %q", pairs[idx].Key, got, want)
 		}
 	}
 }
 
-// fmGet runs `fm get --snapshot dir key` and returns the trimmed stdout.
-func fmGet(t *testing.T, fm, dir, key string) string {
+// mcfGet runs `mcf get --snapshot dir key` and returns the trimmed stdout.
+func mcfGet(t *testing.T, mcf, dir, key string) string {
 	t.Helper()
-	cmd := exec.Command(fm, "get", "--snapshot", dir, key)
+	cmd := exec.Command(mcf, "get", "--snapshot", dir, key)
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("fm get %q: %v", key, err)
+		t.Fatalf("mcf get %q: %v", key, err)
 	}
 	return strings.TrimRight(string(out), "\n")
 }

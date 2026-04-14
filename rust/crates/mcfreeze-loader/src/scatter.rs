@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use frostmap_format::{
+use mcfreeze_format::{
     index::fingerprint,
     meta::Layout,
     writer::{PartitionBuildReady, PartitionWriter},
@@ -367,9 +367,9 @@ fn partition_writer(
 mod tests {
     use super::*;
     use crate::source::VecBatch;
-    use frostmap_format::meta::DEFAULT_VERIFY_SEED;
-    use frostmap_format::spill::SpillReader;
-    use frostmap_format::{
+    use mcfreeze_format::meta::DEFAULT_VERIFY_SEED;
+    use mcfreeze_format::spill::SpillReader;
+    use mcfreeze_format::{
         data::pread,
         meta::{VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     };
@@ -382,7 +382,7 @@ mod tests {
     fn make_writers(root: &std::path::Path, n: u32) -> Vec<PartitionWriter<BufWriter<File>>> {
         (0..n as usize)
             .map(|i| {
-                let dir = frostmap_format::meta::partition_dir(root, n, i);
+                let dir = mcfreeze_format::meta::partition_dir(root, n, i);
                 PartitionWriter::new_buffered(&dir, DEFAULT_VERIFY_SEED, 1024 * 1024, 4096).unwrap()
             })
             .collect()
@@ -419,12 +419,12 @@ mod tests {
         let pairs: &[(&[u8], &[u8])] = &[(b"hello", b"world"), (b"foo", b"bar")];
         let (dir, _) = scatter(pairs, 1).await;
 
-        let spill_path = frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin");
+        let spill_path = mcfreeze_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin");
         let reader = SpillReader::open(&spill_path).unwrap();
         assert_eq!(reader.count(), 2);
 
         let data_file =
-            File::open(frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin"))
+            File::open(mcfreeze_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin"))
                 .unwrap();
         for rec in reader.records() {
             let rec = rec.unwrap();
@@ -449,7 +449,7 @@ mod tests {
     async fn data_bin_alignment() {
         let (dir, _) = scatter(&[(b"k", b"v")], 1).await;
         let meta = std::fs::metadata(
-            frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin"),
+            mcfreeze_format::meta::partition_dir(dir.path(), 1, 0).join("data.bin"),
         )
         .unwrap();
         assert_eq!(meta.len() % VALUE_ALIGNMENT, 0);
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(stats.n_keys, 10);
 
         let spill = SpillReader::open(
-            &frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin"),
+            &mcfreeze_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin"),
         )
         .unwrap();
         assert_eq!(spill.count(), 10);
@@ -530,7 +530,7 @@ mod tests {
         assert_eq!(stats.n_keys, 1000);
 
         let spill = SpillReader::open(
-            &frostmap_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin"),
+            &mcfreeze_format::meta::partition_dir(dir.path(), 1, 0).join("spill.bin"),
         )
         .unwrap();
         assert_eq!(spill.count(), 1000);

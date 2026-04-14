@@ -2,10 +2,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 rules:
   - apiGroups: ["batch"]
@@ -20,10 +20,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "delete"]
-  - apiGroups: ["frostmap.dev"]
+  - apiGroups: ["mcfreeze.dev"]
     resources: ["datasets", "datasetversions", "datasetbindings"]
     verbs: ["create", "get", "update", "delete", "list", "watch", "patch"]
-  - apiGroups: ["frostmap.dev"]
+  - apiGroups: ["mcfreeze.dev"]
     resources: ["datasets/status", "datasetversions/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["coordination.k8s.io"]
@@ -36,26 +36,26 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 subjects:
   - kind: ServiceAccount
-    name: {{ include "frostmap.controlPlane.name" . }}
+    name: {{ include "mcfreeze.controlPlane.name" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 rules:
   - apiGroups: [""]
@@ -71,16 +71,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 subjects:
   - kind: ServiceAccount
-    name: {{ include "frostmap.controlPlane.name" . }}
+    name: {{ include "mcfreeze.controlPlane.name" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
 {{- end }}

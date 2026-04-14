@@ -13,8 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/volume"
 )
 
 // BuilderPodTemplate contains scheduling and identity overrides applied to
@@ -37,7 +37,7 @@ type Job struct {
 	Client          kubernetes.Interface
 	Volumes         volume.Manager
 	Namespace       string
-	Image           string            // frostmap container image (must contain both fm and fmtctl)
+	Image           string            // mcfreeze container image (must contain both mcf and mcfctl)
 	ImagePullPolicy corev1.PullPolicy // defaults to IfNotPresent
 	StorageClass    string            // StorageClass for build PVCs
 	DiskSizeGB      int64             // PVC size in GiB (defaults to 10)
@@ -61,7 +61,7 @@ func (b *Job) diskSizeGB() int64 {
 // annotationPVName is the Job annotation key that records the finalized PV
 // name. Its presence means FinalizeBuild already ran successfully, making
 // Poll idempotent across retries.
-const annotationPVName = "frostmap.io/pv-name"
+const annotationPVName = "mcfreeze.io/pv-name"
 
 // resourceName returns a deterministic, DNS-safe name for a build resource.
 // Non-alphanumeric characters (except hyphens) are replaced with hyphens,
@@ -99,19 +99,19 @@ func resourceName(prefix, dataset, versionID string) string {
 // builder for a (dataset, versionID) pair. Exported so reconcilers can
 // patch ownerReferences without coupling to a Job builder instance.
 func JobName(dataset, versionID string) string {
-	return resourceName("fm-build", dataset, versionID)
+	return resourceName("mcf-build", dataset, versionID)
 }
 
 // ConfigMapName returns the deterministic ConfigMap name used by the Job
 // builder for a (dataset, versionID) pair.
 func ConfigMapName(dataset, versionID string) string {
-	return resourceName("fm-config", dataset, versionID)
+	return resourceName("mcf-config", dataset, versionID)
 }
 
 // PVCName returns the deterministic PersistentVolumeClaim name used by the
 // Job builder for a (dataset, versionID) pair.
 func PVCName(dataset, versionID string) string {
-	return resourceName("fm-pvc", dataset, versionID)
+	return resourceName("mcf-pvc", dataset, versionID)
 }
 
 func (b *Job) jobName(dataset, versionID string) string { return JobName(dataset, versionID) }
@@ -173,9 +173,9 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 			Name:      jobName,
 			Namespace: b.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "frostmap",
-				"frostmap.io/dataset":          dataset,
-				"frostmap.io/version":          versionID,
+				"app.kubernetes.io/managed-by": "mcfreeze",
+				"mcfreeze.io/dataset":          dataset,
+				"mcfreeze.io/version":          versionID,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -194,10 +194,10 @@ func (b *Job) Start(ctx context.Context, spec api.DatasetSpec, versionID string)
 					},
 					Containers: []corev1.Container{
 						{
-							Name:            "fm",
+							Name:            "mcf",
 							Image:           b.Image,
 							ImagePullPolicy: b.imagePullPolicy(),
-							Command:         []string{"fmtctl", "job", "--config", "/config/" + workerConfigFile},
+							Command:         []string{"mcfctl", "job", "--config", "/config/" + workerConfigFile},
 							Resources:       builderResources(spec.BuilderResources),
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "output", MountPath: "/output"},
@@ -265,8 +265,8 @@ func (b *Job) Poll(ctx context.Context, handle Handle) (Status, error) {
 			// completed) references the claim.
 			b.deleteJobPods(ctx, jobName)
 
-			dataset := job.Labels["frostmap.io/dataset"]
-			versionID := job.Labels["frostmap.io/version"]
+			dataset := job.Labels["mcfreeze.io/dataset"]
+			versionID := job.Labels["mcfreeze.io/version"]
 			pvcName := b.pvcName(dataset, versionID)
 
 			pvName, err := b.Volumes.FinalizeBuild(ctx, pvcName)
@@ -323,8 +323,8 @@ func (b *Job) Cancel(ctx context.Context, handle Handle) error {
 	var dataset, versionID string
 	job, err := b.Client.BatchV1().Jobs(b.Namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err == nil {
-		dataset = job.Labels["frostmap.io/dataset"]
-		versionID = job.Labels["frostmap.io/version"]
+		dataset = job.Labels["mcfreeze.io/dataset"]
+		versionID = job.Labels["mcfreeze.io/version"]
 	}
 
 	// Delete pods first so the pvc-protection finalizer releases the PVC.

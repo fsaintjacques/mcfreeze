@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/ui"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/ui"
 )
 
 // staticState implements ui.StateProvider with static data for standalone UI

@@ -13,7 +13,7 @@ use gcloud_sdk::{GoogleApi, GoogleAuthMiddleware};
 /// The official Go client uses math.MaxInt32 (~2 GiB); we match that.
 const MAX_DECODING_BYTES: usize = i32::MAX as usize;
 
-use frostmap_loader::SourceMetadata;
+use mcfreeze_loader::SourceMetadata;
 
 use crate::{error::BqError, source::BqRecordBatchSource};
 

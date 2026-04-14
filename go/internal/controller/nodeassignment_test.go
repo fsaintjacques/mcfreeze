@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"

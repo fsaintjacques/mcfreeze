@@ -1,10 +1,10 @@
 [package]
-name    = "frostmap-encode"
+name    = "mcfreeze-encode"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-frostmap-loader = { path = "../frostmap-loader" }
+mcfreeze-loader = { path = "../mcfreeze-loader" }
 apb-core        = { git = "https://github.com/fsaintjacques/apb", tag = "v1.1.0" }
 arrow-array     = "58"
 arrow-schema    = "58"

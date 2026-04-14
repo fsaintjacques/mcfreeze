@@ -2,9 +2,9 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "frostmap.nodeAgent.name" . }}
+  name: {{ include "mcfreeze.nodeAgent.name" . }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: node-agent
 rules:
   - apiGroups: ["storage.k8s.io"]
@@ -17,16 +17,16 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "frostmap.nodeAgent.name" . }}
+  name: {{ include "mcfreeze.nodeAgent.name" . }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: node-agent
 subjects:
   - kind: ServiceAccount
-    name: {{ include "frostmap.nodeAgent.name" . }}
+    name: {{ include "mcfreeze.nodeAgent.name" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "frostmap.nodeAgent.name" . }}
+  name: {{ include "mcfreeze.nodeAgent.name" . }}
 {{- end }}

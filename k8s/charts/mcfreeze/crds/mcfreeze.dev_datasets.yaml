@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: datasets.frostmap.dev
+  name: datasets.mcfreeze.dev
 spec:
-  group: frostmap.dev
+  group: mcfreeze.dev
   names:
     kind: Dataset
     listKind: DatasetList

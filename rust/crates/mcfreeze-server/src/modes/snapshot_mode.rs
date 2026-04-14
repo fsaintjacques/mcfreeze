@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use frostmap_format::reader::SnapshotReader;
+use mcfreeze_format::reader::SnapshotReader;
 use prometheus_client::registry::Registry;
 
 use crate::listener::run_listeners;

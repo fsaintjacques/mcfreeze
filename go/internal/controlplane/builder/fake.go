@@ -7,10 +7,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
-// Fake implements Async by running fm load csv synchronously
+// Fake implements Async by running mcf load csv synchronously
 // in Start and storing the result. Used for tests where builds are fast.
 //
 // Concurrency: the internal mutex protects the results map only. Callers
@@ -19,8 +19,8 @@ import (
 type Fake struct {
 	// Data maps dataset name to key-value pairs to include in the snapshot.
 	Data map[string][][2][]byte
-	// FMBinary is the path to the fm binary. Defaults to "fm".
-	FMBinary string
+	// MCFBinary is the path to the mcf binary. Defaults to "mcf".
+	MCFBinary string
 	// Partitions per snapshot. Defaults to 4.
 	Partitions int
 	// OutputBase is the root directory for snapshot output. Each build creates
@@ -53,9 +53,9 @@ func (b *Fake) Start(ctx context.Context, spec api.DatasetSpec, versionID string
 		return handle, fmt.Errorf("fake builder: no test data for dataset %q", spec.Name)
 	}
 
-	fm := b.FMBinary
-	if fm == "" {
-		fm = "fm"
+	mcf := b.MCFBinary
+	if mcf == "" {
+		mcf = "mcf"
 	}
 	partitions := b.Partitions
 	if partitions <= 0 {
@@ -70,7 +70,7 @@ func (b *Fake) Start(ctx context.Context, spec api.DatasetSpec, versionID string
 		fmt.Fprintf(&csv, "%s,%s\n", kv[0], kv[1])
 	}
 
-	cmd := exec.CommandContext(ctx, fm, "load",
+	cmd := exec.CommandContext(ctx, mcf, "load",
 		"-o", outDir,
 		"--partitions", fmt.Sprintf("%d", partitions),
 		"csv",
@@ -78,11 +78,11 @@ func (b *Fake) Start(ctx context.Context, spec api.DatasetSpec, versionID string
 	cmd.Stdin = strings.NewReader(csv.String())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		status := Status{Phase: Failed, Error: fmt.Sprintf("fm load csv failed: %v\n%s", err, out)}
+		status := Status{Phase: Failed, Error: fmt.Sprintf("mcf load csv failed: %v\n%s", err, out)}
 		b.mu.Lock()
 		b.results[handle] = status
 		b.mu.Unlock()
-		return handle, fmt.Errorf("fake builder: fm load csv failed: %v\n%s", err, out)
+		return handle, fmt.Errorf("fake builder: mcf load csv failed: %v\n%s", err, out)
 	}
 
 	b.mu.Lock()

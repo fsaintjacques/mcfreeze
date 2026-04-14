@@ -2,7 +2,7 @@
 
 ## Overview
 
-`fmtctl control-plane` is the authoritative source of truth for dataset and
+`mcfctl control-plane` is the authoritative source of truth for dataset and
 version state. It runs as a single-replica Kubernetes Deployment with
 leader-elected HA. It never touches nodes or disks directly — it delegates
 node-level work to the node-agent and build work to Kubernetes Jobs.
@@ -23,13 +23,13 @@ that maps nodes to their desired assignments and tracks reported state.
 ## Configuration
 
 ```
-fmtctl control-plane \
+mcfctl control-plane \
   --listen :8080 \
-  --namespace frostmap-system \
-  --image frostmap/fm:latest \
+  --namespace mcfreeze-system \
+  --image mcfreeze/mcf:latest \
   --storage-class hyperdisk-ml \
   --disk-size-gb 100 \
-  --builder-pod-template '{"serviceAccountName":"fm-builder"}' \
+  --builder-pod-template '{"serviceAccountName":"mcf-builder"}' \
   --build-timeout 30m
 ```
 
@@ -53,7 +53,7 @@ Scheduling and identity overrides for every builder Job's pod spec:
 
 ```json
 {
-  "serviceAccountName": "fm-builder",
+  "serviceAccountName": "mcf-builder",
   "tolerations": [{"key": "dedicated", "value": "build", "effect": "NoSchedule"}],
   "nodeSelector": {"pool": "build"},
   "affinity": null
@@ -251,12 +251,12 @@ type Async interface {
 ### Kubernetes Job Builder (production)
 
 Creates three objects per build, all with deterministic names
-(`fm-build-`, `fm-config-`, `fm-pvc-` + dataset + version):
+(`mcf-build-`, `mcf-config-`, `mcf-pvc-` + dataset + version):
 
 1. **PVC** — `ReadWriteOnce`, referencing the configured StorageClass.
 2. **ConfigMap** — contains `worker.json` with source spec, output path, and
    partition count.
-3. **Job** — runs `fmtctl job --config /config/worker.json`, mounts the PVC
+3. **Job** — runs `mcfctl job --config /config/worker.json`, mounts the PVC
    at `/output` and the ConfigMap at `/config`. `backoffLimit: 0`,
    `restartPolicy: Never`.
 
@@ -268,7 +268,7 @@ On failure or cancellation, all three objects are deleted (best-effort).
 
 ### Fork Builder (development)
 
-Forks `fm load config` as a subprocess. Output goes to
+Forks `mcf load config` as a subprocess. Output goes to
 `<output-base>/<dataset>/<version>/`. Detects completion by checking for
 `meta.json`. Used for local development and integration tests.
 

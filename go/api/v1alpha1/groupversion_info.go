@@ -7,8 +7,8 @@ import (
 )
 
 var (
-	// GroupVersion is the API group and version for frostmap CRDs.
-	GroupVersion = schema.GroupVersion{Group: "frostmap.dev", Version: "v1alpha1"}
+	// GroupVersion is the API group and version for mcfreeze CRDs.
+	GroupVersion = schema.GroupVersion{Group: "mcfreeze.dev", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add types to the scheme.
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)

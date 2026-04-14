@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"sort"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"

@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/volume"
 )
 
 // helpers

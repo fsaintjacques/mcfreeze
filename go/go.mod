@@ -1,4 +1,4 @@
-module github.com/fsaintjacques/frostmap/go
+module github.com/fsaintjacques/mcfreeze/go
 
 go 1.26.1
 

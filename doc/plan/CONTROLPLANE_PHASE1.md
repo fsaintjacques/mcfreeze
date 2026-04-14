@@ -20,12 +20,12 @@ type VersionBuilder interface {
 ```
 
 **FakeVersionBuilder:** Takes a map of `dataset → []testutil.KV` pairs
-configured at construction. `Build` calls `fm load csv` via
+configured at construction. `Build` calls `mcf load csv` via
 `testutil.BuildSnapshot` (reusing existing infrastructure) and returns the
 snapshot directory.
 
 Production implementation (Phase 4) will create a Kubernetes Job running
-`fm load bq`.
+`mcf load bq`.
 
 ### In-memory store
 
@@ -105,7 +105,7 @@ Methods:
 | `go/internal/controlplane/server.go` | HTTP handlers (assignments, state, admin) |
 | `go/internal/controlplane/orchestrator.go` | Orchestrator tying store + builder |
 | `go/internal/controlplane/builder.go` | VersionBuilder interface |
-| `go/internal/controlplane/fake_builder.go` | FakeVersionBuilder using fm load csv |
+| `go/internal/controlplane/fake_builder.go` | FakeVersionBuilder using mcf load csv |
 | `go/internal/controlplane/store_test.go` | Unit tests for store (long-poll, generation) |
 | `go/internal/controlplane/server_test.go` | HTTP handler unit tests |
 | `go/internal/controlplane/integration_test.go` | Full-loop integration test |
@@ -122,7 +122,7 @@ Methods:
      - HTTPVersionChecker → KV server addr
      - FSVolumeManager + FSMounter
 5. Call orchestrator.BuildAndPromote("users", "v1", "test-node")
-     - FakeVersionBuilder runs fm load csv → snapshot dir
+     - FakeVersionBuilder runs mcf load csv → snapshot dir
      - Store gets assignment with PVName = snapshot dir (symlinked into volume base)
      - Long-poll wakes the node-agent
 6. Wait for control-plane to receive NodeState with PhaseActive

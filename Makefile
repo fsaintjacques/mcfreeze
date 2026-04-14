@@ -8,11 +8,11 @@ CARGO_FLAGS ?=
 
 build:
 	cd rust && cargo build $(CARGO_FLAGS)
-	cd go && go build -o bin/fmtctl ./cmd/fmtctl
+	cd go && go build -o bin/mcfctl ./cmd/mcfctl
 
 release:
 	cd rust && cargo build --release $(CARGO_FLAGS)
-	cd go && go build -o bin/fmtctl ./cmd/fmtctl
+	cd go && go build -o bin/mcfctl ./cmd/mcfctl
 
 # --- Fix ---
 
@@ -55,13 +55,13 @@ envtest-setup: $(SETUP_ENVTEST)
 
 test-integration: build envtest-setup
 	cd go && \
-		FM=$(abspath rust/target/debug/fm) \
+		MCF=$(abspath rust/target/debug/mcf) \
 		KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 		go test -tags integration ./...
 
 test-kind: helm-install-kind
 	kind export kubeconfig --name $(KIND_CLUSTER_NAME)
-	cd go && FROSTMAP_IMAGE=$(FROSTMAP_IMAGE) go test -tags kind -count=1 -v ./...
+	cd go && MCFREEZE_IMAGE=$(MCFREEZE_IMAGE) go test -tags kind -count=1 -v ./...
 
 # --- Code generation ---
 
@@ -70,7 +70,7 @@ test-kind: helm-install-kind
 #   go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest)
 generate:
 	cd go && controller-gen object paths=./api/v1alpha1/...
-	cd go && controller-gen crd paths=./api/v1alpha1/... output:crd:dir=../k8s/charts/frostmap/crds
+	cd go && controller-gen crd paths=./api/v1alpha1/... output:crd:dir=../k8s/charts/mcfreeze/crds
 
 # --- Clean ---
 
@@ -80,19 +80,19 @@ clean:
 
 # --- KIND / Container ---
 
-KIND_CLUSTER_NAME ?= frostmap
+KIND_CLUSTER_NAME ?= mcfreeze
 KIND_PROVIDER     ?= $(shell [ -n "$$GITHUB_ACTIONS" ] && echo docker || \
                        (command -v podman >/dev/null 2>&1 && echo podman || echo docker))
-FROSTMAP_IMAGE    ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/frostmap:dev || echo frostmap:dev)
-FROSTMAP_IMAGE_REPO = $(firstword $(subst :, ,$(FROSTMAP_IMAGE)))
-FROSTMAP_IMAGE_TAG  = $(lastword $(subst :, ,$(FROSTMAP_IMAGE)))
+MCFREEZE_IMAGE    ?= $(shell [ "$(KIND_PROVIDER)" = "podman" ] && echo localhost/mcfreeze:dev || echo mcfreeze:dev)
+MCFREEZE_IMAGE_REPO = $(firstword $(subst :, ,$(MCFREEZE_IMAGE)))
+MCFREEZE_IMAGE_TAG  = $(lastword $(subst :, ,$(MCFREEZE_IMAGE)))
 
 export KIND_EXPERIMENTAL_PROVIDER = $(KIND_PROVIDER)
 
 GKE_PLATFORM ?= linux/arm64
 
 docker-build:
-	$(KIND_PROVIDER) build -t $(FROSTMAP_IMAGE) -f docker/Dockerfile .
+	$(KIND_PROVIDER) build -t $(MCFREEZE_IMAGE) -f docker/Dockerfile .
 
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config k8s/kind/cluster.yaml
@@ -107,24 +107,24 @@ kind-down:
 # tarball and loading via `kind load image-archive`.
 kind-load: docker-build
 ifeq ($(KIND_PROVIDER),podman)
-	podman save $(FROSTMAP_IMAGE) -o /tmp/frostmap-kind.tar
-	kind load image-archive /tmp/frostmap-kind.tar --name $(KIND_CLUSTER_NAME)
-	rm -f /tmp/frostmap-kind.tar
+	podman save $(MCFREEZE_IMAGE) -o /tmp/mcfreeze-kind.tar
+	kind load image-archive /tmp/mcfreeze-kind.tar --name $(KIND_CLUSTER_NAME)
+	rm -f /tmp/mcfreeze-kind.tar
 else
-	kind load docker-image $(FROSTMAP_IMAGE) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(MCFREEZE_IMAGE) --name $(KIND_CLUSTER_NAME)
 endif
 
-# Install (or upgrade) the frostmap chart into the running KIND cluster.
+# Install (or upgrade) the mcfreeze chart into the running KIND cluster.
 # Assumes `make kind-up kind-load` has already run.
-HELM_RELEASE_NAME ?= frostmap
-HELM_RELEASE_NS   ?= frostmap-system
+HELM_RELEASE_NAME ?= mcfreeze
+HELM_RELEASE_NS   ?= mcfreeze-system
 
 helm-install-kind:
-	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/frostmap \
+	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/mcfreeze \
 		-n $(HELM_RELEASE_NS) --create-namespace \
-		-f ./k8s/charts/frostmap/values-kind.yaml \
-		--set image.repository=$(FROSTMAP_IMAGE_REPO) \
-		--set image.tag=$(FROSTMAP_IMAGE_TAG) \
+		-f ./k8s/charts/mcfreeze/values-kind.yaml \
+		--set image.repository=$(MCFREEZE_IMAGE_REPO) \
+		--set image.tag=$(MCFREEZE_IMAGE_TAG) \
 		--wait
 
 helm-uninstall-kind:
@@ -158,7 +158,7 @@ gke-push:
 	podman push $(GKE_IMAGE_REPO):$(GIT_SHA)
 
 helm-install-gke: gke-creds
-	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/frostmap \
+	helm upgrade --install $(HELM_RELEASE_NAME) ./k8s/charts/mcfreeze \
 		-n $(HELM_RELEASE_NS) --create-namespace \
 		-f $(TF_DIR)/values-gke.yaml \
 		--set image.repository=$(GKE_IMAGE_REPO) \
@@ -173,9 +173,9 @@ helm-uninstall-gke: gke-creds
 test-gke: helm-install-gke
 	cd go && \
 		GCP_PROJECT=$(GCP_PROJECT) \
-		FROSTMAP_IMAGE=$(GKE_IMAGE_REPO):$(GIT_SHA) \
+		MCFREEZE_IMAGE=$(GKE_IMAGE_REPO):$(GIT_SHA) \
 		BQ_TABLE=$(GKE_BQ_TABLE) \
-		FROSTMAP_E2E_DESCRIPTOR_URI=$(GKE_DESC_URI) \
+		MCFREEZE_E2E_DESCRIPTOR_URI=$(GKE_DESC_URI) \
 		go test -tags gke -count=1 -v -timeout 20m ./...
 
 gke-down:

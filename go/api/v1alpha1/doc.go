@@ -1,4 +1,4 @@
-// Package v1alpha1 contains API types for the frostmap Kubernetes CRDs.
+// Package v1alpha1 contains API types for the mcfreeze Kubernetes CRDs.
 //
-// +groupName=frostmap.dev
+// +groupName=mcfreeze.dev
 package v1alpha1

@@ -1,7 +1,7 @@
 # GCS bucket for e2e test artifacts (protobuf descriptors, etc.).
 
 resource "google_storage_bucket" "e2e_artifacts" {
-  name     = "${var.project}-frostmap-e2e"
+  name     = "${var.project}-mcfreeze-e2e"
   location = var.region
 
   uniform_bucket_level_access = true

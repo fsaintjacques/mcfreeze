@@ -14,13 +14,13 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
 )
 
 var (
-	gvrDatasets        = schema.GroupVersionResource{Group: "frostmap.dev", Version: "v1alpha1", Resource: "datasets"}
-	gvrDatasetVersions = schema.GroupVersionResource{Group: "frostmap.dev", Version: "v1alpha1", Resource: "datasetversions"}
+	gvrDatasets        = schema.GroupVersionResource{Group: "mcfreeze.dev", Version: "v1alpha1", Resource: "datasets"}
+	gvrDatasetVersions = schema.GroupVersionResource{Group: "mcfreeze.dev", Version: "v1alpha1", Resource: "datasetversions"}
 )
 
 // TestKindE2E_CRDStore exercises the CRD-backed Store end-to-end:
@@ -46,9 +46,9 @@ func TestKindE2E_CRDStore(t *testing.T) {
 	deployService(t, ctx, cs, ns)
 	deployControlPlane(t, ctx, cs, ns)
 	deployDaemonSet(t, ctx, cs, ns)
-	waitForDeploymentReady(t, ctx, cs, ns, "frostmap-control-plane", 3*time.Minute)
+	waitForDeploymentReady(t, ctx, cs, ns, "mcfreeze-control-plane", 3*time.Minute)
 
-	cpLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
+	cpLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=mcfreeze-control-plane", 8080)
 	cpURL := fmt.Sprintf("http://127.0.0.1:%d", cpLocalPort)
 
 	// 2. Apply Dataset CR (configuration), then trigger v1 build (instance).
@@ -67,7 +67,7 @@ func TestKindE2E_CRDStore(t *testing.T) {
 	triggerBuild(t, cpURL, "users", "v1", usersSpec)
 
 	waitForActiveVersion(t, ctx, kc, ns, "users", "v1", 5*time.Minute)
-	waitForDaemonSetReady(t, ctx, cs, ns, "frostmap-node-agent", 2*time.Minute)
+	waitForDaemonSetReady(t, ctx, cs, ns, "mcfreeze-node-agent", 2*time.Minute)
 	waitForRolloutConverged(t, ctx, kc, ns, "users", "v1", 3*time.Minute)
 
 	// 3. Assert Dataset CR exists.
@@ -95,8 +95,8 @@ func TestKindE2E_CRDStore(t *testing.T) {
 
 	// 5. Restart the control-plane and verify state is preserved.
 	restartControlPlane(t, ctx, cs, ns)
-	waitForDeploymentReady(t, ctx, cs, ns, "frostmap-control-plane", 2*time.Minute)
-	_ = portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
+	waitForDeploymentReady(t, ctx, cs, ns, "mcfreeze-control-plane", 2*time.Minute)
+	_ = portForwardPod(t, ctx, cs, config, ns, "app=mcfreeze-control-plane", 8080)
 
 	// State is reconstructed by the controller-manager from CRDs in the
 	// apiserver — no need to talk to the new pod's HTTP endpoint.
@@ -122,7 +122,7 @@ func TestKindE2E_CRDStore(t *testing.T) {
 
 func restartControlPlane(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns string) {
 	t.Helper()
-	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=frostmap-control-plane"})
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=mcfreeze-control-plane"})
 	if err != nil {
 		t.Fatalf("list control-plane pods: %v", err)
 	}
@@ -138,7 +138,7 @@ func restartControlPlane(t *testing.T, ctx context.Context, cs kubernetes.Interf
 	// portForwardPod call doesn't race onto a terminating pod.
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		cur, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=frostmap-control-plane"})
+		cur, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "app=mcfreeze-control-plane"})
 		if err != nil {
 			t.Fatalf("list control-plane pods: %v", err)
 		}

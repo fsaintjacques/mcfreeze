@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
-// Server is a running frostmap-server in catalog mode.
+// Server is a running mcfreeze-server in catalog mode.
 type Server struct {
 	// TCPAddr is the memcache protocol address.
 	TCPAddr string
@@ -24,7 +24,7 @@ type Server struct {
 	cmd         *exec.Cmd
 }
 
-// StartCatalogServer starts frostmap-server in catalog mode with an initial
+// StartCatalogServer starts mcfreeze-server in catalog mode with an initial
 // catalog. It picks free ports for TCP (memcache) and HTTP (/metrics, /version).
 //
 // The server process is killed when the test finishes.
@@ -48,7 +48,7 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	tcpAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
 	httpAddr := fmt.Sprintf("127.0.0.1:%d", ports[1])
 
-	cmd := exec.Command(FMBinary(t), "serve", "catalog",
+	cmd := exec.Command(MCFBinary(t), "serve", "catalog",
 		"--catalog", catalogPath,
 		"--tcp", tcpAddr,
 		"--metrics", httpAddr,
@@ -57,7 +57,7 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start frostmap-server: %v", err)
+		t.Fatalf("failed to start mcfreeze-server: %v", err)
 	}
 	t.Cleanup(func() {
 		cmd.Process.Kill()
@@ -75,7 +75,7 @@ func StartCatalogServer(t *testing.T, entries []api.CatalogEntry) *Server {
 	}
 }
 
-// StartEmptyCatalogServer starts frostmap-server in catalog mode without an
+// StartEmptyCatalogServer starts mcfreeze-server in catalog mode without an
 // initial catalog.json. The server starts with an empty catalog and waits for
 // the first catalog write. Use WriteCatalog to trigger the first load.
 func StartEmptyCatalogServer(t *testing.T) *Server {
@@ -92,7 +92,7 @@ func StartEmptyCatalogServer(t *testing.T) *Server {
 	tcpAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
 	httpAddr := fmt.Sprintf("127.0.0.1:%d", ports[1])
 
-	cmd := exec.Command(FMBinary(t), "serve", "catalog",
+	cmd := exec.Command(MCFBinary(t), "serve", "catalog",
 		"--catalog", catalogPath,
 		"--tcp", tcpAddr,
 		"--metrics", httpAddr,
@@ -101,7 +101,7 @@ func StartEmptyCatalogServer(t *testing.T) *Server {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start frostmap-server: %v", err)
+		t.Fatalf("failed to start mcfreeze-server: %v", err)
 	}
 	t.Cleanup(func() {
 		cmd.Process.Kill()

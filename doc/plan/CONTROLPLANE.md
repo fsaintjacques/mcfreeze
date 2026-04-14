@@ -19,7 +19,7 @@ version lifecycle on top.
 ### Phase 1 — Interfaces, HTTP API shell, full-loop integration test
 
 Extract the `VersionBuilder` interface (build a snapshot from a dataset
-spec). Implement a `FakeVersionBuilder` that shells out to `fm load csv`.
+spec). Implement a `FakeVersionBuilder` that shells out to `mcf load csv`.
 Build the control-plane HTTP server with in-memory state: assignments
 endpoint (long-poll), state reporting endpoint, and a programmatic API to
 trigger builds and promotions from tests.
@@ -61,7 +61,7 @@ version.
 
 Replace in-memory state with Kubernetes CRDs (`DatasetSpec`, `VersionRecord`
 as custom resources). Implement the real `VersionBuilder` that creates a
-Kubernetes Job running `fm load bq`. The in-memory backend remains as the
+Kubernetes Job running `mcf load bq`. The in-memory backend remains as the
 test double — integration tests never require a Kubernetes cluster.
 
 **Exit criterion:** The control-plane can be deployed to a Kubernetes cluster

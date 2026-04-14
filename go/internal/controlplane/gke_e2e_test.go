@@ -29,14 +29,14 @@ import (
 	"k8s.io/client-go/transport/spdy"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
 )
 
 const (
-	// gkeNamespace is the namespace where the Helm chart deploys frostmap.
+	// gkeNamespace is the namespace where the Helm chart deploys mcfreeze.
 	// The test reuses this namespace rather than creating its own.
-	gkeNamespace = "frostmap-system"
+	gkeNamespace = "mcfreeze-system"
 )
 
 // gkeRequireEnv returns the value of the environment variable key, or skips the test.
@@ -53,7 +53,7 @@ func gkeRequireEnv(t *testing.T, key string) string {
 // flow end-to-end on a GKE cluster using the BigQuery public stackoverflow
 // users dataset.
 //
-// Prerequisites: Helm chart already deployed to frostmap-system via
+// Prerequisites: Helm chart already deployed to mcfreeze-system via
 // `make helm-install-gke`.
 //
 //	Terraform uploads compiled stackoverflow.desc to GCS →
@@ -65,10 +65,10 @@ func gkeRequireEnv(t *testing.T, key string) string {
 // Environment variables:
 //
 //	GCP_PROJECT                 — GCP billing project for BigQuery read sessions (required)
-//	FROSTMAP_E2E_DESCRIPTOR_URI — gs:// URI to stackoverflow.desc (required; from terraform output stackoverflow_descriptor_uri)
+//	MCFREEZE_E2E_DESCRIPTOR_URI — gs:// URI to stackoverflow.desc (required; from terraform output stackoverflow_descriptor_uri)
 func TestGKEE2E_GCSProtobufDescriptor(t *testing.T) {
 	gcpProject := gkeRequireEnv(t, "GCP_PROJECT")
-	descriptorURI := gkeRequireEnv(t, "FROSTMAP_E2E_DESCRIPTOR_URI")
+	descriptorURI := gkeRequireEnv(t, "MCFREEZE_E2E_DESCRIPTOR_URI")
 
 	cs, config := gkeClientAndConfig(t)
 	kc := gkeCRClient(t, config)
@@ -77,7 +77,7 @@ func TestGKEE2E_GCSProtobufDescriptor(t *testing.T) {
 	defer cancel()
 
 	// 1. Verify the Helm-deployed control-plane is ready.
-	gkeWaitForDeploymentReady(t, ctx, cs, ns, "frostmap-control-plane", 3*time.Minute)
+	gkeWaitForDeploymentReady(t, ctx, cs, ns, "mcfreeze-control-plane", 3*time.Minute)
 
 	// 2. Port-forward to control-plane.
 	cpLocalPort := gkePortForwardPod(t, ctx, cs, config, ns, "app.kubernetes.io/component=control-plane", 8080)
@@ -117,7 +117,7 @@ func TestGKEE2E_GCSProtobufDescriptor(t *testing.T) {
 	t.Log("v1 is active")
 
 	// 5. Wait for DaemonSet and rollout convergence.
-	gkeWaitForDaemonSetReady(t, ctx, cs, ns, "frostmap-node-agent", 2*time.Minute)
+	gkeWaitForDaemonSetReady(t, ctx, cs, ns, "mcfreeze-node-agent", 2*time.Minute)
 	gkeWaitForRolloutConverged(t, ctx, kc, ns, "so-users", "v1", 3*time.Minute)
 	t.Log("v1 rolled out to all nodes")
 

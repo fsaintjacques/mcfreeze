@@ -14,12 +14,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/ui"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/ui"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/volume"
 )
 
 func runNodeAgent(args []string) {

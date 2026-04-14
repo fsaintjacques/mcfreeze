@@ -1,7 +1,7 @@
 # KIND-specific overrides. Use with:
-#   helm upgrade --install frostmap ./k8s/charts/frostmap \
-#     -n frostmap-system --create-namespace \
-#     -f ./k8s/charts/frostmap/values-kind.yaml --wait
+#   helm upgrade --install mcfreeze ./k8s/charts/mcfreeze \
+#     -n mcfreeze-system --create-namespace \
+#     -f ./k8s/charts/mcfreeze/values-kind.yaml --wait
 
 image:
   tag: dev

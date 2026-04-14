@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use frostmap_format::reader::SnapshotReader;
+use mcfreeze_format::reader::SnapshotReader;
 
 #[derive(Args)]
 pub struct GetArgs {
-    /// Snapshot directory produced by `fm load`
+    /// Snapshot directory produced by `mcf load`
     #[arg(short, long)]
     snapshot: PathBuf,
 

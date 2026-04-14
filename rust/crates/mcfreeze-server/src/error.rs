@@ -4,7 +4,7 @@ pub enum ServeError {
     BlockingTaskPanicked(String),
 
     #[error(transparent)]
-    Format(#[from] frostmap_format::Error),
+    Format(#[from] mcfreeze_format::Error),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

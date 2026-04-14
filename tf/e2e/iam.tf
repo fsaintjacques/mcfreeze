@@ -28,12 +28,12 @@ resource "google_project_iam_member" "gke_nodes_ar_reader" {
 }
 
 # ---------------------------------------------------------------------------
-# Builder SA — used by frostmap build Jobs (BQ read + disk create).
+# Builder SA — used by mcfreeze build Jobs (BQ read + disk create).
 # ---------------------------------------------------------------------------
 
 resource "google_service_account" "builder" {
   account_id   = "${var.cluster_name}-builder"
-  display_name = "Frostmap builder for ${var.cluster_name}"
+  display_name = "McFreeze builder for ${var.cluster_name}"
 }
 
 resource "google_project_iam_member" "builder_bq_reader" {
@@ -60,12 +60,12 @@ resource "google_project_iam_member" "builder_disk_admin" {
   member  = "serviceAccount:${google_service_account.builder.email}"
 }
 
-# K8s SA name must match the Helm release name (default: "frostmap") via
-# the template {{ include "frostmap.builder.name" . }} → "<release>-builder".
+# K8s SA name must match the Helm release name (default: "mcfreeze") via
+# the template {{ include "mcfreeze.builder.name" . }} → "<release>-builder".
 resource "google_service_account_iam_member" "builder_wi" {
   service_account_id = google_service_account.builder.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/frostmap-builder]"
+  member             = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/mcfreeze-builder]"
 }
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ resource "google_service_account_iam_member" "builder_wi" {
 
 resource "google_service_account" "node_agent" {
   account_id   = "${var.cluster_name}-node-agent"
-  display_name = "Frostmap node-agent for ${var.cluster_name}"
+  display_name = "McFreeze node-agent for ${var.cluster_name}"
 }
 
 resource "google_project_iam_member" "node_agent_disk_admin" {
@@ -83,10 +83,10 @@ resource "google_project_iam_member" "node_agent_disk_admin" {
   member  = "serviceAccount:${google_service_account.node_agent.email}"
 }
 
-# K8s SA name must match the Helm release name (default: "frostmap") via
-# the template {{ include "frostmap.nodeAgent.name" . }} → "<release>-node-agent".
+# K8s SA name must match the Helm release name (default: "mcfreeze") via
+# the template {{ include "mcfreeze.nodeAgent.name" . }} → "<release>-node-agent".
 resource "google_service_account_iam_member" "node_agent_wi" {
   service_account_id = google_service_account.node_agent.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/frostmap-node-agent]"
+  member             = "serviceAccount:${var.project}.svc.id.goog[${var.namespace}/mcfreeze-node-agent]"
 }

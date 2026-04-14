@@ -2,7 +2,7 @@
 
 ## Custom Resource Definitions
 
-Three CRDs define the declarative interface. API group: `frostmap.dev`,
+Three CRDs define the declarative interface. API group: `mcfreeze.dev`,
 version: `v1alpha1`.
 
 ### Dataset (`fmd`)
@@ -11,11 +11,11 @@ User-facing. Describes an immutable KV dataset and its build configuration.
 The resource name is the dataset name.
 
 ```yaml
-apiVersion: frostmap.dev/v1alpha1
+apiVersion: mcfreeze.dev/v1alpha1
 kind: Dataset
 metadata:
   name: users
-  namespace: frostmap-system
+  namespace: mcfreeze-system
 spec:
   keyPrefix: users
   shardCount: 64
@@ -81,13 +81,13 @@ System-managed. Tracks a single snapshot version of a Dataset. The spec is
 name is deterministic: `<dataset>-<versionId>`.
 
 ```yaml
-apiVersion: frostmap.dev/v1alpha1
+apiVersion: mcfreeze.dev/v1alpha1
 kind: DatasetVersion
 metadata:
   name: users-v42
-  namespace: frostmap-system
+  namespace: mcfreeze-system
   ownerReferences:
-    - apiVersion: frostmap.dev/v1alpha1
+    - apiVersion: mcfreeze.dev/v1alpha1
       kind: Dataset
       name: users
       controller: true
@@ -99,7 +99,7 @@ spec:
 status:
   state: active
   pvName: pv-users-v42
-  buildJob: fm-build-users-v42
+  buildJob: mcf-build-users-v42
   rollout:
     totalNodes: 150
     convergedNodes: 150
@@ -142,11 +142,11 @@ User-facing. Selects which datasets are served on which nodes via label
 selectors. No status subresource.
 
 ```yaml
-apiVersion: frostmap.dev/v1alpha1
+apiVersion: mcfreeze.dev/v1alpha1
 kind: DatasetBinding
 metadata:
   name: gpu-nodes-users
-  namespace: frostmap-system
+  namespace: mcfreeze-system
 spec:
   nodeSelector:
     matchLabels:
@@ -250,8 +250,8 @@ VAs and only deletes the PV + CR once no VA references the version's PV.
 | `""` (core) | configmaps | create, get, delete |
 | `""` (core) | persistentvolumeclaims | create, get, update, delete, list |
 | `""` (core) | pods | list, delete |
-| `frostmap.dev` | datasets, datasetversions, datasetbindings | create, get, update, delete, list, watch, patch |
-| `frostmap.dev` | datasets/status, datasetversions/status | get, update, patch |
+| `mcfreeze.dev` | datasets, datasetversions, datasetbindings | create, get, update, delete, list, watch, patch |
+| `mcfreeze.dev` | datasets/status, datasetversions/status | get, update, patch |
 | `coordination.k8s.io` | leases | get, list, watch, create, update, patch, delete |
 | `""` (core) | events | create, patch |
 
@@ -280,14 +280,14 @@ Workload Identity (BigQuery read access):
 ```yaml
 serviceAccount:
   builderAnnotations:
-    iam.gke.io/gcp-service-account: fm-builder@my-project.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: mcf-builder@my-project.iam.gserviceaccount.com
 ```
 
 ---
 
 ## Helm Chart
 
-Chart: `k8s/charts/frostmap` (v0.1.0, requires Kubernetes >= 1.27.0).
+Chart: `k8s/charts/mcfreeze` (v0.1.0, requires Kubernetes >= 1.27.0).
 
 ### Deployed Resources
 
@@ -308,8 +308,8 @@ Two containers share an EmptyDir (`catalog`) and a hostPath (`mounts`):
 
 | Container | Image | Privileged | Key mounts |
 |---|---|---|---|
-| `node-agent` | frostmap | yes (root) | catalog (rw), mounts (Bidirectional), /dev |
-| `kv-server` | frostmap (`fm serve catalog`) | no | catalog (ro), mounts (HostToContainer) |
+| `node-agent` | mcfreeze | yes (root) | catalog (rw), mounts (Bidirectional), /dev |
+| `kv-server` | mcfreeze (`mcf serve catalog`) | no | catalog (ro), mounts (HostToContainer) |
 
 Mount propagation: the node-agent mounts block devices under `/mnt/kv` with
 `Bidirectional` propagation, making them visible to the KV server container

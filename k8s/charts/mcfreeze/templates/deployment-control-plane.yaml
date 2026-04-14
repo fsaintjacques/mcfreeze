@@ -1,44 +1,44 @@
-{{- include "frostmap.checkLeaderElection" . -}}
+{{- include "mcfreeze.checkLeaderElection" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "frostmap.controlPlane.name" . }}
+  name: {{ include "mcfreeze.controlPlane.name" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: control-plane
 spec:
   replicas: {{ .Values.controlPlane.replicas }}
   selector:
     matchLabels:
-      {{- include "frostmap.selectorLabels" . | nindent 6 }}
+      {{- include "mcfreeze.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: control-plane
   template:
     metadata:
       labels:
-        {{- include "frostmap.selectorLabels" . | nindent 8 }}
+        {{- include "mcfreeze.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: control-plane
     spec:
-      serviceAccountName: {{ include "frostmap.controlPlane.name" . }}
+      serviceAccountName: {{ include "mcfreeze.controlPlane.name" . }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: control-plane
-          image: {{ include "frostmap.image" . }}
+          image: {{ include "mcfreeze.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - control-plane
             - --listen={{ .Values.controlPlane.listen }}
-            - --image={{ include "frostmap.builderImage" . }}
+            - --image={{ include "mcfreeze.builderImage" . }}
             - --image-pull-policy={{ .Values.image.pullPolicy }}
-            - --storage-class={{ include "frostmap.requireStorageClass" . }}
+            - --storage-class={{ include "mcfreeze.requireStorageClass" . }}
             - --disk-size-gb={{ .Values.controlPlane.diskSizeGB }}
             - --leader-elect={{ .Values.controlPlane.leaderElection }}
             - --metrics-bind-address={{ .Values.controlPlane.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.controlPlane.healthProbeBindAddress }}
-            - --builder-pod-template={{ include "frostmap.builderPodTemplate" . }}
+            - --builder-pod-template={{ include "mcfreeze.builderPodTemplate" . }}
           env:
             - name: NAMESPACE
               valueFrom:

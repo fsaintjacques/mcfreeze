@@ -12,8 +12,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/volume"
 )
 
 const testNamespace = "default"
@@ -36,7 +36,7 @@ func newTestJob() (*Job, *fake.Clientset) {
 		Client:       cs,
 		Volumes:      dm,
 		Namespace:    testNamespace,
-		Image:        "frostmap/fm:dev",
+		Image:        "mcfreeze/mcf:dev",
 		StorageClass: "local-path",
 		DiskSizeGB:   10,
 	}, cs
@@ -51,13 +51,13 @@ func TestJob_Start(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	wantHandle := Handle("fm-build-users-v1")
+	wantHandle := Handle("mcf-build-users-v1")
 	if handle != wantHandle {
 		t.Errorf("handle = %q, want %q", handle, wantHandle)
 	}
 
 	// Verify PVC created.
-	pvc, err := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	pvc, err := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "mcf-pvc-users-v1", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get PVC: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestJob_Start(t *testing.T) {
 	}
 
 	// Verify ConfigMap created with correct worker.json.
-	cm, err := cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "fm-config-users-v1", metav1.GetOptions{})
+	cm, err := cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "mcf-config-users-v1", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get ConfigMap: %v", err)
 	}
@@ -90,25 +90,25 @@ func TestJob_Start(t *testing.T) {
 	}
 
 	// Verify Job created with correct spec.
-	job, err := cs.BatchV1().Jobs(testNamespace).Get(ctx, "fm-build-users-v1", metav1.GetOptions{})
+	job, err := cs.BatchV1().Jobs(testNamespace).Get(ctx, "mcf-build-users-v1", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get Job: %v", err)
 	}
-	if job.Labels["frostmap.io/dataset"] != "users" {
-		t.Errorf("Job label dataset = %q, want %q", job.Labels["frostmap.io/dataset"], "users")
+	if job.Labels["mcfreeze.io/dataset"] != "users" {
+		t.Errorf("Job label dataset = %q, want %q", job.Labels["mcfreeze.io/dataset"], "users")
 	}
-	if job.Labels["frostmap.io/version"] != "v1" {
-		t.Errorf("Job label version = %q, want %q", job.Labels["frostmap.io/version"], "v1")
+	if job.Labels["mcfreeze.io/version"] != "v1" {
+		t.Errorf("Job label version = %q, want %q", job.Labels["mcfreeze.io/version"], "v1")
 	}
 	if *job.Spec.BackoffLimit != 0 {
 		t.Errorf("backoffLimit = %d, want 0", *job.Spec.BackoffLimit)
 	}
 	container := job.Spec.Template.Spec.Containers[0]
-	if container.Image != "frostmap/fm:dev" {
-		t.Errorf("container image = %q, want %q", container.Image, "frostmap/fm:dev")
+	if container.Image != "mcfreeze/mcf:dev" {
+		t.Errorf("container image = %q, want %q", container.Image, "mcfreeze/mcf:dev")
 	}
-	if container.Command[0] != "fmtctl" || container.Command[1] != "job" {
-		t.Errorf("container command = %v, want [fmtctl job ...]", container.Command)
+	if container.Command[0] != "mcfctl" || container.Command[1] != "job" {
+		t.Errorf("container command = %v, want [mcfctl job ...]", container.Command)
 	}
 
 	// Verify volume mounts.
@@ -186,7 +186,7 @@ func TestJob_Poll_Complete(t *testing.T) {
 	cs.BatchV1().Jobs(testNamespace).UpdateStatus(ctx, job, metav1.UpdateOptions{})
 
 	// Simulate PVC bound (so FinalizeBuild works).
-	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "mcf-pvc-users-v1", metav1.GetOptions{})
 	pvName := "pv-users-v1"
 	pvc.Spec.VolumeName = pvName
 	pvc.Status.Phase = corev1.ClaimBound
@@ -203,7 +203,7 @@ func TestJob_Poll_Complete(t *testing.T) {
 			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 			ClaimRef: &corev1.ObjectReference{
-				Name:      "fm-pvc-users-v1",
+				Name:      "mcf-pvc-users-v1",
 				Namespace: testNamespace,
 			},
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
@@ -295,13 +295,13 @@ func TestJob_Cancel(t *testing.T) {
 	}
 
 	// Verify ConfigMap deleted.
-	_, err = cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "fm-config-users-v1", metav1.GetOptions{})
+	_, err = cs.CoreV1().ConfigMaps(testNamespace).Get(ctx, "mcf-config-users-v1", metav1.GetOptions{})
 	if err == nil {
 		t.Error("ConfigMap should be deleted after Cancel")
 	}
 
 	// Verify PVC deleted.
-	_, err = cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	_, err = cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "mcf-pvc-users-v1", metav1.GetOptions{})
 	if err == nil {
 		t.Error("PVC should be deleted after Cancel")
 	}
@@ -334,7 +334,7 @@ func TestJob_Poll_Complete_Idempotent(t *testing.T) {
 	cs.BatchV1().Jobs(testNamespace).UpdateStatus(ctx, job, metav1.UpdateOptions{})
 
 	// Simulate PVC bound.
-	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "fm-pvc-users-v1", metav1.GetOptions{})
+	pvc, _ := cs.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "mcf-pvc-users-v1", metav1.GetOptions{})
 	pvName := "pv-users-v1"
 	pvc.Spec.VolumeName = pvName
 	pvc.Status.Phase = corev1.ClaimBound
@@ -351,7 +351,7 @@ func TestJob_Poll_Complete_Idempotent(t *testing.T) {
 			},
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
 			ClaimRef: &corev1.ObjectReference{
-				Name:      "fm-pvc-users-v1",
+				Name:      "mcf-pvc-users-v1",
 				Namespace: testNamespace,
 			},
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
@@ -391,12 +391,12 @@ func TestResourceName_DNSSanitization(t *testing.T) {
 		prefix, dataset, version string
 		want                     string
 	}{
-		{"fm-build", "users", "v1", "fm-build-users-v1"},
-		{"fm-build", "user_events", "v1", "fm-build-user-events-v1"},
-		{"fm-pvc", "my.dataset", "v2", "fm-pvc-my-dataset-v2"},
-		{"fm-config", "UPPER", "V1", "fm-config-upper-v1"},
-		{"fm-build", "a__b", "v1", "fm-build-a-b-v1"},
-		{"fm-build", "trailing-", "v1", "fm-build-trailing-v1"},
+		{"mcf-build", "users", "v1", "mcf-build-users-v1"},
+		{"mcf-build", "user_events", "v1", "mcf-build-user-events-v1"},
+		{"mcf-pvc", "my.dataset", "v2", "mcf-pvc-my-dataset-v2"},
+		{"mcf-config", "UPPER", "V1", "mcf-config-upper-v1"},
+		{"mcf-build", "a__b", "v1", "mcf-build-a-b-v1"},
+		{"mcf-build", "trailing-", "v1", "mcf-build-trailing-v1"},
 	}
 	for _, tt := range tests {
 		got := resourceName(tt.prefix, tt.dataset, tt.version)
@@ -408,7 +408,7 @@ func TestResourceName_DNSSanitization(t *testing.T) {
 
 func TestResourceName_TruncateNoTrailingHyphen(t *testing.T) {
 	long := strings.Repeat("a", 250)
-	name := resourceName("fm", long, "v1")
+	name := resourceName("mcf", long, "v1")
 	if len(name) > 253 {
 		t.Errorf("name length = %d, want <= 253", len(name))
 	}

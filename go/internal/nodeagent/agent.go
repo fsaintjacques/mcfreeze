@@ -1,4 +1,4 @@
-// Package nodeagent implements the fmtctl node-agent: it watches the
+// Package nodeagent implements the mcfctl node-agent: it watches the
 // control-plane for dataset version assignments, attaches Hyperdisk ML volumes,
 // mounts them read-only, and signals the KV server via catalog.json.
 //
@@ -21,17 +21,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/assignment"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/mount"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/version"
-	"github.com/fsaintjacques/frostmap/go/internal/nodeagent/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/assignment"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/mount"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/version"
+	"github.com/fsaintjacques/mcfreeze/go/internal/nodeagent/volume"
 )
 
 // Config holds all parameters needed to run the node-agent.
 type Config struct {
 	// ControlPlaneURL is the base URL of the control-plane HTTP API,
-	// e.g. "http://fmtctl-control-plane:8080".
+	// e.g. "http://mcfctl-control-plane:8080".
 	ControlPlaneURL string
 	// NodeName is the Kubernetes node name this agent runs on.
 	NodeName string

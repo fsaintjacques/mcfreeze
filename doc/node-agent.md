@@ -2,7 +2,7 @@
 
 ## Overview
 
-`fmtctl node-agent` is the node-side lifecycle manager. One instance runs per
+`mcfctl node-agent` is the node-side lifecycle manager. One instance runs per
 node as a privileged DaemonSet container alongside the KV server. It converges
 the node toward the desired dataset assignments by attaching disks, mounting
 them read-only, writing `catalog.json`, and confirming the KV server has loaded
@@ -18,8 +18,8 @@ report never causes permanent divergence — the next one self-heals.
 ## Configuration
 
 ```
-fmtctl node-agent \
-  -control-plane-url http://frostmap-control-plane:8080 \
+mcfctl node-agent \
+  -control-plane-url http://mcfreeze-control-plane:8080 \
   -node-name $NODE_NAME \
   -mount-base /mnt/kv \
   -catalog-dir /run/kv \
@@ -158,7 +158,7 @@ handles the underlying cloud calls.
 apiVersion: storage.k8s.io/v1
 kind: VolumeAttachment
 metadata:
-  name: fm-va-<pv-name>        # deterministic, lowercase, hyphens
+  name: mcf-va-<pv-name>        # deterministic, lowercase, hyphens
 spec:
   attacher: pd.csi.storage.gke.io
   source:

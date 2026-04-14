@@ -1,5 +1,5 @@
 [package]
-name    = "frostmap-loader"
+name    = "mcfreeze-loader"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ arrow-csv    = "58"
 arrow-schema = "58"
 tracing      = "0.1"
 hdrhistogram = "7"
-frostmap-format = { path = "../frostmap-format" }
+mcfreeze-format = { path = "../mcfreeze-format" }
 bytemuck   = { version = "1", features = ["derive"] }
 thiserror  = "2"
 rayon      = "1"
