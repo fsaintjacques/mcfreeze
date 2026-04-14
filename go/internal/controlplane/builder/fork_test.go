@@ -19,7 +19,7 @@ func TestForkBuilder_StartPollComplete(t *testing.T) {
 	script := createFMScript(t, outBase)
 
 	b := &builder.Fork{
-		FMBinary:   script,
+		MCFBinary:  script,
 		OutputBase: outBase,
 	}
 
@@ -70,7 +70,7 @@ func TestForkBuilder_StartIdempotent(t *testing.T) {
 	script := createFMScript(t, outBase)
 
 	b := &builder.Fork{
-		FMBinary:   script,
+		MCFBinary:  script,
 		OutputBase: outBase,
 	}
 
@@ -110,7 +110,7 @@ func TestForkBuilder_Cancel(t *testing.T) {
 	script := createSleeperScript(t, outBase)
 
 	b := &builder.Fork{
-		FMBinary:    script,
+		MCFBinary:   script,
 		OutputBase:  outBase,
 		GracePeriod: 1 * time.Second,
 	}
@@ -174,7 +174,7 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 
 	// Start a build with builder instance 1.
 	b1 := &builder.Fork{
-		FMBinary:   script,
+		MCFBinary:  script,
 		OutputBase: outBase,
 	}
 
@@ -192,7 +192,7 @@ func TestForkBuilder_RestartRecovery(t *testing.T) {
 	// "Restart": create a new ForkBuilder with the same OutputBase (simulating
 	// control-plane restart). The old builder instance is dropped.
 	b2 := &builder.Fork{
-		FMBinary:   script,
+		MCFBinary:  script,
 		OutputBase: outBase,
 	}
 
