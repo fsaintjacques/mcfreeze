@@ -43,7 +43,7 @@ func TestFullLoop(t *testing.T) {
 	buildBase := t.TempDir()
 
 	b := &builder.Fake{
-		FMBinary:   testutil.FMBinary(t),
+		MCFBinary:  testutil.MCFBinary(t),
 		Partitions: 4,
 		OutputBase: buildBase,
 		Data: map[string][][2][]byte{
