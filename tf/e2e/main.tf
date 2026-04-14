@@ -10,7 +10,7 @@ terraform {
 
   # Uncomment to persist state in GCS:
   # backend "gcs" {
-  #   bucket = "frostmap-tf-state"
+  #   bucket = "mcfreeze-tf-state"
   #   prefix = "e2e"
   # }
 }

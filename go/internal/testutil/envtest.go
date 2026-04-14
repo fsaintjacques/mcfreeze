@@ -15,10 +15,10 @@ import (
 
 	"github.com/go-logr/logr"
 
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
-	"github.com/fsaintjacques/frostmap/go/internal/controller"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controller"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/builder"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -48,7 +48,7 @@ type ControlPlane struct {
 	cancel context.CancelFunc
 }
 
-// NewControlPlane boots envtest, installs the frostmap CRDs, starts a
+// NewControlPlane boots envtest, installs the mcfreeze CRDs, starts a
 // controller-manager with the three Phase 5 reconcilers, registers the given
 // builder.Async, starts the HTTP long-poll server on a random port, and
 // returns a handle. Cleanup is registered with t.Cleanup.
@@ -217,7 +217,7 @@ func (cp *ControlPlane) WaitForVersionState(t *testing.T, dataset, versionID, st
 func crdDirFromCaller() string {
 	_, file, _, _ := runtime.Caller(0)
 	// file = .../go/internal/testutil/envtest.go
-	return filepath.Join(filepath.Dir(file), "..", "..", "..", "k8s", "charts", "frostmap", "crds")
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "k8s", "charts", "mcfreeze", "crds")
 }
 
 // testWriter adapts *testing.T to io.Writer so envtest/zap log output is

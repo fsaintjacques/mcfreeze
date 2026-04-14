@@ -21,8 +21,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  KIND_CLUSTER_NAME: frostmap
-  FROSTMAP_IMAGE: frostmap:dev
+  KIND_CLUSTER_NAME: mcfreeze
+  MCFREEZE_IMAGE: mcfreeze:dev
 
 jobs:
   compile:
@@ -38,15 +38,15 @@ jobs:
         with:
           go-version: stable
           cache-dependency-path: go/go.sum
-      - name: Build fm and fmtctl (debug)
+      - name: Build mcf and mcfctl (debug)
         run: make build
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: frostmap-binaries
+          name: mcfreeze-binaries
           path: |
-            rust/target/debug/fm
-            go/bin/fmtctl
+            rust/target/debug/mcf
+            go/bin/mcfctl
           retention-days: 1
 
   check:
@@ -80,17 +80,17 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
-          name: frostmap-binaries
+          name: mcfreeze-binaries
           path: /tmp/bins
       - name: Stage runtime image context
         run: |
           mkdir -p /tmp/stage
-          cp /tmp/bins/rust/target/debug/fm /tmp/stage/fm
-          cp /tmp/bins/go/bin/fmtctl        /tmp/stage/fmtctl
+          cp /tmp/bins/rust/target/debug/mcf /tmp/stage/mcf
+          cp /tmp/bins/go/bin/mcfctl        /tmp/stage/mcfctl
           cp docker/Dockerfile.runtime      /tmp/stage/Dockerfile
-          chmod +x /tmp/stage/fm /tmp/stage/fmtctl
+          chmod +x /tmp/stage/mcf /tmp/stage/mcfctl
       - name: Build runtime image
-        run: docker build -t ${{ env.FROSTMAP_IMAGE }} /tmp/stage
+        run: docker build -t ${{ env.MCFREEZE_IMAGE }} /tmp/stage
       - name: Install KIND
         uses: helm/kind-action@v1
         with:
@@ -98,15 +98,15 @@ jobs:
       - name: Create cluster
         run: make kind-up
       - name: Load image into kind
-        run: kind load docker-image ${{ env.FROSTMAP_IMAGE }} --name ${{ env.KIND_CLUSTER_NAME }}
+        run: kind load docker-image ${{ env.MCFREEZE_IMAGE }} --name ${{ env.KIND_CLUSTER_NAME }}
       - name: Verify image present in kind node
         run: |
           echo '::group::docker images on runner'
-          docker image ls ${{ env.FROSTMAP_IMAGE }}
+          docker image ls ${{ env.MCFREEZE_IMAGE }}
           echo '::endgroup::'
           echo '::group::containerd images on kind node'
-          docker exec ${{ env.KIND_CLUSTER_NAME }}-control-plane crictl images | grep -i frostmap || {
-            echo "frostmap image NOT found in kind node containerd"
+          docker exec ${{ env.KIND_CLUSTER_NAME }}-control-plane crictl images | grep -i mcfreeze || {
+            echo "mcfreeze image NOT found in kind node containerd"
             docker exec ${{ env.KIND_CLUSTER_NAME }}-control-plane crictl images
             exit 1
           }
@@ -126,7 +126,7 @@ jobs:
           echo '::group::events (all namespaces, sorted)'
           kubectl get events -A --sort-by=.lastTimestamp
           echo '::endgroup::'
-          for ns in frostmap-system default; do
+          for ns in mcfreeze-system default; do
             echo "::group::describe pods ($ns)"
             kubectl -n "$ns" describe pods
             echo '::endgroup::'
@@ -140,12 +140,12 @@ jobs:
             echo '::endgroup::'
           done
           echo '::group::CRDs'
-          kubectl get crd | grep -i frostmap || true
+          kubectl get crd | grep -i mcfreeze || true
           echo '::endgroup::'
           echo '::group::jobs and build CRs (all namespaces)'
           kubectl get jobs -A
-          kubectl get frostmapbuilds -A 2>/dev/null || true
-          kubectl describe frostmapbuilds -A 2>/dev/null || true
+          kubectl get mcfreezebuilds -A 2>/dev/null || true
+          kubectl describe mcfreezebuilds -A 2>/dev/null || true
           echo '::endgroup::'
       - name: Teardown
         if: always()

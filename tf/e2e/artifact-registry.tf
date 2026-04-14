@@ -1,7 +1,7 @@
 # Container image repository for e2e builds.
 
-resource "google_artifact_registry_repository" "frostmap" {
-  repository_id = "frostmap"
+resource "google_artifact_registry_repository" "mcfreeze" {
+  repository_id = "mcfreeze"
   format        = "DOCKER"
   location      = var.region
 

@@ -28,4 +28,4 @@ storageClass:
 nodeAgent:
   csiDriver: pd.csi.storage.gke.io
   mounter: linux
-  mountBase: /var/frostmap/kv
+  mountBase: /var/mcfreeze/kv

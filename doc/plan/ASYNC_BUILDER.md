@@ -223,7 +223,7 @@ New file: `fork_builder.go`.
 
 ```go
 type ForkBuilder struct {
-    FMBinary     string        // path to fm binary, default "fm"
+    MCFBinary     string        // path to mcf binary, default "mcf"
     OutputBase   string        // <OutputBase>/<dataset>/<versionID>/
     GracePeriod  time.Duration // SIGTERM → SIGKILL wait, default 10s
 }
@@ -238,7 +238,7 @@ Start is naturally idempotent).
 3. If `outDir/.build.pid` exists and process alive, return handle (already
    running)
 4. Clean up stale state if needed (dead pid, no meta.json)
-5. `cmd.Start()` the fm process, write pid to `outDir/.build.pid`
+5. `cmd.Start()` the mcf process, write pid to `outDir/.build.pid`
 6. Return `BuildHandle(outDir)`
 
 **Poll:**
@@ -256,7 +256,7 @@ Start is naturally idempotent).
 
 ## Fake builder (tests)
 
-Rewrite `fake_builder.go` to implement `AsyncBuilder`. Runs `fm load csv`
+Rewrite `fake_builder.go` to implement `AsyncBuilder`. Runs `mcf load csv`
 synchronously in `Start` (fast for test data), stores `BuildComplete` in
 an internal map. `Poll` returns stored result. Existing integration tests
 work unchanged via the `BuildAndPromote` convenience wrapper.
@@ -307,7 +307,7 @@ Files:
 - `fork_builder.go`: `ForkBuilder` implementation with pid file convention
 - `fork_builder_test.go`: start/poll/cancel, and simulated restart recovery
 
-Restart recovery test procedure: start a real `fm load csv` subprocess via
+Restart recovery test procedure: start a real `mcf load csv` subprocess via
 `ForkBuilder.Start`, drop the `ForkBuilder` instance (simulating a
 control-plane restart), create a new `ForkBuilder` with the same
 `OutputBase`, call `Poll` with the original handle — verify it detects the

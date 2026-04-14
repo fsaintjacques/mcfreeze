@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use frostmap_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
-use frostmap_format::spill::SpillReader;
-use frostmap_format::writer::{PartitionBuildReady, PartitionWriter, SnapshotFinalizer};
+use mcfreeze_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
+use mcfreeze_format::spill::SpillReader;
+use mcfreeze_format::writer::{PartitionBuildReady, PartitionWriter, SnapshotFinalizer};
 
 use build::IndexBuildPhase;
 use scatter::{Fanout, PartitionDone, ScatterDone, ScatterPhase};
@@ -67,7 +67,7 @@ async fn check_scatter_done(
     let mut data_bytes = 0u64;
 
     for i in 0..n {
-        let dir = frostmap_format::meta::partition_dir(root, layout.n_partitions, i);
+        let dir = mcfreeze_format::meta::partition_dir(root, layout.n_partitions, i);
         let data_path = dir.join("data.bin");
         let spill_path = dir.join("spill.bin");
 
@@ -88,7 +88,7 @@ async fn check_scatter_done(
                 n_keys: n_part,
                 value_sizes: None,
             });
-        } else if frostmap_format::meta::index_path(root).exists() {
+        } else if mcfreeze_format::meta::index_path(root).exists() {
             // index.all exists but no spill — partition was already indexed.
             // We can't know per-partition key counts without index.done, so
             // read it from the phase sentinel if available.
@@ -248,7 +248,7 @@ impl SnapshotLoader {
             let partitions_ready = (0..n)
                 .map(|i| {
                     let dir =
-                        frostmap_format::meta::partition_dir(&self.root, layout.n_partitions, i);
+                        mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
                     PartitionBuildReady::from_existing(dir)
                 })
                 .collect();
@@ -292,7 +292,7 @@ impl SnapshotLoader {
         let n = layout.n_partitions as usize;
         let partitions_ready: Vec<PartitionBuildReady> = (0..n)
             .map(|i| {
-                let dir = frostmap_format::meta::partition_dir(&self.root, layout.n_partitions, i);
+                let dir = mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
                 PartitionBuildReady::from_existing(dir)
             })
             .collect();
@@ -353,7 +353,7 @@ impl SnapshotLoader {
                 v
             });
 
-        let info = frostmap_format::index::UnifiedIndexInfo {
+        let info = mcfreeze_format::index::UnifiedIndexInfo {
             offsets: index_done.index_offsets,
             n_buckets: index_done.index_n_buckets,
         };
@@ -405,7 +405,7 @@ impl SnapshotLoader {
             let partitions_ready: Vec<PartitionBuildReady> = (0..n)
                 .map(|i| {
                     let dir =
-                        frostmap_format::meta::partition_dir(&self.root, layout.n_partitions, i);
+                        mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
                     PartitionBuildReady::from_existing(dir)
                 })
                 .collect();
@@ -470,7 +470,7 @@ impl SnapshotLoader {
         let n = layout.n_partitions as usize;
         (0..n)
             .map(|i| {
-                let dir = frostmap_format::meta::partition_dir(&self.root, layout.n_partitions, i);
+                let dir = mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
                 Ok(PartitionWriter::new_buffered(
                     &dir,
                     DEFAULT_VERIFY_SEED,

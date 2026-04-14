@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use frostmap_format::reader::SnapshotReader;
+use mcfreeze_format::reader::SnapshotReader;
 
 use crate::registry::{ActiveCatalog, Registry};
 use crate::ServeError;
@@ -169,7 +169,7 @@ fn split_prefix(key: &[u8]) -> Result<(&[u8], &[u8]), ServeError> {
 mod tests {
     use super::*;
     use crate::registry::{DatasetHandle, Registry};
-    use frostmap_format::{reader::SnapshotReader, writer::SnapshotWriter};
+    use mcfreeze_format::{reader::SnapshotReader, writer::SnapshotWriter};
     use std::collections::HashMap;
     use tempfile::TempDir;
 

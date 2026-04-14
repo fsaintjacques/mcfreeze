@@ -1,4 +1,4 @@
-// Package api contains the canonical type definitions for fmtctl's wire
+// Package api contains the canonical type definitions for mcfctl's wire
 // contracts.  Both the control-plane and the node-agent import this package.
 package api
 

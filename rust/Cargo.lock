@@ -910,120 +910,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frostmap-bq"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "bytes",
- "frostmap-loader",
- "gcloud-sdk",
- "thiserror",
- "tokio",
- "tonic",
-]
-
-[[package]]
-name = "frostmap-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "base64 0.22.1",
- "clap",
- "frostmap-bq",
- "frostmap-encode",
- "frostmap-format",
- "frostmap-loader",
- "frostmap-server",
- "prost-reflect",
- "rustls",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-log",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "frostmap-encode"
-version = "0.1.0"
-dependencies = [
- "apb-core",
- "arrow-array",
- "arrow-schema",
- "base64 0.22.1",
- "frostmap-loader",
- "gcloud-sdk",
- "percent-encoding",
- "prost-reflect",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "frostmap-format"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "bytes",
- "chrono",
- "log",
- "memmap2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "xxhash-rust",
-]
-
-[[package]]
-name = "frostmap-loader"
-version = "0.1.0"
-dependencies = [
- "arrow-array",
- "arrow-csv",
- "arrow-schema",
- "bytemuck",
- "chrono",
- "frostmap-format",
- "hdrhistogram",
- "hex",
- "itoa",
- "rand",
- "rayon",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "frostmap-server"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "axum 0.7.9",
- "bytes",
- "frostmap-format",
- "humantime",
- "nom",
- "notify",
- "prometheus-client",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "fsevent-sys"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1830,6 +1716,120 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "mcfreeze-bq"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "bytes",
+ "gcloud-sdk",
+ "mcfreeze-loader",
+ "thiserror",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "mcfreeze-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "base64 0.22.1",
+ "clap",
+ "mcfreeze-bq",
+ "mcfreeze-encode",
+ "mcfreeze-format",
+ "mcfreeze-loader",
+ "mcfreeze-server",
+ "prost-reflect",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mcfreeze-encode"
+version = "0.1.0"
+dependencies = [
+ "apb-core",
+ "arrow-array",
+ "arrow-schema",
+ "base64 0.22.1",
+ "gcloud-sdk",
+ "mcfreeze-loader",
+ "percent-encoding",
+ "prost-reflect",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "mcfreeze-format"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "bytes",
+ "chrono",
+ "log",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "mcfreeze-loader"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-csv",
+ "arrow-schema",
+ "bytemuck",
+ "chrono",
+ "hdrhistogram",
+ "hex",
+ "itoa",
+ "mcfreeze-format",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mcfreeze-server"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "humantime",
+ "mcfreeze-format",
+ "nom",
+ "notify",
+ "prometheus-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "memchr"

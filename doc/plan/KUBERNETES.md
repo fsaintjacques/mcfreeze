@@ -13,13 +13,13 @@ All KIND testing uses podman on macOS for local dev and docker in CI.
 
 ### Goal
 
-`make kind-up` creates a cluster. `make kind-load` builds and loads the `fm`
-and `fmtctl` container images. No application code changes.
+`make kind-up` creates a cluster. `make kind-load` builds and loads the `mcf`
+and `mcfctl` container images. No application code changes.
 
 ### Work
 
-- Dockerfile for `fm` (Rust, multi-stage: builder + distroless runtime)
-- Dockerfile for `fmtctl` (Go, multi-stage)
+- Dockerfile for `mcf` (Rust, multi-stage: builder + distroless runtime)
+- Dockerfile for `mcfctl` (Go, multi-stage)
 - KIND cluster config (`kind/cluster.yaml`): single-node, local-path
   StorageClass (ships by default with KIND)
 - Deploy `csi-driver-host-path` into the KIND cluster. This lightweight CSI
@@ -38,16 +38,16 @@ make kind-up kind-load
 kubectl get nodes              # Ready
 kubectl get storageclass       # local-path (default) + csi-hostpath-sc
 kubectl get csidriver          # hostpath.csi.k8s.io
-# verify fm image is pullable inside the cluster
-kubectl run smoke --image=frostmap/fm:dev --restart=Never -- fm --version
+# verify mcf image is pullable inside the cluster
+kubectl run smoke --image=mcfreeze/mcf:dev --restart=Never -- mcf --version
 ```
 
 ### Files
 
 ```
 kind/cluster.yaml
-docker/Dockerfile.fm
-docker/Dockerfile.fmtctl
+docker/Dockerfile.mcf
+docker/Dockerfile.mcfctl
 Makefile                    (new targets)
 .github/workflows/kind.yaml (or equivalent CI)
 ```
@@ -96,7 +96,7 @@ orchestrator.
     `type: Failed, status: True` → `BuildFailed`;
     otherwise → `BuildRunning`.
   - `Cancel(handle)`: delete the Job with `propagationPolicy: Background`
-- `BuildHandle` = Job name (deterministic: `fm-build-<dataset>-<version>`)
+- `BuildHandle` = Job name (deterministic: `mcf-build-<dataset>-<version>`)
 
 ### Test gate (unit)
 
@@ -110,9 +110,9 @@ orchestrator.
 ### Test gate (KIND)
 
 Integration test (build tag `kind`):
-1. Deploy `fm` image into KIND (Phase 0)
+1. Deploy `mcf` image into KIND (Phase 0)
 2. Create a `JobBuilder` + `LocalPathDiskManager` with a real clientset
-3. Build a snapshot from inline CSV via `fm load csv`
+3. Build a snapshot from inline CSV via `mcf load csv`
 4. Poll until complete — PVC bound, Job succeeded, `FinalizeBuild` ran
 5. Verify PV exists with `accessModes: [ReadOnlyMany]`, `claimRef` cleared
 6. Create a reader Pod that mounts the PV read-only and verifies `meta.json`
@@ -207,7 +207,7 @@ catalog.json → KV server serves data via memcache → hot-swap to v2.
   - Deployment: control-plane (orchestrator + HTTP server)
   - DaemonSet: node-agent + KV server (two containers, shared EmptyDir for
     catalog.json)
-  - ServiceAccount + RBAC: `fm-builder` (Job creation), `node-agent`
+  - ServiceAccount + RBAC: `mcf-builder` (Job creation), `node-agent`
     (VolumeAttachment create/delete — cluster-scoped ClusterRole),
     `control-plane` (Job/PVC/PV management)
   - StorageClass: `local-path` (already default in KIND)
@@ -260,9 +260,9 @@ control-plane restarts. `kubectl get datasetspecs` works.
   (natural choice given existing hand-written types in `go/api/types.go`).
   Kubebuilder generates CRD YAML, deepcopy, and OpenAPI validation from
   markers:
-  - `DatasetSpec` (`frostmap.io/v1alpha1`): spec fields from
+  - `DatasetSpec` (`mcfreeze.io/v1alpha1`): spec fields from
     `go/api/types.go`, status with conditions
-  - `DatasetVersion` (`frostmap.io/v1alpha1`): spec (dataset, versionId),
+  - `DatasetVersion` (`mcfreeze.io/v1alpha1`): spec (dataset, versionId),
     status (state, pvName, buildJob, rollout, error, timestamps)
 - Structural schema validation via kubebuilder markers: `shardCount` power
   of 2, `retention` ≥ 1, required fields, enum constraints on `state`.
@@ -391,7 +391,7 @@ Run on real GKE with real Hyperdisk ML disks and multi-node multi-attach.
 - Real `LinuxMounter` instead of `FSMounter`
 - Infrastructure-as-code for test GKE cluster (Terraform or Pulumi):
   - Machine type supporting Hyperdisk ML (C3, N2, etc.)
-  - Workload Identity for `fm-builder` ServiceAccount (BigQuery access)
+  - Workload Identity for `mcf-builder` ServiceAccount (BigQuery access)
   - Node pool with appropriate labels
 
 ### Test gate (GKE)
@@ -438,7 +438,7 @@ the *previous* build's actual usage.
 - Add `DiskSizeGB` field to `DatasetSpec` for explicit per-dataset
   override. Zero means auto (the common case).
 - Record actual snapshot size on build completion:
-  - The `fm` binary already writes `meta.json` with snapshot metadata.
+  - The `mcf` binary already writes `meta.json` with snapshot metadata.
     Add a `size_bytes` field to `meta.json` recording the total snapshot
     size on disk.
   - In `Job.Poll` (or the `DatasetVersionReconciler` in Phase 5), read
@@ -461,7 +461,7 @@ the *previous* build's actual usage.
 - **First build is blind.** Without historical data, the first build uses
   the global default. If the default is too small, the build fails and
   must be retried with a larger `DiskSizeGB` override. A future
-  `--estimate-size` flag on the `fm` binary (dry-run that queries source
+  `--estimate-size` flag on the `mcf` binary (dry-run that queries source
   metadata without writing data) could eliminate this cold-start problem.
 - **BigQuery size estimation** is possible via the Tables API
   (`table.numBytes`), but requires adding a BQ client to the Go
@@ -480,7 +480,7 @@ the *previous* build's actual usage.
 
 ```
 go/api/types.go                          (DiskSizeGB field on DatasetSpec)
-rust/crates/frostmap-cli/src/load.rs     (size_bytes in meta.json)
+rust/crates/mcfreeze-cli/src/load.rs     (size_bytes in meta.json)
 go/internal/controlplane/builder/job.go  (auto-size logic in Start)
 go/internal/controlplane/store.go        (snapshotSizeBytes tracking)
 ```

@@ -33,23 +33,23 @@ import (
 	"k8s.io/client-go/transport/spdy"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
 )
 
 const (
-	defaultFrostmapImage = "frostmap:dev"
+	defaultMcFreezeImage = "mcfreeze:dev"
 	storageClass         = "csi-hostpath-sc"
 	csiDriver            = "hostpath.csi.k8s.io"
 )
 
-// frostmapImageRef honors FROSTMAP_IMAGE so podman-based local dev (which
-// tags images as localhost/frostmap:dev) can override the default.
-func frostmapImageRef() string {
-	if v := os.Getenv("FROSTMAP_IMAGE"); v != "" {
+// mcfreezeImageRef honors MCFREEZE_IMAGE so podman-based local dev (which
+// tags images as localhost/mcfreeze:dev) can override the default.
+func mcfreezeImageRef() string {
+	if v := os.Getenv("MCFREEZE_IMAGE"); v != "" {
 		return v
 	}
-	return defaultFrostmapImage
+	return defaultMcFreezeImage
 }
 
 // TestKindE2E_FullPipeline exercises the complete Phase 3 pipeline in KIND:
@@ -75,10 +75,10 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 	deployDaemonSet(t, ctx, cs, ns)
 
 	// 2. Wait for control-plane Deployment to be ready.
-	waitForDeploymentReady(t, ctx, cs, ns, "frostmap-control-plane", 3*time.Minute)
+	waitForDeploymentReady(t, ctx, cs, ns, "mcfreeze-control-plane", 3*time.Minute)
 
 	// 3. Port-forward to control-plane.
-	cpLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=frostmap-control-plane", 8080)
+	cpLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=mcfreeze-control-plane", 8080)
 	cpURL := fmt.Sprintf("http://127.0.0.1:%d", cpLocalPort)
 	t.Logf("control-plane port-forwarded to %s", cpURL)
 
@@ -103,14 +103,14 @@ func TestKindE2E_FullPipeline(t *testing.T) {
 	t.Log("v1 is active")
 
 	// 6. Wait for DaemonSet to be ready.
-	waitForDaemonSetReady(t, ctx, cs, ns, "frostmap-node-agent", 2*time.Minute)
+	waitForDaemonSetReady(t, ctx, cs, ns, "mcfreeze-node-agent", 2*time.Minute)
 
 	// 7. Wait for node-agent convergence.
 	waitForRolloutConverged(t, ctx, kc, ns, "users", "v1", 3*time.Minute)
 	t.Log("v1 rolled out to all nodes")
 
 	// 8. Verify memcache responses.
-	mcLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=frostmap-node-agent", 11211)
+	mcLocalPort := portForwardPod(t, ctx, cs, config, ns, "app=mcfreeze-node-agent", 11211)
 	mcAddr := fmt.Sprintf("127.0.0.1:%d", mcLocalPort)
 	assertMcGet(t, mcAddr, "users:user-1", "Alice")
 	assertMcGet(t, mcAddr, "users:user-2", "Bob")
@@ -199,7 +199,7 @@ func kindE2ENamespace(t *testing.T, cs kubernetes.Interface) string {
 		vas, _ := cs.StorageV1().VolumeAttachments().List(cleanCtx, metav1.ListOptions{})
 		if vas != nil {
 			for _, va := range vas.Items {
-				if strings.HasPrefix(va.Name, "fm-va-") {
+				if strings.HasPrefix(va.Name, "mcf-va-") {
 					cs.StorageV1().VolumeAttachments().Delete(cleanCtx, va.Name, metav1.DeleteOptions{})
 				}
 			}
@@ -238,19 +238,19 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 
 	// Control-plane ServiceAccount.
 	cs.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-control-plane"},
 	}, metav1.CreateOptions{})
 
 	// Control-plane namespaced Role.
 	cs.RbacV1().Roles(ns).Create(ctx, &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-control-plane"},
 		Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"create", "get", "delete"}},
 			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list", "delete"}},
-			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets", "datasetversions", "datasetbindings"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
-			{APIGroups: []string{"frostmap.dev"}, Resources: []string{"datasets/status", "datasetversions/status"}, Verbs: []string{"get", "update", "patch"}},
+			{APIGroups: []string{"mcfreeze.dev"}, Resources: []string{"datasets", "datasetversions", "datasetbindings"}, Verbs: []string{"create", "get", "update", "delete", "list", "watch", "patch"}},
+			{APIGroups: []string{"mcfreeze.dev"}, Resources: []string{"datasets/status", "datasetversions/status"}, Verbs: []string{"get", "update", "patch"}},
 			// Phase 5: lease-based leader election + events.
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
 			{APIGroups: []string{""}, Resources: []string{"events"}, Verbs: []string{"create", "patch"}},
@@ -258,13 +258,13 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 	}, metav1.CreateOptions{})
 
 	cs.RbacV1().RoleBindings(ns).Create(ctx, &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
-		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "frostmap-control-plane", Namespace: ns}},
-		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "frostmap-control-plane"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-control-plane"},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "mcfreeze-control-plane", Namespace: ns}},
+		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "mcfreeze-control-plane"},
 	}, metav1.CreateOptions{})
 
 	// Control-plane cluster-scoped ClusterRole for PVs.
-	crName := "frostmap-cp-" + ns // unique per test namespace
+	crName := "mcfreeze-cp-" + ns // unique per test namespace
 	cs.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: crName},
 		Rules: []rbacv1.PolicyRule{
@@ -277,18 +277,18 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 
 	cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: crName},
-		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "frostmap-control-plane", Namespace: ns}},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "mcfreeze-control-plane", Namespace: ns}},
 		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: crName},
 	}, metav1.CreateOptions{})
 	t.Cleanup(func() { cs.RbacV1().ClusterRoleBindings().Delete(context.Background(), crName, metav1.DeleteOptions{}) })
 
 	// Node-agent ServiceAccount.
 	cs.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-node-agent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-node-agent"},
 	}, metav1.CreateOptions{})
 
 	// Node-agent ClusterRole for VolumeAttachments.
-	naCRName := "frostmap-na-" + ns
+	naCRName := "mcfreeze-na-" + ns
 	cs.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: naCRName},
 		Rules: []rbacv1.PolicyRule{
@@ -300,7 +300,7 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 
 	cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: naCRName},
-		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "frostmap-node-agent", Namespace: ns}},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "mcfreeze-node-agent", Namespace: ns}},
 		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: naCRName},
 	}, metav1.CreateOptions{})
 	t.Cleanup(func() {
@@ -311,9 +311,9 @@ func deployRBAC(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns s
 func deployService(t *testing.T, ctx context.Context, cs kubernetes.Interface, ns string) {
 	t.Helper()
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-control-plane"},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"app": "frostmap-control-plane"},
+			Selector: map[string]string{"app": "mcfreeze-control-plane"},
 			Ports:    []corev1.ServicePort{{Port: 8080, TargetPort: intstr.FromInt32(8080)}},
 		},
 	}
@@ -326,23 +326,23 @@ func deployControlPlane(t *testing.T, ctx context.Context, cs kubernetes.Interfa
 	t.Helper()
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-control-plane"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-control-plane"},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frostmap-control-plane"}},
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "mcfreeze-control-plane"}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "frostmap-control-plane"}},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "mcfreeze-control-plane"}},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "frostmap-control-plane",
+					ServiceAccountName: "mcfreeze-control-plane",
 					Containers: []corev1.Container{{
 						Name:            "control-plane",
-						Image:           frostmapImageRef(),
+						Image:           mcfreezeImageRef(),
 						ImagePullPolicy: corev1.PullNever,
 						Args: []string{
 							"control-plane",
 							"--listen=:8080",
 							"--namespace=" + ns,
-							"--image=" + frostmapImageRef(),
+							"--image=" + mcfreezeImageRef(),
 							"--image-pull-policy=Never",
 							"--storage-class=" + storageClass,
 							"--disk-size-gb=1",
@@ -391,21 +391,21 @@ func deployDaemonSet(t *testing.T, ctx context.Context, cs kubernetes.Interface,
 	bidir := corev1.MountPropagationBidirectional
 	h2c := corev1.MountPropagationHostToContainer
 	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "frostmap-node-agent"},
+		ObjectMeta: metav1.ObjectMeta{Name: "mcfreeze-node-agent"},
 		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frostmap-node-agent"}},
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "mcfreeze-node-agent"}},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "frostmap-node-agent"}},
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "mcfreeze-node-agent"}},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "frostmap-node-agent",
+					ServiceAccountName: "mcfreeze-node-agent",
 					Containers: []corev1.Container{
 						{
 							Name:            "node-agent",
-							Image:           frostmapImageRef(),
+							Image:           mcfreezeImageRef(),
 							ImagePullPolicy: corev1.PullNever,
 							Args: []string{
 								"node-agent",
-								"--control-plane-url=http://frostmap-control-plane:8080",
+								"--control-plane-url=http://mcfreeze-control-plane:8080",
 								"--csi-driver=" + csiDriver,
 								"--mounter=fs",
 								"--mount-base=/mnt/kv",
@@ -426,9 +426,9 @@ func deployDaemonSet(t *testing.T, ctx context.Context, cs kubernetes.Interface,
 						},
 						{
 							Name:            "kv-server",
-							Image:           frostmapImageRef(),
+							Image:           mcfreezeImageRef(),
 							ImagePullPolicy: corev1.PullNever,
-							Command:         []string{"fm"},
+							Command:         []string{"mcf"},
 							Args: []string{
 								"serve", "catalog",
 								"--catalog=/run/kv/catalog.json",
@@ -579,7 +579,7 @@ func applyDataset(t *testing.T, ctx context.Context, kc ctrlclient.Client, ns st
 }
 
 // kindCRClient builds a controller-runtime client from a rest.Config with the
-// frostmap v1alpha1 scheme registered. Used by the kind e2e tests to read
+// mcfreeze v1alpha1 scheme registered. Used by the kind e2e tests to read
 // Dataset / DatasetVersion CRs directly from the apiserver.
 func kindCRClient(t *testing.T, config *rest.Config) ctrlclient.Client {
 	t.Helper()

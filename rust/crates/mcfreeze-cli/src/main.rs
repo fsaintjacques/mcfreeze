@@ -11,7 +11,7 @@ mod serve;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "fm", about = "Frostmap CLI", version)]
+#[command(name = "mcf", about = "McFreeze CLI", version)]
 struct Cli {
     /// Set log level to DEBUG (default: INFO). Overridden by RUST_LOG.
     #[arg(short, long, global = true)]
@@ -48,7 +48,7 @@ async fn main() {
         .with_target(false)
         .init();
 
-    // Bridge `log` crate calls (frostmap-format) into tracing.
+    // Bridge `log` crate calls (mcfreeze-format) into tracing.
     tracing_log::LogTracer::init().ok();
 
     rustls::crypto::ring::default_provider()

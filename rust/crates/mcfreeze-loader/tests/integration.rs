@@ -3,8 +3,8 @@ use std::io::Write;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tempfile::TempDir;
 
-use frostmap_format::reader::SnapshotReader;
-use frostmap_loader::{CsvSource, LoaderConfig, RawEncodingSource, SnapshotLoader};
+use mcfreeze_format::reader::SnapshotReader;
+use mcfreeze_loader::{CsvSource, LoaderConfig, RawEncodingSource, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -3,7 +3,7 @@ package v1alpha1
 import (
 	"fmt"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -17,7 +17,7 @@ func VersionCRName(dataset, versionID string) string {
 
 // DatasetLabel is the label key set on DatasetVersion CRs to identify
 // the parent dataset for label-selector queries.
-const DatasetLabel = "frostmap.dev/dataset"
+const DatasetLabel = "mcfreeze.dev/dataset"
 
 // ToAPIDatasetSpec converts a Dataset CR to the canonical api.DatasetSpec.
 func ToAPIDatasetSpec(cr *Dataset) api.DatasetSpec {

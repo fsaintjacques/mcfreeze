@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 type fakeState struct {

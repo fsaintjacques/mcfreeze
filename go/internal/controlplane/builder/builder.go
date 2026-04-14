@@ -5,7 +5,7 @@ package builder
 import (
 	"context"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // Handle is an opaque identifier for an in-flight build. Its meaning

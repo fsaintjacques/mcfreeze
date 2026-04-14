@@ -1,7 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub enum LoaderError {
     #[error("format error: {0}")]
-    Format(#[from] frostmap_format::Error),
+    Format(#[from] mcfreeze_format::Error),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

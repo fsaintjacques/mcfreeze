@@ -1,19 +1,19 @@
-Frostmap {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+McFreeze {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
 
 Control-plane:
-  kubectl -n {{ .Release.Namespace }} get deploy {{ include "frostmap.controlPlane.name" . }}
-  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "frostmap.controlPlane.name" . }} -f
+  kubectl -n {{ .Release.Namespace }} get deploy {{ include "mcfreeze.controlPlane.name" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "mcfreeze.controlPlane.name" . }} -f
 
 {{- if .Values.nodeAgent.enabled }}
 
 Node-agent (DaemonSet):
-  kubectl -n {{ .Release.Namespace }} get ds {{ include "frostmap.nodeAgent.name" . }}
+  kubectl -n {{ .Release.Namespace }} get ds {{ include "mcfreeze.nodeAgent.name" . }}
 {{- end }}
 
 CRDs are installed once via helm's crds/ directory and are not removed on
 `helm uninstall`. To upgrade them after a chart bump, apply the crds/
 directory from the chart source directly:
-  kubectl apply -f k8s/charts/frostmap/crds/
+  kubectl apply -f k8s/charts/mcfreeze/crds/
 
 Define a Dataset to start ingesting data:
   kubectl apply -f your-dataset.yaml

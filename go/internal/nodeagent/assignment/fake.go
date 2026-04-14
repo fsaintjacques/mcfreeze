@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // FakeSource returns pre-configured responses via a channel.

@@ -316,7 +316,7 @@ mod tests {
 
     use crate::registry::{ActiveCatalog, DatasetHandle};
     use axum::extract::State;
-    use frostmap_format::writer::SnapshotWriter;
+    use mcfreeze_format::writer::SnapshotWriter;
     use std::collections::HashMap;
     use tempfile::TempDir;
 

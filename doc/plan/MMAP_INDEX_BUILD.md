@@ -2,9 +2,9 @@
 
 ## Motivation
 
-`fm load` on a 14.24M-key / 64-partition snapshot is killed (OOM) during
+`mcf load` on a 14.24M-key / 64-partition snapshot is killed (OOM) during
 the index phase. Root cause is in
-`rust/crates/frostmap-loader/src/build.rs`: `IndexBuildPhase::run` builds
+`rust/crates/mcfreeze-loader/src/build.rs`: `IndexBuildPhase::run` builds
 every partition's bucket table via rayon `par_iter` and collects them into
 a `Vec<Vec<Bucket>>` before calling `write_unified_index`. Peak RSS holds
 all 64 tables plus the per-partition `Vec<RawEntry>` that each build
@@ -79,7 +79,7 @@ Pre-audit required before the change:
 1. Confirm `Layout::partition_of` uses high bits of the `u64`
    fingerprint and `compact_fingerprint` uses the low 32 bits, so that
    dropping the high bits at scatter time is lossless for the in-
-   partition hash. 5-minute read of `frostmap-format::index::fingerprint`
+   partition hash. 5-minute read of `mcfreeze-format::index::fingerprint`
    + `Layout::partition_of`.
 2. Grep for any reader of `SpillRecord::size`. Expected: none.
 
@@ -150,7 +150,7 @@ index phase so that:
 
 Notes:
 
-- `insert` is the existing `frostmap_format::index::insert`, but
+- `insert` is the existing `mcfreeze_format::index::insert`, but
   operating on `&mut [Bucket]` from the mmap slice. The displacement
   logic is unchanged.
 - `psls` stays in RAM because it is ~1 B × n_buckets (~230 KB for 222K
@@ -228,7 +228,7 @@ phase.
 
 ## Code changes
 
-### `rust/crates/frostmap-format`
+### `rust/crates/mcfreeze-format`
 
 - Add `memmap2` dependency (if not already present).
 - New module / function: `index::build_mmap(file: &File, spill: impl
@@ -242,7 +242,7 @@ phase.
   remains. If any test still needs it, move it behind `#[cfg(test)]`
   inside the test module.
 
-### `rust/crates/frostmap-loader`
+### `rust/crates/mcfreeze-loader`
 
 - `build.rs`:
   - `IndexBuildPhase::run` becomes two sub-steps:
@@ -266,7 +266,7 @@ phase.
 - `scatter.rs`: no change. Scatter still produces `data.bin` +
   `spill.bin` per partition and writes `scatter.done`.
 
-### `rust/crates/frostmap-cli`
+### `rust/crates/mcfreeze-cli`
 
 - `load.rs`: no functional change. `--index-parallelism` still drives
   the rayon pool size inside `IndexBuildPhase`. Document that peak RSS
@@ -274,7 +274,7 @@ phase.
 
 ## Tests
 
-### `frostmap-format`
+### `mcfreeze-format`
 
 - `index::build_mmap`:
   - Round-trip: build a small table into a `tempfile::NamedTempFile`,
@@ -284,7 +284,7 @@ phase.
     > 0` and all keys still probe correctly.
   - Empty input: `n_keys == 0` → file length 0, `n_buckets == 0`.
 
-### `frostmap-loader::build`
+### `mcfreeze-loader::build`
 
 - `mmap_build_produces_index_all`: end-to-end via `scatter_and_build`,
   assert `index.all` exists, every partition's bytes are reachable at
@@ -307,7 +307,7 @@ phase.
 
 ### Manual / integration
 
-- Re-run `fm load --output gh-files --partitions 64 --key-column id`
+- Re-run `mcf load --output gh-files --partitions 64 --key-column id`
   against the existing `gh-files/` snapshot (scatter already done) and
   confirm the process completes without OOM. Record peak RSS via
   `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux).
@@ -320,15 +320,15 @@ Single PR against a fresh branch off `main` (orthogonal to k8s work):
    bump `SPILL_MAGIC`, shrink struct to 8 B, update
    `SPILL_RECORD_SIZE`, move `compact_fingerprint` + `offset as u32`
    into `partition_writer` push path, update tests. Land as its own
-   commit; `cargo test -p frostmap-format -p frostmap-loader` green.
-2. Add `memmap2` to `frostmap-format` if absent.
+   commit; `cargo test -p mcfreeze-format -p mcfreeze-loader` green.
+2. Add `memmap2` to `mcfreeze-format` if absent.
 3. Implement `index::build_mmap` + unit tests.
 4. Rewrite `IndexBuildPhase::run` to use it + concat phase.
 5. Delete `write_unified_index` (or move to `#[cfg(test)]`).
 6. Update `build.rs` tests.
 7. Run `cargo fmt`, `cargo clippy --all-targets`, `cargo test -p
-   frostmap-format -p frostmap-loader`.
-8. Manual re-run of `fm load` against a fresh snapshot dir (the existing
+   mcfreeze-format -p mcfreeze-loader`.
+8. Manual re-run of `mcf load` against a fresh snapshot dir (the existing
    `gh-files/spill.bin` uses the old magic and must be re-scattered).
 
 No migration: the on-disk format is unchanged, existing snapshots are

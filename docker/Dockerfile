@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-# --- Rust builder (fm binary) ---
+# --- Rust builder (mcf binary) ---
 FROM rust:1.94-bookworm AS rust-builder
 WORKDIR /src
 
@@ -13,11 +13,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/rust/target,sharing=locked \
     cd rust && \
-    cargo build --release --bin fm && \
-    strip target/release/fm && \
-    cp target/release/fm /fm
+    cargo build --release --bin mcf && \
+    strip target/release/mcf && \
+    cp target/release/mcf /mcf
 
-# --- Go builder (fmtctl binary) ---
+# --- Go builder (mcfctl binary) ---
 FROM golang:1.26-bookworm AS go-builder
 WORKDIR /src
 
@@ -29,10 +29,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
 COPY go/ go/
 RUN --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
     --mount=type=cache,target=/go/pkg/mod,sharing=locked \
-    cd go && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /fmtctl ./cmd/fmtctl
+    cd go && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /mcfctl ./cmd/mcfctl
 
 # --- Runtime ---
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=rust-builder /fm /usr/local/bin/fm
-COPY --from=go-builder /fmtctl /usr/local/bin/fmtctl
-ENTRYPOINT ["fmtctl"]
+COPY --from=rust-builder /mcf /usr/local/bin/mcf
+COPY --from=go-builder /mcfctl /usr/local/bin/mcfctl
+ENTRYPOINT ["mcfctl"]

@@ -1,4 +1,4 @@
-// Package ui provides an embedded web UI for the frostmap node agent.
+// Package ui provides an embedded web UI for the mcfreeze node agent.
 // It exposes dataset state, catalog/kv-server version comparisons, key
 // lookups, and kv-server metrics through a server-side rendered HTML
 // interface backed by html/template and embed.FS.
@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 //go:embed templates/*.html

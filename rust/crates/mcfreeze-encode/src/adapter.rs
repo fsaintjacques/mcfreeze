@@ -4,7 +4,7 @@ use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_schema::DataType;
 
 use apb_core::transcode::Transcoder;
-use frostmap_loader::{
+use mcfreeze_loader::{
     for_each_key, key_column_size, KvBatch, KvSource, RecordBatchSource, SourceMetadata,
 };
 

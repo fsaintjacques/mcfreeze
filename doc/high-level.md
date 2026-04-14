@@ -170,7 +170,7 @@ See [kv-server.md](kv-server.md) for details.
 
 **Language:** Rust
 **Deployment:** Kubernetes Job (runs to completion)
-**Shared library:** `frostmap-format`
+**Shared library:** `mcfreeze-format`
 
 Stateless. Triggered by the control plane, reports completion and exits.
 
@@ -223,7 +223,7 @@ types for the HTTP APIs and `catalog.json`:
 | `NodeState` / `DatasetState` | Full per-node state report: all datasets, phases, versions |
 | `KVVersionResponse` | Response from `GET /version` on the KV server |
 
-### `rust/crates/frostmap-format`
+### `rust/crates/mcfreeze-format`
 
 Rust library crate that is the single implementation of the on-disk format
 (currently format version 4). Compiled into both the snapshot builder (write
@@ -285,24 +285,24 @@ path) and the KV server (read path).
 
 ```
 rust/crates/
-  frostmap-format/       on-disk snapshot format (reader + writer)
-  frostmap-loader/       parallel scatter-gather build pipeline
-  frostmap-bq/           BigQuery Storage Read API source adapter
-  frostmap-encode/       Arrow → protobuf transcoding
-  frostmap-server/       KV server: memcache meta protocol, catalog hot-swap
-  frostmap-cli/          fm binary: load, get, serve subcommands
+  mcfreeze-format/       on-disk snapshot format (reader + writer)
+  mcfreeze-loader/       parallel scatter-gather build pipeline
+  mcfreeze-bq/           BigQuery Storage Read API source adapter
+  mcfreeze-encode/       Arrow → protobuf transcoding
+  mcfreeze-server/       KV server: memcache meta protocol, catalog hot-swap
+  mcfreeze-cli/          mcf binary: load, get, serve subcommands
 
 go/
   api/                   shared wire types (HTTP + catalog.json)
   api/v1alpha1/          Kubernetes CRD type definitions
-  cmd/fmtctl/            single binary: control-plane, node-agent, job subcommands
+  cmd/mcfctl/            single binary: control-plane, node-agent, job subcommands
   internal/
     controlplane/        HTTP server, assignment broker, builder orchestration
     controller/          Kubernetes reconcilers (Dataset, DatasetVersion, DatasetBinding)
     nodeagent/           agent loop, volume/mount/assignment/version subsystems
 
-k8s/charts/frostmap/    Helm chart (CRDs, RBAC, Deployment, DaemonSet, StorageClass)
-docker/                 Dockerfile (fm + fmtctl in a single image)
+k8s/charts/mcfreeze/    Helm chart (CRDs, RBAC, Deployment, DaemonSet, StorageClass)
+docker/                 Dockerfile (mcf + mcfctl in a single image)
 ```
 
 ---

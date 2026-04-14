@@ -1,7 +1,7 @@
 # Deterministic BQ test fixture for e2e builds.
 
 resource "google_bigquery_dataset" "e2e" {
-  dataset_id = "frostmap_e2e"
+  dataset_id = "mcfreeze_e2e"
   location   = var.region
 
   # Auto-delete after 7 days of inactivity to limit cost from stale runs.
@@ -21,7 +21,7 @@ resource "google_bigquery_table" "test_kv" {
 
 # Seed 1000 deterministic rows: key="k-0000" .. "k-0999", value=SHA256(key).
 resource "google_bigquery_job" "seed" {
-  job_id   = "frostmap-e2e-seed-${formatdate("YYYYMMDDhhmmss", timestamp())}"
+  job_id   = "mcfreeze-e2e-seed-${formatdate("YYYYMMDDhhmmss", timestamp())}"
   location = var.region
 
   query {

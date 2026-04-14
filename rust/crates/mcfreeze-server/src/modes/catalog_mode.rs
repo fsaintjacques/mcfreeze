@@ -331,7 +331,7 @@ fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, Ser
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frostmap_format::writer::SnapshotWriter;
+    use mcfreeze_format::writer::SnapshotWriter;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 

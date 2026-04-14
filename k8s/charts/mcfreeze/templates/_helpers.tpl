@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "frostmap.name" -}}
+{{- define "mcfreeze.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Fully qualified app name. Truncated to fit the 63-char DNS label limit.
 */}}
-{{- define "frostmap.fullname" -}}
+{{- define "mcfreeze.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -21,44 +21,44 @@ Fully qualified app name. Truncated to fit the 63-char DNS label limit.
 {{- end -}}
 {{- end -}}
 
-{{- define "frostmap.chart" -}}
+{{- define "mcfreeze.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Common labels applied to every object.
 */}}
-{{- define "frostmap.labels" -}}
-helm.sh/chart: {{ include "frostmap.chart" . }}
-{{ include "frostmap.selectorLabels" . }}
+{{- define "mcfreeze.labels" -}}
+helm.sh/chart: {{ include "mcfreeze.chart" . }}
+{{ include "mcfreeze.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
-{{- define "frostmap.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "frostmap.name" . }}
+{{- define "mcfreeze.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "mcfreeze.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
 Per-component names. Defaults to <fullname>-control-plane / -node-agent.
 */}}
-{{- define "frostmap.controlPlane.name" -}}
-{{- printf "%s-control-plane" (include "frostmap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "mcfreeze.controlPlane.name" -}}
+{{- printf "%s-control-plane" (include "mcfreeze.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "frostmap.nodeAgent.name" -}}
-{{- printf "%s-node-agent" (include "frostmap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "mcfreeze.nodeAgent.name" -}}
+{{- printf "%s-node-agent" (include "mcfreeze.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "frostmap.builder.name" -}}
-{{- printf "%s-builder" (include "frostmap.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "mcfreeze.builder.name" -}}
+{{- printf "%s-builder" (include "mcfreeze.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Resolve the container image. Tag defaults to Chart.AppVersion.
 */}}
-{{- define "frostmap.image" -}}
+{{- define "mcfreeze.image" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
@@ -67,29 +67,29 @@ Resolve the container image. Tag defaults to Chart.AppVersion.
 Builder image used by the control-plane to launch build Jobs. Defaults to
 the same image the chart is installing.
 */}}
-{{- define "frostmap.builderImage" -}}
+{{- define "mcfreeze.builderImage" -}}
 {{- if .Values.controlPlane.builderImage -}}
 {{- .Values.controlPlane.builderImage -}}
 {{- else -}}
-{{- include "frostmap.image" . -}}
+{{- include "mcfreeze.image" . -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 Default control-plane URL for the node-agent: in-cluster service DNS.
 */}}
-{{- define "frostmap.controlPlane.url" -}}
+{{- define "mcfreeze.controlPlane.url" -}}
 {{- if .Values.nodeAgent.controlPlaneURL -}}
 {{- .Values.nodeAgent.controlPlaneURL -}}
 {{- else -}}
-{{- printf "http://%s.%s.svc:%d" (include "frostmap.controlPlane.name" .) .Release.Namespace (int .Values.service.port) -}}
+{{- printf "http://%s.%s.svc:%d" (include "mcfreeze.controlPlane.name" .) .Release.Namespace (int .Values.service.port) -}}
 {{- end -}}
 {{- end -}}
 
 {{/*
 Validation: storageClass is required.
 */}}
-{{- define "frostmap.requireStorageClass" -}}
+{{- define "mcfreeze.requireStorageClass" -}}
 {{- if not .Values.controlPlane.storageClass -}}
 {{- fail "controlPlane.storageClass is required: set it to the StorageClass used for build PVCs (e.g. 'standard' for KIND, 'hyperdisk-ml' for GKE)" -}}
 {{- end -}}
@@ -100,8 +100,8 @@ Validation: storageClass is required.
 Builder pod template: merge the builder SA name with user-provided overrides
 and serialize to compact JSON for the --builder-pod-template flag.
 */}}
-{{- define "frostmap.builderPodTemplate" -}}
-{{- $tmpl := dict "serviceAccountName" (include "frostmap.builder.name" .) -}}
+{{- define "mcfreeze.builderPodTemplate" -}}
+{{- $tmpl := dict "serviceAccountName" (include "mcfreeze.builder.name" .) -}}
 {{- with .Values.controlPlane.builderPodTemplate -}}
 {{- $tmpl = merge . $tmpl -}}
 {{- end -}}
@@ -111,7 +111,7 @@ and serialize to compact JSON for the --builder-pod-template flag.
 {{/*
 Validation: leader-election must be on when running >1 replica.
 */}}
-{{- define "frostmap.checkLeaderElection" -}}
+{{- define "mcfreeze.checkLeaderElection" -}}
 {{- if and (gt (int .Values.controlPlane.replicas) 1) (not .Values.controlPlane.leaderElection) -}}
 {{- fail "controlPlane.leaderElection must be true when controlPlane.replicas > 1" -}}
 {{- end -}}

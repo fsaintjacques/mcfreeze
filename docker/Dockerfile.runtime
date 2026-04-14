@@ -1,4 +1,4 @@
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY fm      /usr/local/bin/fm
-COPY fmtctl  /usr/local/bin/fmtctl
-ENTRYPOINT ["/usr/local/bin/fmtctl"]
+COPY mcf      /usr/local/bin/mcf
+COPY mcfctl  /usr/local/bin/mcfctl
+ENTRYPOINT ["/usr/local/bin/mcfctl"]

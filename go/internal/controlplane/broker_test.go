@@ -3,7 +3,7 @@ package controlplane
 import (
 	"testing"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 func TestBroker_DiffOnSet_IdenticalContentDoesNotBumpGeneration(t *testing.T) {

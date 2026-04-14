@@ -19,7 +19,7 @@ variable "zone" {
 variable "cluster_name" {
   description = "Name of the GKE cluster."
   type        = string
-  default     = "frostmap-e2e"
+  default     = "mcfreeze-e2e"
 }
 
 variable "node_count" {
@@ -35,7 +35,7 @@ variable "machine_type" {
 }
 
 variable "namespace" {
-  description = "Kubernetes namespace where frostmap is deployed."
+  description = "Kubernetes namespace where mcfreeze is deployed."
   type        = string
-  default     = "frostmap-system"
+  default     = "mcfreeze-system"
 }

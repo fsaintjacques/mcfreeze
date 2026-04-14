@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use frostmap_format::{
+use mcfreeze_format::{
     index::Bucket,
     meta::index_path,
     writer::{PartitionBuildReady, SnapshotFinalizer},
@@ -204,8 +204,8 @@ mod tests {
     use super::*;
     use crate::scatter::ScatterPhase;
     use crate::source::VecBatch;
-    use frostmap_format::meta::{Layout, DEFAULT_VERIFY_SEED};
-    use frostmap_format::writer::PartitionWriter;
+    use mcfreeze_format::meta::{Layout, DEFAULT_VERIFY_SEED};
+    use mcfreeze_format::writer::PartitionWriter;
     use std::io::BufWriter;
     use tempfile::TempDir;
 
@@ -219,7 +219,7 @@ mod tests {
     ) -> Vec<PartitionWriter<BufWriter<std::fs::File>>> {
         (0..n as usize)
             .map(|i| {
-                let dir = frostmap_format::meta::partition_dir(root, n, i);
+                let dir = mcfreeze_format::meta::partition_dir(root, n, i);
                 PartitionWriter::new_buffered(&dir, DEFAULT_VERIFY_SEED, 1024 * 1024, 4096).unwrap()
             })
             .collect()
@@ -262,7 +262,7 @@ mod tests {
     async fn spill_files_removed_after_build() {
         let dir = scatter_and_build(&[(b"k", b"v")], 4).await;
         for i in 0..4 {
-            let spill = frostmap_format::meta::partition_dir(dir.path(), 4, i).join("spill.bin");
+            let spill = mcfreeze_format::meta::partition_dir(dir.path(), 4, i).join("spill.bin");
             assert!(!spill.exists(), "spill.bin should be removed: {spill:?}");
         }
     }

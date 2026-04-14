@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/builder"
 )
 
 func TestForkBuilder_StartPollComplete(t *testing.T) {
@@ -227,13 +227,13 @@ func TestForkBuilder_PollNotFound(t *testing.T) {
 
 // --- helpers ---
 
-// createFMScript creates a shell script that mimics fm: reads --config flag,
+// createFMScript creates a shell script that mimics mcf: reads --config flag,
 // extracts output from the JSON config, and writes meta.json.
 func createFMScript(t *testing.T, baseDir string) string {
 	t.Helper()
-	script := filepath.Join(baseDir, "fake-fm.sh")
+	script := filepath.Join(baseDir, "fake-mcf.sh")
 	content := `#!/bin/sh
-# Parse --config flag from: fm load config --config <path>
+# Parse --config flag from: mcf load config --config <path>
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) shift; CONFIG="$1"; shift;;
@@ -254,7 +254,7 @@ echo '{"format_version":4,"hash_algorithm":"xxhash64","verify_seed":0,"partition
 // createSleeperScript creates a script that sleeps indefinitely (for cancel tests).
 func createSleeperScript(t *testing.T, baseDir string) string {
 	t.Helper()
-	script := filepath.Join(baseDir, "sleeper-fm.sh")
+	script := filepath.Join(baseDir, "sleeper-mcf.sh")
 	content := `#!/bin/sh
 # Parse --config flag
 while [ "$#" -gt 0 ]; do
@@ -277,7 +277,7 @@ sleep 3600
 // before writing meta.json (for restart recovery tests).
 func createSlowFMScript(t *testing.T, baseDir string, delay time.Duration) string {
 	t.Helper()
-	script := filepath.Join(baseDir, "slow-fm.sh")
+	script := filepath.Join(baseDir, "slow-mcf.sh")
 	content := `#!/bin/sh
 while [ "$#" -gt 0 ]; do
   case "$1" in

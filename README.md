@@ -1,11 +1,11 @@
-# frostmap
+# mcfreeze
 
 Immutable key-value snapshots built from BigQuery, served at sub-millisecond
 latency across thousands of nodes. Attach a disk — that's the deployment.
 
 ## How It Works
 
-Frostmap separates compute from storage. A snapshot is built once onto a
+McFreeze separates compute from storage. A snapshot is built once onto a
 Hyperdisk ML volume, attached read-only to every node in the fleet, and served
 locally over the memcache meta protocol. No cache cluster, no replication, no
 state to manage.
@@ -50,13 +50,13 @@ state to manage.
 make all
 
 # Load a snapshot from CSV (columns: key, value)
-printf "key,value\nhello,world\nfoo,bar\n" | fm load --output /tmp/snap --partitions 4 csv
+printf "key,value\nhello,world\nfoo,bar\n" | mcf load --output /tmp/snap --partitions 4 csv
 
 # Look up a key
-fm get --snapshot /tmp/snap hello
+mcf get --snapshot /tmp/snap hello
 
 # Serve it
-fm serve snapshot --dir /tmp/snap --tcp 0.0.0.0:7777
+mcf serve snapshot --dir /tmp/snap --tcp 0.0.0.0:7777
 
 # Query (memcache meta protocol)
 echo -ne "mg hello v\r\n" | nc localhost 7777
@@ -64,11 +64,11 @@ echo -ne "mg hello v\r\n" | nc localhost 7777
 
 ## Kubernetes Deployment
 
-Frostmap is Kubernetes-native. Users declare a `Dataset` CR and the platform
+McFreeze is Kubernetes-native. Users declare a `Dataset` CR and the platform
 handles builds, disk provisioning, fleet-wide rollout, and version retirement.
 
 ```yaml
-apiVersion: frostmap.dev/v1alpha1
+apiVersion: mcfreeze.dev/v1alpha1
 kind: Dataset
 metadata:
   name: users
@@ -92,15 +92,15 @@ spec:
 Deploy with Helm:
 
 ```bash
-helm install frostmap k8s/charts/frostmap \
+helm install mcfreeze k8s/charts/mcfreeze \
   --set controlPlane.storageClass=hyperdisk-ml \
-  --set controlPlane.image=frostmap/fm:latest
+  --set controlPlane.image=mcfreeze/mcf:latest
 ```
 
 Target datasets to specific nodes with `DatasetBinding`:
 
 ```yaml
-apiVersion: frostmap.dev/v1alpha1
+apiVersion: mcfreeze.dev/v1alpha1
 kind: DatasetBinding
 metadata:
   name: gpu-nodes-users
@@ -128,23 +128,23 @@ spec:
 
 ```
 rust/crates/
-  frostmap-format/       on-disk snapshot format (reader + writer)
-  frostmap-loader/       parallel scatter-gather build pipeline
-  frostmap-bq/           BigQuery Storage Read API source adapter
-  frostmap-encode/       Arrow → protobuf transcoding
-  frostmap-server/       KV server: memcache meta protocol, catalog hot-swap
-  frostmap-cli/          fm binary: load, get, serve
+  mcfreeze-format/       on-disk snapshot format (reader + writer)
+  mcfreeze-loader/       parallel scatter-gather build pipeline
+  mcfreeze-bq/           BigQuery Storage Read API source adapter
+  mcfreeze-encode/       Arrow → protobuf transcoding
+  mcfreeze-server/       KV server: memcache meta protocol, catalog hot-swap
+  mcfreeze-cli/          mcf binary: load, get, serve
 
 go/
   api/                   shared wire types (HTTP + catalog.json)
   api/v1alpha1/          Kubernetes CRD type definitions
-  cmd/fmtctl/            single binary: control-plane, node-agent, job
+  cmd/mcfctl/            single binary: control-plane, node-agent, job
   internal/
     controlplane/        HTTP server, assignment broker, builder orchestration
     controller/          Kubernetes reconcilers
     nodeagent/           agent loop, volume/mount subsystems
 
-k8s/charts/frostmap/    Helm chart
+k8s/charts/mcfreeze/    Helm chart
 ```
 
 ## Building

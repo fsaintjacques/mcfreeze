@@ -1,7 +1,7 @@
-# Default values for the frostmap Helm chart.
+# Default values for the mcfreeze Helm chart.
 
 image:
-  repository: frostmap
+  repository: mcfreeze
   # tag defaults to .Chart.AppVersion when empty
   tag: ""
   pullPolicy: IfNotPresent

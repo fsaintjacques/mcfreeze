@@ -2,34 +2,34 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "frostmap.nodeAgent.name" . }}
+  name: {{ include "mcfreeze.nodeAgent.name" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "frostmap.labels" . | nindent 4 }}
+    {{- include "mcfreeze.labels" . | nindent 4 }}
     app.kubernetes.io/component: node-agent
 spec:
   selector:
     matchLabels:
-      {{- include "frostmap.selectorLabels" . | nindent 6 }}
+      {{- include "mcfreeze.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: node-agent
   template:
     metadata:
       labels:
-        {{- include "frostmap.selectorLabels" . | nindent 8 }}
+        {{- include "mcfreeze.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: node-agent
     spec:
-      serviceAccountName: {{ include "frostmap.nodeAgent.name" . }}
+      serviceAccountName: {{ include "mcfreeze.nodeAgent.name" . }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
         - name: node-agent
-          image: {{ include "frostmap.image" . }}
+          image: {{ include "mcfreeze.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - node-agent
-            - --control-plane-url={{ include "frostmap.controlPlane.url" . }}
+            - --control-plane-url={{ include "mcfreeze.controlPlane.url" . }}
             - --csi-driver={{ .Values.nodeAgent.csiDriver }}
             - --mounter={{ .Values.nodeAgent.mounter }}
             - --mount-base={{ .Values.nodeAgent.mountBase }}
@@ -60,9 +60,9 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         - name: kv-server
-          image: {{ include "frostmap.image" . }}
+          image: {{ include "mcfreeze.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["fm"]
+          command: ["mcf"]
           args:
             - serve
             - catalog

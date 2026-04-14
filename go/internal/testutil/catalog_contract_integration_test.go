@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 // TestCatalogContract verifies the full Go → Rust contract:
 //
 //  1. Go marshals api.CatalogEntry (same code path as node-agent)
-//  2. frostmap-server reads catalog.json and loads the snapshot
+//  2. mcfreeze-server reads catalog.json and loads the snapshot
 //  3. GET /version returns api.KVVersionResponse with the correct version
 //  4. memcache mg returns the correct value
 func TestCatalogContract(t *testing.T) {
@@ -31,7 +31,7 @@ func TestCatalogContract(t *testing.T) {
 	}
 	snapDir := BuildSnapshot(t, pairs, 4)
 
-	// Start frostmap-server in catalog mode with one dataset.
+	// Start mcfreeze-server in catalog mode with one dataset.
 	entries := []api.CatalogEntry{{
 		Dataset:   "users",
 		KeyPrefix: "users",

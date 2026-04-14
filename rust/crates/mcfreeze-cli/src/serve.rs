@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use frostmap_server::modes::catalog_mode::{run as run_catalog, CatalogConfig};
-use frostmap_server::modes::snapshot_mode::{run as run_snapshot, SnapshotConfig};
+use mcfreeze_server::modes::catalog_mode::{run as run_catalog, CatalogConfig};
+use mcfreeze_server::modes::snapshot_mode::{run as run_snapshot, SnapshotConfig};
 
 // ---------------------------------------------------------------------------
 // CLI definition

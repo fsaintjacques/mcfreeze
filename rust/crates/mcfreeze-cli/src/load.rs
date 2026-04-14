@@ -9,9 +9,9 @@ use tracing::info;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-use frostmap_bq::{BqReadSession, BqSourceConfig};
-use frostmap_encode::config::{ProtobufEncoding, WorkerConfig};
-use frostmap_loader::{
+use mcfreeze_bq::{BqReadSession, BqSourceConfig};
+use mcfreeze_encode::config::{ProtobufEncoding, WorkerConfig};
+use mcfreeze_loader::{
     BoxedRecordBatchSource, CsvSource, KvBatch, KvSource, LoaderConfig, RawEncodingSource,
     SnapshotLoader,
 };
@@ -535,7 +535,7 @@ async fn apply_protobuf_encoding(
     include_key_in_value: bool,
     proto_config: &ProtobufEncoding,
 ) -> Result<(
-    Vec<frostmap_encode::ProtobufEncodingSource<BoxedRecordBatchSource>>,
+    Vec<mcfreeze_encode::ProtobufEncodingSource<BoxedRecordBatchSource>>,
     DescriptorMeta,
 )> {
     let value_fields: Vec<_> = schema
@@ -546,7 +546,7 @@ async fn apply_protobuf_encoding(
         .map(|(_, f)| f.clone())
         .collect();
     let value_schema = arrow::datatypes::Schema::new(value_fields);
-    let tc_output = frostmap_encode::build_transcoder(proto_config, &value_schema)
+    let tc_output = mcfreeze_encode::build_transcoder(proto_config, &value_schema)
         .await
         .context("failed to build protobuf transcoder")?;
 
@@ -565,7 +565,7 @@ async fn apply_protobuf_encoding(
     let sources = sources
         .into_iter()
         .map(|s| {
-            frostmap_encode::ProtobufEncodingSource::new(
+            mcfreeze_encode::ProtobufEncodingSource::new(
                 s,
                 key_col_idx,
                 include_key_in_value,

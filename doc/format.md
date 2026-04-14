@@ -60,7 +60,7 @@ to preserve `0` as the empty-bucket sentinel. The probability of a natural zero
 is `1/2^64` (full) or `1/2^32` (compact) and is negligible.
 
 The verify seed is a non-zero `u64` stored in `meta.json`. The default is
-`xxhash64("frostmap-verify", seed=0)` = `0x517cc1b727220a95`. Using a different
+`xxhash64("mcfreeze-verify", seed=0)` = `0x517cc1b727220a95`. Using a different
 seed from the index fingerprint ensures a compact collision does not imply a
 verify collision.
 

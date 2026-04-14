@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsaintjacques/frostmap/go/api"
+	"github.com/fsaintjacques/mcfreeze/go/api"
 )
 
 func startTestServer(t *testing.T) (*Server, *AssignmentBroker) {

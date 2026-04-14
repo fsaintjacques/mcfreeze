@@ -11,12 +11,12 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/fsaintjacques/frostmap/go/api"
-	v1alpha1 "github.com/fsaintjacques/frostmap/go/api/v1alpha1"
-	"github.com/fsaintjacques/frostmap/go/internal/controller"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/builder"
-	"github.com/fsaintjacques/frostmap/go/internal/controlplane/volume"
+	"github.com/fsaintjacques/mcfreeze/go/api"
+	v1alpha1 "github.com/fsaintjacques/mcfreeze/go/api/v1alpha1"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controller"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/builder"
+	"github.com/fsaintjacques/mcfreeze/go/internal/controlplane/volume"
 	"log/slog"
 
 	"github.com/go-logr/logr"
@@ -44,7 +44,7 @@ func init() {
 // runControlPlane boots the Phase 5 controller-manager: it hosts the
 // DatasetVersion / NodeAssignment / Dataset reconcilers, the leader-elected
 // CronRunnable, and the HTTP long-poll server backed by the shared
-// AssignmentBroker. Single binary; the existing fmtctl control-plane
+// AssignmentBroker. Single binary; the existing mcfctl control-plane
 // subcommand is the only entry point.
 func runControlPlane(args []string) {
 	fs := flag.NewFlagSet("control-plane", flag.ExitOnError)
@@ -80,7 +80,7 @@ func runControlPlane(args []string) {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                  controlPlaneScheme,
 		LeaderElection:          *leaderElect,
-		LeaderElectionID:        "frostmap-control-plane-leader",
+		LeaderElectionID:        "mcfreeze-control-plane-leader",
 		LeaderElectionNamespace: *namespace,
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{*namespace: {}},

@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use frostmap_format::reader::SnapshotReader;
+use mcfreeze_format::reader::SnapshotReader;
 
 use crate::ServeError;
 
@@ -175,7 +175,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frostmap_format::writer::SnapshotWriter;
+    use mcfreeze_format::writer::SnapshotWriter;
     use tempfile::TempDir;
 
     fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {

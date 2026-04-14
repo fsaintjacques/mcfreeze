@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use frostmap_loader::RecordBatchSource;
+use mcfreeze_loader::RecordBatchSource;
 
 use crate::error::BqError;
 use crate::source::BqRecordBatchSource;

@@ -224,8 +224,8 @@ func TestK8sManager_WaitForDevice_ContextCancelled(t *testing.T) {
 }
 
 func TestVAName(t *testing.T) {
-	if got := vaName("pv-users-v1"); got != "fm-va-pv-users-v1" {
-		t.Errorf("vaName = %q, want %q", got, "fm-va-pv-users-v1")
+	if got := vaName("pv-users-v1"); got != "mcf-va-pv-users-v1" {
+		t.Errorf("vaName = %q, want %q", got, "mcf-va-pv-users-v1")
 	}
 }
 

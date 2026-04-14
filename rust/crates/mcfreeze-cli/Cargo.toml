@@ -1,18 +1,18 @@
 [package]
-name    = "frostmap-cli"
+name    = "mcfreeze-cli"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "fm"
+name = "mcf"
 path = "src/main.rs"
 
 [dependencies]
-frostmap-loader  = { path = "../frostmap-loader" }
-frostmap-bq      = { path = "../frostmap-bq" }
-frostmap-encode  = { path = "../frostmap-encode" }
-frostmap-format  = { path = "../frostmap-format" }
-frostmap-server  = { path = "../frostmap-server" }
+mcfreeze-loader  = { path = "../mcfreeze-loader" }
+mcfreeze-bq      = { path = "../mcfreeze-bq" }
+mcfreeze-encode  = { path = "../mcfreeze-encode" }
+mcfreeze-format  = { path = "../mcfreeze-format" }
+mcfreeze-server  = { path = "../mcfreeze-server" }
 arrow                = { version = "58", default-features = false }
 clap                 = { version = "4", features = ["derive"] }
 tokio                = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

@@ -9,15 +9,15 @@ import (
 	"testing"
 )
 
-// FMBinary returns the path to the fm binary. It reads the FM environment
+// MCFBinary returns the path to the mcf binary. It reads the MCF environment
 // variable set by the Makefile's test-integration target. If unset, it
-// falls back to "fm" in $PATH.
-func FMBinary(t *testing.T) string {
+// falls back to "mcf" in $PATH.
+func MCFBinary(t *testing.T) string {
 	t.Helper()
-	if p := os.Getenv("FM"); p != "" {
+	if p := os.Getenv("MCF"); p != "" {
 		return p
 	}
-	return "fm"
+	return "mcf"
 }
 
 // KV is a single key-value pair (both are raw bytes).
@@ -27,7 +27,7 @@ type KV struct {
 }
 
 // BuildSnapshot creates a snapshot directory from the given key-value pairs
-// by invoking `fm load csv` with the data piped via stdin.
+// by invoking `mcf load csv` with the data piped via stdin.
 //
 // It returns the path to the snapshot directory. The directory is
 // automatically cleaned up when the test finishes.
@@ -47,8 +47,8 @@ func BuildSnapshot(t *testing.T, pairs []KV, partitions int) string {
 		fmt.Fprintf(&csv, "%s,%s\n", p.Key, p.Value)
 	}
 
-	fm := FMBinary(t)
-	cmd := exec.Command(fm, "load",
+	mcf := MCFBinary(t)
+	cmd := exec.Command(mcf, "load",
 		"-o", dir,
 		"--partitions", fmt.Sprintf("%d", partitions),
 		"csv",
@@ -56,7 +56,7 @@ func BuildSnapshot(t *testing.T, pairs []KV, partitions int) string {
 	cmd.Stdin = strings.NewReader(csv.String())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("fm load csv failed: %v\n%s", err, out)
+		t.Fatalf("mcf load csv failed: %v\n%s", err, out)
 	}
 
 	return dir

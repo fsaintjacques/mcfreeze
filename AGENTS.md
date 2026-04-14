@@ -10,13 +10,13 @@ managing versions, driving rollout to nodes).
 ## Workspace layout
 
 ```
-frostmap/
+mcfreeze/
 ├── rust/crates/
-│   ├── frostmap-format/    # Snapshot reader/writer (mmap, Robin Hood index, pread)
-│   ├── frostmap-loader/    # Parallel scatter-gather pipeline (KvSource → SnapshotWriter)
-│   ├── frostmap-bq/        # BigQuery Storage Read API source
-│   ├── frostmap-server/    # KV server (memcache meta protocol, catalog.json hot-swap)
-│   └── frostmap-cli/       # `fm` binary: load, serve, inspect, verify
+│   ├── mcfreeze-format/    # Snapshot reader/writer (mmap, Robin Hood index, pread)
+│   ├── mcfreeze-loader/    # Parallel scatter-gather pipeline (KvSource → SnapshotWriter)
+│   ├── mcfreeze-bq/        # BigQuery Storage Read API source
+│   ├── mcfreeze-server/    # KV server (memcache meta protocol, catalog.json hot-swap)
+│   └── mcfreeze-cli/       # `mcf` binary: load, serve, inspect, verify
 ├── go/
 │   ├── api/                # Shared wire types (VersionRecord, NodeAssignment, CatalogEntry, ...)
 │   ├── internal/
@@ -25,7 +25,7 @@ frostmap/
 │   │   ├── volume/         # VolumeManager interface (K8s VolumeAttachment, FS simulation)
 │   │   ├── mount/          # Mounter interface (Linux syscall, FS symlink simulation)
 │   │   └── testutil/       # Helpers: BuildSnapshot, StartCatalogServer
-│   └── cmd/fmtctl/         # Binary entry point (subcommands: node-agent, control-plane)
+│   └── cmd/mcfctl/         # Binary entry point (subcommands: node-agent, control-plane)
 └── doc/
     ├── FORMAT.md           # On-disk snapshot format spec
     ├── HIGHLEVEL.md        # Product overview and architecture
@@ -33,7 +33,7 @@ frostmap/
     └── plan/               # Implementation plans per feature/phase
 ```
 
-Binaries: `fm` (Rust, snapshot builder/server) and `fmtctl` (Go, control plane).
+Binaries: `mcf` (Rust, snapshot builder/server) and `mcfctl` (Go, control plane).
 
 ## Build and test
 
@@ -41,14 +41,14 @@ Binaries: `fm` (Rust, snapshot builder/server) and `fmtctl` (Go, control plane).
 make all              # Build all binaries (Rust release + Go)
 make test             # Run all tests (unit + integration)
 make test-unit        # Unit tests only (no binary prereqs)
-make test-integration # Integration tests (builds fm first)
+make test-integration # Integration tests (builds mcf first)
 ```
 
 Running Go tests directly:
 
 ```bash
 cd go && go test ./...                              # unit tests
-cd go && FM=/path/to/fm go test -tags integration ./...  # integration tests
+cd go && MCF=/path/to/mcf go test -tags integration ./...  # integration tests
 ```
 
 Running Rust tests directly:
@@ -57,13 +57,13 @@ Running Rust tests directly:
 cd rust && cargo test
 ```
 
-Integration tests require the `fm` binary on PATH or via the `FM` env var.
+Integration tests require the `mcf` binary on PATH or via the `MCF` env var.
 
 ## Architecture invariants
 
 - **Rust and Go are independent.** They share no code. The only contract
   is the on-disk format (`meta.json`, `index.all`, `data.bin`) and the
-  `catalog.json` file format. The Go side shells out to `fm` for builds.
+  `catalog.json` file format. The Go side shells out to `mcf` for builds.
 - **The control plane never touches disks or nodes directly.** It delegates
   build work to builders (K8s Jobs or forked processes) and node-level work
   to node-agents.
