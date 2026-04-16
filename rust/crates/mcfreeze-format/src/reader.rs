@@ -197,6 +197,18 @@ impl SnapshotReader {
         let fp = fingerprint(key);
         self.partition(self.layout.partition_of(fp)).get(key, fp)
     }
+
+    /// Synchronously populate the index mmap into the page cache.
+    ///
+    /// Issues `MADV_POPULATE_READ` (Linux 5.14+), which blocks until every
+    /// page of `index.all` is resident. Intended to be called from a blocking
+    /// context immediately after `open` so the first serving request does not
+    /// page-fault against cold storage. No-op on non-Linux targets and on
+    /// kernels that do not support the hint.
+    pub fn prewarm_index(&self) {
+        #[cfg(target_os = "linux")]
+        let _ = self.index_mmap.advise(memmap2::Advice::PopulateRead);
+    }
 }
 
 // ---------------------------------------------------------------------------

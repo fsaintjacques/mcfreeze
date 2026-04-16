@@ -38,8 +38,14 @@ pub struct DatasetHandle {
 
 impl DatasetHandle {
     /// Open the snapshot at `dir` and wrap it in a named handle.
+    ///
+    /// Pre-warms the index mmap synchronously so the first request against the
+    /// new handle does not page-fault against cold storage. Callers must run
+    /// this on a blocking-friendly context (the catalog builder uses
+    /// `spawn_blocking`).
     pub fn open(name: String, version: String, dir: &Path) -> Result<Self, ServeError> {
         let reader = SnapshotReader::open(dir)?;
+        reader.prewarm_index();
         Ok(Self {
             name,
             version,
