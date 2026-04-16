@@ -157,7 +157,10 @@ impl SnapshotReader {
         let index_mmap = unsafe { MmapOptions::new().map(&idx_file)? };
 
         #[cfg(target_os = "linux")]
-        let _ = index_mmap.advise(memmap2::Advice::HugePage);
+        {
+            let _ = index_mmap.advise(memmap2::Advice::Random);
+            let _ = index_mmap.advise(memmap2::Advice::HugePage);
+        }
 
         let mut data_files = Vec::with_capacity(layout.n_partitions as usize);
         let mut ranges = Vec::with_capacity(layout.n_partitions as usize);
