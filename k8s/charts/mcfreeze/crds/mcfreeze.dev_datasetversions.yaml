@@ -144,10 +144,6 @@ spec:
                   - type
                   type: object
                 type: array
-              descriptor:
-                description: Descriptor is a base64-encoded FileDescriptorSet for
-                  protobuf-encoded snapshots.
-                type: string
               diskUrl:
                 description: DiskURL is the cloud disk resource URL (set by the build
                   job on completion).
@@ -155,9 +151,13 @@ spec:
               error:
                 description: Error contains the failure reason when State is "failed".
                 type: string
-              messageName:
-                description: MessageName is the fully-qualified protobuf message name.
-                type: string
+              meta:
+                description: |-
+                  Meta is the verbatim contents of the snapshot's meta.json, stored so
+                  downstream consumers (scheduler, node-agent, KV server) can derive
+                  fields like IndexBytes, protobuf Descriptor, per-partition sizes, etc.
+                  without the CRD growing a new field per derived value.
+                x-kubernetes-preserve-unknown-fields: true
               pvName:
                 description: PVName is the Kubernetes PersistentVolume name (set on
                   transition to ready).

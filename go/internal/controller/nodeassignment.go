@@ -160,6 +160,8 @@ func (r *NodeAssignmentReconciler) syncBroker(ctx context.Context, namespace str
 			datasets[v.Spec.Dataset] = info
 		}
 
+		descriptor, messageName, indexBytes := parseMetaFields(v.Status.Meta)
+
 		allAssignments = append(allAssignments, datasetAssignment{
 			NodeAssignment: api.NodeAssignment{
 				Dataset:   v.Spec.Dataset,
@@ -171,9 +173,10 @@ func (r *NodeAssignmentReconciler) syncBroker(ctx context.Context, namespace str
 					State:       api.StateActive,
 					ShardCount:  v.Spec.ShardCount,
 					CreatedAt:   v.CreationTimestamp.Time,
-					Descriptor:  v.Status.Descriptor,
-					MessageName: v.Status.MessageName,
+					Descriptor:  descriptor,
+					MessageName: messageName,
 					DiskURL:     v.Status.DiskURL,
+					IndexBytes:  indexBytes,
 				},
 			},
 			DatasetLabels: info.labels,

@@ -140,6 +140,9 @@ type VersionRecord struct {
 	// MessageName is the fully-qualified protobuf message name
 	// (e.g. "mypackage.MyMessage"). Empty when Descriptor is empty.
 	MessageName string `json:"message_name,omitempty"`
+	// IndexBytes is the on-disk size of the snapshot's index.all, used by the
+	// scheduler for per-node RAM admission. Zero for unknown / legacy builds.
+	IndexBytes int64 `json:"index_bytes,omitempty"`
 }
 
 // CatalogEntry is one per-dataset entry written to catalog.json on the shared
