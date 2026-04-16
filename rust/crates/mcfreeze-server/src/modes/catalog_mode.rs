@@ -17,6 +17,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use prometheus_client::registry::Registry;
 use tokio::sync::{mpsc, oneshot};
@@ -43,6 +44,11 @@ pub struct CatalogConfig {
     pub semver: String,
     /// Address to expose Prometheus `/metrics` on, if any.
     pub metrics_addr: Option<SocketAddr>,
+    /// Close connections that have been idle (no bytes from the client) for
+    /// longer than this. Bounds how long a silent client may pin the
+    /// `Arc<ActiveCatalog>` from a prior generation (and its index mmap).
+    /// `None` disables the timeout.
+    pub idle_timeout: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +125,7 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         cfg.semver,
         generation,
         metrics,
+        cfg.idle_timeout,
     )
     .await?;
     Ok(())

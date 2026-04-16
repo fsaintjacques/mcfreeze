@@ -71,6 +71,14 @@ const WRITE_BUF_INIT: usize = 64 * 1024;
 ///
 /// At least one of `uds_path` / `tcp_addr` should be `Some`; if both are
 /// `None` the function returns immediately with `Ok(())`.
+///
+/// `idle_timeout` bounds how long a connection may block waiting for the
+/// next command. Closing idle connections is what releases the
+/// `Arc<ActiveCatalog>` a connection pinned on its last request — without
+/// this, a silently-idle client can retain a stale catalog generation
+/// indefinitely, holding its `index.all` mmap resident and defeating the
+/// "index lives in page cache" invariant at swap time. `None` disables the
+/// timeout.
 pub async fn run_listeners(
     factory: Arc<dyn LookupFactory>,
     uds_path: Option<PathBuf>,
@@ -78,6 +86,7 @@ pub async fn run_listeners(
     semver: String,
     generation: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
+    idle_timeout: Option<Duration>,
 ) -> std::io::Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -91,7 +100,7 @@ pub async fn run_listeners(
         let generation = Arc::clone(&generation);
         let metrics = Arc::clone(&metrics);
         tasks.spawn(async move {
-            accept_uds(listener, factory, semver, generation, metrics).await;
+            accept_uds(listener, factory, semver, generation, metrics, idle_timeout).await;
         });
     }
 
@@ -103,7 +112,7 @@ pub async fn run_listeners(
         let generation = Arc::clone(&generation);
         let metrics = Arc::clone(&metrics);
         tasks.spawn(async move {
-            accept_tcp(listener, factory, semver, generation, metrics).await;
+            accept_tcp(listener, factory, semver, generation, metrics, idle_timeout).await;
         });
     }
 
@@ -123,6 +132,11 @@ pub async fn run_listeners(
 /// connection, or an unrecoverable error occurs.
 ///
 /// `transport` is `"uds"` or `"tcp"` and is used solely for metric labels.
+///
+/// `idle_timeout` bounds the time a connection may block in `read_buf` with
+/// no new bytes arriving. On expiry the connection is closed, which releases
+/// any stale `Arc<ActiveCatalog>` that this connection's `Lookup` was
+/// pinning. `None` disables the timeout.
 pub async fn handle_connection<IO>(
     mut io: IO,
     mut lookup: Box<dyn Lookup>,
@@ -130,6 +144,7 @@ pub async fn handle_connection<IO>(
     generation: u64,
     metrics: Arc<Metrics>,
     transport: &'static str,
+    idle_timeout: Option<Duration>,
 ) where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
@@ -141,8 +156,21 @@ pub async fn handle_connection<IO>(
     let mut write_buf = BytesMut::with_capacity(WRITE_BUF_INIT);
 
     'outer: loop {
-        // Block until at least one byte arrives (or EOF / error).
-        match io.read_buf(&mut read_buf).await {
+        // Block until at least one byte arrives (or EOF / error). A client
+        // that holds the connection open without sending anything pins the
+        // catalog generation it last saw; the idle timeout bounds that
+        // retention.
+        let read_result = match idle_timeout {
+            Some(d) => match tokio::time::timeout(d, io.read_buf(&mut read_buf)).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::debug!(transport, "connection idle timeout");
+                    break;
+                }
+            },
+            None => io.read_buf(&mut read_buf).await,
+        };
+        match read_result {
             Ok(0) => break, // clean EOF
             Ok(_) => {}
             Err(e) => {
@@ -207,6 +235,7 @@ async fn accept_uds(
     semver: String,
     generation: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
+    idle_timeout: Option<Duration>,
 ) {
     loop {
         match listener.accept().await {
@@ -218,7 +247,8 @@ async fn accept_uds(
                 let gen = generation.load(Ordering::Relaxed);
                 let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, gen, metrics, "uds").await;
+                    handle_connection(stream, lookup, semver, gen, metrics, "uds", idle_timeout)
+                        .await;
                 });
             }
             Err(e) => {
@@ -235,6 +265,7 @@ async fn accept_tcp(
     semver: String,
     generation: Arc<AtomicU64>,
     metrics: Arc<Metrics>,
+    idle_timeout: Option<Duration>,
 ) {
     loop {
         match listener.accept().await {
@@ -246,7 +277,8 @@ async fn accept_tcp(
                 let gen = generation.load(Ordering::Relaxed);
                 let metrics = Arc::clone(&metrics);
                 tokio::spawn(async move {
-                    handle_connection(stream, lookup, semver, gen, metrics, "tcp").await;
+                    handle_connection(stream, lookup, semver, gen, metrics, "tcp", idle_timeout)
+                        .await;
                 });
             }
             Err(e) => {
@@ -322,6 +354,7 @@ mod tests {
             0,
             noop_metrics(),
             "tcp",
+            None,
         ));
 
         let (mut rd, mut wr) = tokio::io::split(client);
@@ -375,6 +408,7 @@ mod tests {
             0,
             noop_metrics(),
             "tcp",
+            None,
         ));
 
         let (mut rd, mut wr) = tokio::io::split(client);
@@ -429,5 +463,57 @@ mod tests {
         let lookup = MockLookup::new(&[]);
         let out = roundtrip(lookup, b"BADCMD\r\n").await;
         assert_eq!(out, b"ERROR\r\n");
+    }
+
+    // --- idle timeout ---
+
+    /// A silent client holding the connection open must be closed once
+    /// `idle_timeout` elapses. Without this, the connection's `Lookup`
+    /// keeps its last-seen `Arc<ActiveCatalog>` alive, pinning the old
+    /// index mmap across catalog swaps indefinitely.
+    #[tokio::test]
+    async fn idle_timeout_closes_silent_connection() {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(handle_connection(
+            server,
+            MockLookup::new(&[]),
+            "0.1.0".into(),
+            0,
+            noop_metrics(),
+            "tcp",
+            Some(Duration::from_millis(50)),
+        ));
+
+        // Client sends nothing. Server must time out and close.
+        // Keeping `client` alive means EOF comes only from the server's drop.
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await;
+        assert!(
+            result.is_ok(),
+            "handle_connection should return after idle timeout"
+        );
+        drop(client);
+    }
+
+    /// Activity before the timeout window should reset the idle clock:
+    /// a normal request-reply cycle must not be interrupted by the timeout.
+    #[tokio::test]
+    async fn idle_timeout_does_not_interrupt_active_traffic() {
+        let lookup = MockLookup::new(&[(b"k", b"v")]);
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(handle_connection(
+            server,
+            lookup,
+            "0.1.0".into(),
+            0,
+            noop_metrics(),
+            "tcp",
+            Some(Duration::from_secs(5)),
+        ));
+
+        let (mut rd, mut wr) = tokio::io::split(client);
+        wr.write_all(b"mg k\r\nquit\r\n").await.unwrap();
+        let mut out = Vec::new();
+        rd.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"VA 1\r\nv\r\n");
     }
 }

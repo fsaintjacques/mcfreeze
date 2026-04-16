@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mcfreeze_format::reader::SnapshotReader;
 use prometheus_client::registry::Registry;
@@ -31,6 +32,9 @@ pub struct SnapshotConfig {
     pub semver: String,
     /// Address to expose Prometheus `/metrics` on, if any.
     pub metrics_addr: Option<SocketAddr>,
+    /// Close connections that have been idle (no bytes from the client) for
+    /// longer than this. `None` disables the timeout.
+    pub idle_timeout: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +75,7 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
         cfg.semver,
         generation,
         metrics,
+        cfg.idle_timeout,
     )
     .await?;
     Ok(())
