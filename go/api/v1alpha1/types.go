@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -183,11 +185,16 @@ type DatasetVersionStatus struct {
 	// DiskURL is the cloud disk resource URL (set by the build job on completion).
 	DiskURL string `json:"diskUrl,omitempty"`
 
-	// Descriptor is a base64-encoded FileDescriptorSet for protobuf-encoded snapshots.
-	Descriptor string `json:"descriptor,omitempty"`
-
-	// MessageName is the fully-qualified protobuf message name.
-	MessageName string `json:"messageName,omitempty"`
+	// Meta is the verbatim contents of the snapshot's meta.json, stored so
+	// downstream consumers (scheduler, node-agent, KV server) can derive
+	// fields like IndexBytes, protobuf Descriptor, per-partition sizes, etc.
+	// without the CRD growing a new field per derived value.
+	//
+	// Set on transition to ready. Opaque to the CRD schema
+	// (`x-kubernetes-preserve-unknown-fields`).
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Meta json.RawMessage `json:"meta,omitempty"`
 
 	// Error contains the failure reason when State is "failed".
 	Error string `json:"error,omitempty"`

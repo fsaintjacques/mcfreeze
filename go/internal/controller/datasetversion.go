@@ -204,21 +204,23 @@ func (r *DatasetVersionReconciler) reconcileBuilding(ctx context.Context, v *v1a
 			}
 		}
 
-		// Optional descriptor extraction (local builds only).
-		var descriptor, msgName string
+		// Read meta.json verbatim (local builds only — controller has no
+		// filesystem access to a PV-backed snapshot). Downstream consumers
+		// derive fields like Descriptor, MessageName, and IndexBytes from
+		// Status.Meta without the CRD growing a field per derived value.
+		var metaJSON []byte
 		if snapPath != "" {
-			descriptor, msgName = readDescriptorFromMeta(snapPath)
+			if data, err := os.ReadFile(filepath.Join(snapPath, "meta.json")); err == nil {
+				metaJSON = data
+			}
 		}
 
 		patch := client.MergeFrom(v.DeepCopy())
 		v.Status.State = string(api.StateReady)
 		v.Status.PVName = pvName
 		v.Status.SnapshotPath = snapPath
-		if descriptor != "" {
-			v.Status.Descriptor = descriptor
-		}
-		if msgName != "" {
-			v.Status.MessageName = msgName
+		if len(metaJSON) > 0 {
+			v.Status.Meta = metaJSON
 		}
 		if err := r.Status().Patch(ctx, v, patch); err != nil {
 			return ctrl.Result{}, err
@@ -387,13 +389,15 @@ func (r *DatasetVersionReconciler) mapVolumeAttachmentToRetired(ctx context.Cont
 	return out
 }
 
-// readDescriptorFromMeta reads the protobuf descriptor and message name from
-// a snapshot's meta.json. Returns empty strings if the file is missing, the
-// encoding section is absent, or any parse error occurs.
-func readDescriptorFromMeta(snapshotPath string) (descriptor, messageName string) {
-	data, err := os.ReadFile(filepath.Join(snapshotPath, "meta.json"))
-	if err != nil {
-		return "", ""
+// parseMetaFields parses a snapshot's meta.json bytes and extracts the
+// fields needed on the wire in VersionRecord. Returns zero values for any
+// field that is missing or unparseable; callers treat zero as "unknown".
+//
+// Called when building NodeAssignments so the JSON parse happens at the
+// assignment boundary rather than on every KV-server lookup.
+func parseMetaFields(data []byte) (descriptor, messageName string, indexBytes int64) {
+	if len(data) == 0 {
+		return "", "", 0
 	}
 	var meta struct {
 		Encoding *struct {
@@ -402,12 +406,19 @@ func readDescriptorFromMeta(snapshotPath string) (descriptor, messageName string
 				MessageName string `json:"message_name"`
 			} `json:"protobuf"`
 		} `json:"encoding"`
+		Index *struct {
+			IndexBytes int64 `json:"index_bytes"`
+		} `json:"index"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", ""
+		return "", "", 0
 	}
-	if meta.Encoding == nil || meta.Encoding.Protobuf == nil {
-		return "", ""
+	if meta.Encoding != nil && meta.Encoding.Protobuf != nil {
+		descriptor = meta.Encoding.Protobuf.Descriptor
+		messageName = meta.Encoding.Protobuf.MessageName
 	}
-	return meta.Encoding.Protobuf.Descriptor, meta.Encoding.Protobuf.MessageName
+	if meta.Index != nil {
+		indexBytes = meta.Index.IndexBytes
+	}
+	return
 }
