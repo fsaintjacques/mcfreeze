@@ -83,19 +83,16 @@ async fn dispatch_mg(
     metrics: &Metrics,
 ) {
     let start = Instant::now();
-    metrics.keys_requested_total.inc();
 
     let result = match lookup.get(key).await {
         Ok(Some(value)) => {
             let bytes = value.len() as u64;
             write_va(dst, &value, flags, key);
-            metrics.keys_hit_total.inc();
             metrics.response_bytes_total.inc_by(bytes);
             "hit"
         }
         Ok(None) => {
             write_en(dst);
-            metrics.keys_miss_total.inc();
             "miss"
         }
         Err(e) => {

@@ -240,16 +240,13 @@ at `:9090/metrics`.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `fm_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, error} |
-| `fm_keys_requested_total` | Counter | — | Total key lookups |
-| `fm_keys_hit_total` | Counter | — | Key hits |
-| `fm_keys_miss_total` | Counter | — | Key misses |
-| `fm_response_bytes_total` | Counter | — | Total value bytes sent |
-| `fm_catalog_generation` | Gauge | — | Current generation; 0 in snapshot mode |
-| `fm_catalog_swap_total` | Counter | `result` | Catalog swaps; `result` ∈ {ok, error} |
-| `fm_active_datasets` | Gauge | — | Dataset count; always 1 in snapshot mode |
-| `fm_connections_active` | Gauge | `transport` | Open connections; `transport` ∈ {uds, tcp} |
-| `fm_connections_total` | Counter | `transport` | Total connections accepted |
+| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, error}. `_count` series gives per-result and total lookup counts. |
+| `mcf_response_bytes_total` | Counter | — | Total value bytes sent |
+| `mcf_catalog_generation` | Gauge | — | Current generation; 0 in snapshot mode |
+| `mcf_catalog_swap_total` | Counter | `result` | Catalog swaps; `result` ∈ {ok, error} |
+| `mcf_active_datasets` | Gauge | — | Dataset count; always 1 in snapshot mode |
+| `mcf_connections_active` | Gauge | `transport` | Open connections; `transport` ∈ {uds, tcp} |
+| `mcf_connections_total` | Counter | `transport` | Total connections accepted |
 
-Histogram buckets for `fm_request_duration_seconds`:
+Histogram buckets for `mcf_request_duration_seconds`:
 `[50µs, 100µs, 200µs, 500µs, 1ms, 2ms, 5ms, 10ms, 50ms, 100ms]`
