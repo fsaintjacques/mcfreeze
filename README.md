@@ -1,11 +1,11 @@
 # mcfreeze
 
-Immutable key-value snapshots built from BigQuery, served at sub-millisecond
+Immutable key-value snapshots built from cold storage, served at sub-millisecond
 latency across thousands of nodes. Attach a disk — that's the deployment.
 
 ## How It Works
 
-McFreeze separates compute from storage. A snapshot is built once onto a
+mcfreeze separates compute from storage. A snapshot is built once onto a
 Hyperdisk ML volume, attached read-only to every node in the fleet, and served
 locally over the memcache meta protocol. No cache cluster, no replication, no
 state to manage.
@@ -64,7 +64,7 @@ echo -ne "mg hello v\r\n" | nc localhost 7777
 
 ## Kubernetes Deployment
 
-McFreeze is Kubernetes-native. Users declare a `Dataset` CR and the platform
+mcfreeze is Kubernetes-native. Users declare a `Dataset` CR and the platform
 handles builds, disk provisioning, fleet-wide rollout, and version retirement.
 
 ```yaml
