@@ -14,7 +14,7 @@ use std::time::Instant;
 use bytes::BytesMut;
 
 use super::meta::{write_en, write_server_error, write_va, write_version, Command, MgFlags};
-use crate::lookup::Lookup;
+use crate::lookup::{Lookup, LookupOutcome};
 use crate::metrics::{Metrics, ResultLabels};
 
 // ---------------------------------------------------------------------------
@@ -85,15 +85,19 @@ async fn dispatch_mg(
     let start = Instant::now();
 
     let result = match lookup.get(key).await {
-        Ok(Some(value)) => {
-            let bytes = value.len() as u64;
+        Ok(LookupOutcome::Hit(value)) => {
+            let bytes = value.len() as f64;
             write_va(dst, &value, flags, key);
-            metrics.response_bytes_total.inc_by(bytes);
+            metrics.response_bytes.observe(bytes);
             "hit"
         }
-        Ok(None) => {
+        Ok(LookupOutcome::Miss) => {
             write_en(dst);
             "miss"
+        }
+        Ok(LookupOutcome::Collision) => {
+            write_en(dst);
+            "collision"
         }
         Err(e) => {
             tracing::error!(key = %String::from_utf8_lossy(key), "lookup error: {e}");
@@ -137,8 +141,11 @@ mod tests {
 
     #[async_trait]
     impl Lookup for MockLookup {
-        async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
-            Ok(self.0.get(key).map(|&v| Bytes::from_static(v)))
+        async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
+            Ok(match self.0.get(key) {
+                Some(&v) => LookupOutcome::Hit(Bytes::from_static(v)),
+                None => LookupOutcome::Miss,
+            })
         }
     }
 
@@ -147,8 +154,18 @@ mod tests {
 
     #[async_trait]
     impl Lookup for ErrLookup {
-        async fn get(&mut self, _key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+        async fn get(&mut self, _key: &[u8]) -> Result<LookupOutcome, ServeError> {
             Err(ServeError::BlockingTaskPanicked("test".into()))
+        }
+    }
+
+    // Lookup stub that always reports a fingerprint collision.
+    struct CollisionLookup;
+
+    #[async_trait]
+    impl Lookup for CollisionLookup {
+        async fn get(&mut self, _key: &[u8]) -> Result<LookupOutcome, ServeError> {
+            Ok(LookupOutcome::Collision)
         }
     }
 
@@ -213,6 +230,29 @@ mod tests {
         };
         let d = dispatch(cmd, &mut lookup, &mut dst, "0.1.0", 0, &noop_metrics()).await;
         assert_eq!(d, Disposition::Continue);
+        assert_eq!(&dst[..], b"EN\r\n");
+    }
+
+    // --- mg: collision (fingerprint false positive) ---
+
+    #[tokio::test]
+    async fn mg_collision_writes_en() {
+        let mut dst = buf();
+        let cmd = Command::Mg {
+            key: Bytes::from_static(b"k"),
+            flags: MgFlags::default(),
+        };
+        let d = dispatch(
+            cmd,
+            &mut CollisionLookup,
+            &mut dst,
+            "0.1.0",
+            0,
+            &noop_metrics(),
+        )
+        .await;
+        assert_eq!(d, Disposition::Continue);
+        // Wire response identical to a miss — clients can't tell the difference.
         assert_eq!(&dst[..], b"EN\r\n");
     }
 

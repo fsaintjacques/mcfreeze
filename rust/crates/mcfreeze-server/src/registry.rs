@@ -20,9 +20,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
 use mcfreeze_format::reader::SnapshotReader;
 
+use crate::lookup::LookupOutcome;
 use crate::ServeError;
 
 // ---------------------------------------------------------------------------
@@ -54,13 +54,13 @@ impl DatasetHandle {
     }
 
     /// Look up `key`.  Offloads `pread` to the blocking thread pool.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
-        let key = Bytes::copy_from_slice(key);
+    pub async fn get(&self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
+        let key = bytes::Bytes::copy_from_slice(key);
         let reader = Arc::clone(&self.reader);
         tokio::task::spawn_blocking(move || {
             reader
                 .get(key.as_ref())
-                .map(|v| v.map(Bytes::from))
+                .map(LookupOutcome::from)
                 .map_err(Into::into)
         })
         .await
@@ -132,10 +132,11 @@ impl ActiveCatalog {
         entries
     }
 
-    /// Look up `key` in `dataset`.  Returns `Ok(None)` for unknown datasets.
-    pub async fn get(&self, dataset: &str, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+    /// Look up `key` in `dataset`.  Returns [`LookupOutcome::Miss`] for
+    /// unknown datasets (no index was ever consulted).
+    pub async fn get(&self, dataset: &str, key: &[u8]) -> Result<LookupOutcome, ServeError> {
         match self.datasets.get(dataset) {
-            None => Ok(None),
+            None => Ok(LookupOutcome::Miss),
             Some(h) => h.get(key).await,
         }
     }
@@ -194,14 +195,24 @@ mod tests {
         dir
     }
 
+    fn assert_hit(o: LookupOutcome, expected: &[u8]) {
+        match o {
+            LookupOutcome::Hit(v) => assert_eq!(v, expected),
+            other => panic!("expected Hit({expected:?}), got {other:?}"),
+        }
+    }
+
+    fn assert_miss(o: LookupOutcome) {
+        assert!(matches!(o, LookupOutcome::Miss), "expected Miss, got {o:?}");
+    }
+
     // --- DatasetHandle ---
 
     #[tokio::test]
     async fn dataset_handle_hit() {
         let dir = build_snapshot(&[(b"k", b"v")]);
         let h = DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap();
-        let got = h.get(b"k").await.unwrap();
-        assert_eq!(got, Some(Bytes::from_static(b"v")));
+        assert_hit(h.get(b"k").await.unwrap(), b"v");
     }
 
     #[tokio::test]
@@ -221,8 +232,7 @@ mod tests {
             DatasetHandle::open("myds".into(), "v1".into(), dir.path()).unwrap(),
         );
         let catalog = ActiveCatalog::new(datasets, 1, SystemTime::UNIX_EPOCH);
-        let got = catalog.get("myds", b"key").await.unwrap();
-        assert_eq!(got, Some(Bytes::from_static(b"val")));
+        assert_hit(catalog.get("myds", b"key").await.unwrap(), b"val");
     }
 
     #[tokio::test]
@@ -234,15 +244,13 @@ mod tests {
             DatasetHandle::open("myds".into(), "v1".into(), dir.path()).unwrap(),
         );
         let catalog = ActiveCatalog::new(datasets, 1, SystemTime::UNIX_EPOCH);
-        let got = catalog.get("myds", b"absent").await.unwrap();
-        assert_eq!(got, None);
+        assert_miss(catalog.get("myds", b"absent").await.unwrap());
     }
 
     #[tokio::test]
     async fn active_catalog_miss_unknown_dataset() {
         let catalog = ActiveCatalog::new(HashMap::new(), 0, SystemTime::UNIX_EPOCH);
-        let got = catalog.get("unknown", b"key").await.unwrap();
-        assert_eq!(got, None);
+        assert_miss(catalog.get("unknown", b"key").await.unwrap());
     }
 
     // --- Registry ---
@@ -268,10 +276,7 @@ mod tests {
         // Initial load.
         let catalog = Arc::clone(&*reg.load());
         assert_eq!(catalog.generation, 0);
-        assert_eq!(
-            catalog.get("ds", b"a").await.unwrap(),
-            Some(Bytes::from_static(b"1"))
-        );
+        assert_hit(catalog.get("ds", b"a").await.unwrap(), b"1");
 
         // Swap to generation 1.
         let old = reg.swap(Arc::new(ActiveCatalog::new(ds2, 1, SystemTime::UNIX_EPOCH)));
@@ -279,9 +284,6 @@ mod tests {
 
         let catalog = Arc::clone(&*reg.load());
         assert_eq!(catalog.generation, 1);
-        assert_eq!(
-            catalog.get("ds", b"a").await.unwrap(),
-            Some(Bytes::from_static(b"2"))
-        );
+        assert_hit(catalog.get("ds", b"a").await.unwrap(), b"2");
     }
 }

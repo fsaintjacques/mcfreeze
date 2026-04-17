@@ -312,7 +312,10 @@ async fn drain<IO: AsyncRead + Unpin>(io: &mut IO, buf: &mut BytesMut, n: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lookup::Lookup, Metrics, ServeError};
+    use crate::{
+        lookup::{Lookup, LookupOutcome},
+        Metrics, ServeError,
+    };
     use async_trait::async_trait;
     use bytes::Bytes;
     use prometheus_client::registry::Registry;
@@ -333,8 +336,11 @@ mod tests {
 
     #[async_trait]
     impl Lookup for MockLookup {
-        async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
-            Ok(self.0.get(key).map(|&v| Bytes::from_static(v)))
+        async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
+            Ok(match self.0.get(key) {
+                Some(&v) => LookupOutcome::Hit(Bytes::from_static(v)),
+                None => LookupOutcome::Miss,
+            })
         }
     }
 
