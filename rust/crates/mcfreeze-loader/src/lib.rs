@@ -261,7 +261,7 @@ impl SnapshotLoader {
             })
         } else {
             let stats = self
-                .run_scatter_sources(layout, sources.into_iter(), scatter_start)
+                .run_scatter_sources(layout, sources, scatter_start)
                 .await?;
             Ok(ScatterResult {
                 finalizer,
