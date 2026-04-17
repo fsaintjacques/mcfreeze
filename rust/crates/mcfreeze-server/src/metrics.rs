@@ -30,14 +30,14 @@ use serde::Serialize;
 // Label types
 // ---------------------------------------------------------------------------
 
-/// Label for `fm_request_duration_seconds` and `fm_catalog_swap_total`.
+/// Label for `mcf_request_duration_seconds` and `mcf_catalog_swap_total`.
 /// Values: `"hit"`, `"miss"`, `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ResultLabels {
     pub result: &'static str,
 }
 
-/// Label for `fm_connections_active` and `fm_connections_total`.
+/// Label for `mcf_connections_active` and `mcf_connections_total`.
 /// Values: `"uds"`, `"tcp"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TransportLabels {
@@ -61,13 +61,8 @@ const REQUEST_DURATION_BUCKETS: [f64; 10] = [
 pub struct Metrics {
     // --- request ---
     /// End-to-end per-key latency; label `result` ∈ {hit, miss, error}.
+    /// The histogram's `_count` series gives per-result and total lookup counts.
     pub request_duration_seconds: Family<ResultLabels, Histogram>,
-    /// Total individual key lookups (all results).
-    pub keys_requested_total: Counter,
-    /// Individual key hits.
-    pub keys_hit_total: Counter,
-    /// Individual key misses.
-    pub keys_miss_total: Counter,
     /// Total value bytes written to clients.
     pub response_bytes_total: Counter,
 
@@ -102,72 +97,51 @@ impl Metrics {
 
         let request_duration_seconds = reg!(
             registry,
-            "fm_request_duration_seconds",
+            "mcf_request_duration_seconds",
             "End-to-end per-key request latency",
             Family::<ResultLabels, Histogram>::new_with_constructor(|| {
                 Histogram::new(REQUEST_DURATION_BUCKETS.iter().copied())
             })
         );
-        let keys_requested_total = reg!(
-            registry,
-            "fm_keys_requested_total",
-            "Total individual key lookups",
-            Counter::<u64, std::sync::atomic::AtomicU64>::default()
-        );
-        let keys_hit_total = reg!(
-            registry,
-            "fm_keys_hit_total",
-            "Individual key hits",
-            Counter::<u64, std::sync::atomic::AtomicU64>::default()
-        );
-        let keys_miss_total = reg!(
-            registry,
-            "fm_keys_miss_total",
-            "Individual key misses",
-            Counter::<u64, std::sync::atomic::AtomicU64>::default()
-        );
         let response_bytes_total = reg!(
             registry,
-            "fm_response_bytes_total",
+            "mcf_response_bytes_total",
             "Total value bytes sent to clients",
             Counter::<u64, std::sync::atomic::AtomicU64>::default()
         );
         let catalog_generation = reg!(
             registry,
-            "fm_catalog_generation",
+            "mcf_catalog_generation",
             "Current catalog generation; 0 in snapshot mode",
             Gauge::<i64, AtomicI64>::default()
         );
         let catalog_swap_total = reg!(
             registry,
-            "fm_catalog_swap_total",
+            "mcf_catalog_swap_total",
             "Catalog hot-swaps by result; always 0 in snapshot mode",
             Family::<ResultLabels, Counter>::default()
         );
         let active_datasets = reg!(
             registry,
-            "fm_active_datasets",
+            "mcf_active_datasets",
             "Active dataset count; always 1 in snapshot mode",
             Gauge::<i64, AtomicI64>::default()
         );
         let connections_active = reg!(
             registry,
-            "fm_connections_active",
+            "mcf_connections_active",
             "Currently open connections by transport",
             Family::<TransportLabels, Gauge<i64, AtomicI64>>::default()
         );
         let connections_total = reg!(
             registry,
-            "fm_connections_total",
+            "mcf_connections_total",
             "Total connections accepted by transport",
             Family::<TransportLabels, Counter>::default()
         );
 
         Arc::new(Self {
             request_duration_seconds,
-            keys_requested_total,
-            keys_hit_total,
-            keys_miss_total,
             response_bytes_total,
             catalog_generation,
             catalog_swap_total,
@@ -282,8 +256,10 @@ mod tests {
         let mut reg = Registry::default();
         let m = Metrics::new(&mut reg);
         // spot-check: recording should not panic
-        m.keys_requested_total.inc();
-        m.keys_hit_total.inc();
+        m.request_duration_seconds
+            .get_or_create(&ResultLabels { result: "hit" })
+            .observe(0.001);
+        m.response_bytes_total.inc_by(128);
         m.connections_active
             .get_or_create(&TransportLabels { transport: "tcp" })
             .inc();
@@ -298,10 +274,12 @@ mod tests {
     fn metrics_encodes_to_text() {
         let mut reg = Registry::default();
         let m = Metrics::new(&mut reg);
-        m.keys_hit_total.inc_by(3);
+        m.request_duration_seconds
+            .get_or_create(&ResultLabels { result: "hit" })
+            .observe(0.001);
         let mut buf = String::new();
         encode(&mut buf, &reg).unwrap();
-        assert!(buf.contains("fm_keys_hit_total"));
+        assert!(buf.contains("mcf_request_duration_seconds"));
     }
 
     #[test]

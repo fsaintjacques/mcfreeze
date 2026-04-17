@@ -5,16 +5,16 @@ import (
 )
 
 func TestParsePrometheusText(t *testing.T) {
-	input := `# HELP fm_keys_requested_total Total individual key lookups.
-# TYPE fm_keys_requested_total counter
-fm_keys_requested_total_total 42
-# HELP fm_active_datasets Active dataset count.
-# TYPE fm_active_datasets gauge
-fm_active_datasets 3
-# HELP fm_connections_active Currently open connections by transport.
-# TYPE fm_connections_active gauge
-fm_connections_active{transport="tcp"} 5
-fm_connections_active{transport="uds"} 2
+	input := `# HELP mcf_response_bytes Total value bytes sent to clients.
+# TYPE mcf_response_bytes counter
+mcf_response_bytes_total 42
+# HELP mcf_active_datasets Active dataset count.
+# TYPE mcf_active_datasets gauge
+mcf_active_datasets 3
+# HELP mcf_connections_active Currently open connections by transport.
+# TYPE mcf_connections_active gauge
+mcf_connections_active{transport="tcp"} 5
+mcf_connections_active{transport="uds"} 2
 # EOF
 `
 	metrics := parsePrometheusText(input)
@@ -24,21 +24,21 @@ fm_connections_active{transport="uds"} 2
 	}
 
 	// Check counter with _total suffix doubling.
-	assertMetric(t, metrics[0], "fm_keys_requested_total_total", "42")
+	assertMetric(t, metrics[0], "mcf_response_bytes_total", "42")
 	// Help should match via _total suffix stripping.
-	if metrics[0].Help != "Total individual key lookups." {
+	if metrics[0].Help != "Total value bytes sent to clients." {
 		t.Errorf("expected help text, got %q", metrics[0].Help)
 	}
 
 	// Check gauge.
-	assertMetric(t, metrics[1], "fm_active_datasets", "3")
+	assertMetric(t, metrics[1], "mcf_active_datasets", "3")
 	if metrics[1].Help != "Active dataset count." {
 		t.Errorf("expected help text, got %q", metrics[1].Help)
 	}
 
 	// Check labeled metrics.
-	assertMetric(t, metrics[2], `fm_connections_active{transport="tcp"}`, "5")
-	assertMetric(t, metrics[3], `fm_connections_active{transport="uds"}`, "2")
+	assertMetric(t, metrics[2], `mcf_connections_active{transport="tcp"}`, "5")
+	assertMetric(t, metrics[3], `mcf_connections_active{transport="uds"}`, "2")
 }
 
 func TestParsePrometheusText_Empty(t *testing.T) {
