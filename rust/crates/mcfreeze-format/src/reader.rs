@@ -14,6 +14,25 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// GetOutcome — distinguishes a no-candidate miss from a fingerprint collision
+// ---------------------------------------------------------------------------
+
+/// Result of a successful (non-Err) lookup.
+///
+/// `Collision` is a "slow miss": the index produced at least one candidate
+/// slot (compact-fingerprint match) but none of the pread'd records passed
+/// verify-fingerprint check.  Lookups reaching this state paid for one or
+/// more `pread` syscalls; lookups ending in `Miss` paid nothing.
+///
+/// The `Collision` rate is the health signal for seed / fingerprint quality.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetOutcome {
+    Hit(Vec<u8>),
+    Miss,
+    Collision,
+}
+
+// ---------------------------------------------------------------------------
 // PartitionReader — index probe + data read for a single partition
 // ---------------------------------------------------------------------------
 
@@ -35,20 +54,23 @@ impl<'a> PartitionReader<'a> {
         }
     }
 
-    /// Look up `key` and return its value, or `None` if not present.
+    /// Look up `key`.  Returns [`GetOutcome::Miss`] when the index yields no
+    /// candidate slots, [`GetOutcome::Collision`] when candidates existed but
+    /// none verified, or [`GetOutcome::Hit`] with the value.
     ///
     /// The caller must supply the full 64-bit `fingerprint` so that
     /// `compact_fingerprint` and `home_position` can be derived.
-    pub fn get(&self, key: &[u8], fp: u64) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, key: &[u8], fp: u64) -> Result<GetOutcome> {
         let n = self.buckets.len();
         if n == 0 {
-            return Ok(None);
+            return Ok(GetOutcome::Miss);
         }
 
         let cfp = compact_fingerprint(fp);
         let expected_vfp = verify_fingerprint(key, self.verify_seed);
         let mut pos = home_position(fp, n);
         let mut steps = 0usize;
+        let mut had_candidate = false;
 
         while steps < n {
             let result = probe_group(self.buckets, cfp, pos);
@@ -57,21 +79,26 @@ impl<'a> PartitionReader<'a> {
                 if result.offsets[i] == NO_MATCH {
                     continue;
                 }
+                had_candidate = true;
                 let byte_offset = result.offsets[i] as u64 * VALUE_ALIGNMENT;
                 if let Some(value) = self.read_and_verify(byte_offset, expected_vfp)? {
-                    return Ok(Some(value));
+                    return Ok(GetOutcome::Hit(value));
                 }
             }
 
             if result.done {
-                return Ok(None);
+                break;
             }
 
             pos = (pos + GROUP_SIZE) % n;
             steps += GROUP_SIZE;
         }
 
-        Ok(None)
+        Ok(if had_candidate {
+            GetOutcome::Collision
+        } else {
+            GetOutcome::Miss
+        })
     }
 
     /// Speculatively read to the next 4KB page boundary. This avoids a
@@ -192,8 +219,8 @@ impl SnapshotReader {
         )
     }
 
-    /// Look up `key` and return its value, or `None` if not present.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// Look up `key`.  See [`GetOutcome`] for the three non-error outcomes.
+    pub fn get(&self, key: &[u8]) -> Result<GetOutcome> {
         let fp = fingerprint(key);
         self.partition(self.layout.partition_of(fp)).get(key, fp)
     }
@@ -233,6 +260,13 @@ mod tests {
 
     // --- basic roundtrip ---
 
+    fn assert_hit(o: GetOutcome, expected: &[u8]) {
+        match o {
+            GetOutcome::Hit(v) => assert_eq!(v, expected),
+            other => panic!("expected Hit({expected:?}), got {other:?}"),
+        }
+    }
+
     #[test]
     fn get_existing_keys() {
         let pairs: &[(&[u8], &[u8])] = &[
@@ -244,16 +278,15 @@ mod tests {
         let r = SnapshotReader::open(dir.path()).unwrap();
 
         for &(k, v) in pairs {
-            let got = r.get(k).unwrap();
-            assert_eq!(got.as_deref(), Some(v), "key={k:?}");
+            assert_hit(r.get(k).unwrap(), v);
         }
     }
 
     #[test]
-    fn get_missing_key_returns_none() {
+    fn get_missing_key_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")], 4);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"absent").unwrap(), None);
+        assert_eq!(r.get(b"absent").unwrap(), GetOutcome::Miss);
     }
 
     // --- value sizes ---
@@ -262,7 +295,7 @@ mod tests {
     fn get_empty_value() {
         let dir = build_snapshot(&[(b"k", b"")], 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"k").unwrap().as_deref(), Some(b"".as_slice()));
+        assert_hit(r.get(b"k").unwrap(), b"");
     }
 
     #[test]
@@ -270,7 +303,7 @@ mod tests {
         let big = vec![0xABu8; 1024 * 1024]; // 1 MiB
         let dir = build_snapshot(&[(b"big", &big)], 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"big").unwrap(), Some(big));
+        assert_hit(r.get(b"big").unwrap(), &big);
     }
 
     // --- many keys ---
@@ -295,8 +328,7 @@ mod tests {
         let r = SnapshotReader::open(dir.path()).unwrap();
 
         for (k, v) in &vals {
-            let got = r.get(k).unwrap();
-            assert_eq!(got.as_deref(), Some(v.as_slice()), "key={k:?}");
+            assert_hit(r.get(k).unwrap(), v);
         }
     }
 
@@ -308,7 +340,7 @@ mod tests {
         let dir = build_snapshot(pairs, 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
         for &(k, v) in pairs {
-            assert_eq!(r.get(k).unwrap().as_deref(), Some(v));
+            assert_hit(r.get(k).unwrap(), v);
         }
     }
 
@@ -320,7 +352,7 @@ mod tests {
         let val = vec![0xCCu8; 200];
         let dir = build_snapshot(&[(b"k", &val)], 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"k").unwrap(), Some(val));
+        assert_hit(r.get(b"k").unwrap(), &val);
     }
 
     #[test]
@@ -329,7 +361,7 @@ mod tests {
         let val = vec![0xDDu8; 8192];
         let dir = build_snapshot(&[(b"big", &val)], 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"big").unwrap(), Some(val));
+        assert_hit(r.get(b"big").unwrap(), &val);
     }
 
     #[test]
@@ -338,7 +370,7 @@ mod tests {
         // The speculative read requests up to 4KB but the file is smaller.
         let dir = build_snapshot(&[(b"tiny", b"x")], 1);
         let r = SnapshotReader::open(dir.path()).unwrap();
-        assert_eq!(r.get(b"tiny").unwrap().as_deref(), Some(b"x".as_slice()));
+        assert_hit(r.get(b"tiny").unwrap(), b"x");
     }
 
     #[test]
@@ -376,16 +408,33 @@ mod tests {
                 let dir = build_snapshot(pairs, 1);
                 let r = SnapshotReader::open(dir.path()).unwrap();
 
-                assert_eq!(
-                    r.get(prev.as_bytes()).unwrap().as_deref(),
-                    Some(b"value-a".as_slice()),
-                    "key_a should be retrievable despite collision"
-                );
-                assert_eq!(
-                    r.get(k.as_bytes()).unwrap().as_deref(),
-                    Some(b"value-b".as_slice()),
-                    "key_b should be retrievable despite collision"
-                );
+                assert_hit(r.get(prev.as_bytes()).unwrap(), b"value-a");
+                assert_hit(r.get(k.as_bytes()).unwrap(), b"value-b");
+                return;
+            }
+            seen.insert(cfp, k);
+        }
+        panic!("failed to find a 32-bit fingerprint collision in 200K keys");
+    }
+
+    /// Writing key_a but querying key_b — where both share a compact-fingerprint —
+    /// yields a `Collision` outcome, not a plain `Miss`. The index returns a
+    /// candidate slot, the pread succeeds, but the stored verify-fingerprint
+    /// doesn't match and no further candidates exist.
+    #[test]
+    fn collision_outcome_when_cfp_matches_but_key_missing() {
+        use crate::index::{compact_fingerprint, fingerprint};
+        use std::collections::HashMap;
+
+        let mut seen: HashMap<u32, String> = HashMap::new();
+        for i in 0u64..200_000 {
+            let k = format!("collision-{i}");
+            let fp = fingerprint(k.as_bytes());
+            let cfp = compact_fingerprint(fp);
+            if let Some(prev) = seen.get(&cfp) {
+                let dir = build_snapshot(&[(prev.as_bytes(), b"stored")], 1);
+                let r = SnapshotReader::open(dir.path()).unwrap();
+                assert_eq!(r.get(k.as_bytes()).unwrap(), GetOutcome::Collision);
                 return;
             }
             seen.insert(cfp, k);

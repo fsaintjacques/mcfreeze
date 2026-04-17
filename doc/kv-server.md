@@ -240,8 +240,8 @@ at `:9090/metrics`.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, error}. `_count` series gives per-result and total lookup counts. |
-| `mcf_response_bytes_total` | Counter | — | Total value bytes sent |
+| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, collision, error}. `collision` = fingerprint false positive (paid `pread`, no match). `_count` series gives per-result and total lookup counts. |
+| `mcf_response_bytes` | Histogram | — | Per-response value size (hits only); `_sum` is total bytes sent |
 | `mcf_catalog_generation` | Gauge | — | Current generation; 0 in snapshot mode |
 | `mcf_catalog_swap_total` | Counter | `result` | Catalog swaps; `result` ∈ {ok, error} |
 | `mcf_active_datasets` | Gauge | — | Dataset count; always 1 in snapshot mode |
@@ -250,3 +250,6 @@ at `:9090/metrics`.
 
 Histogram buckets for `mcf_request_duration_seconds`:
 `[50µs, 100µs, 200µs, 500µs, 1ms, 2ms, 5ms, 10ms, 50ms, 100ms]`
+
+Histogram buckets for `mcf_response_bytes`:
+`[64, 256, 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB]`

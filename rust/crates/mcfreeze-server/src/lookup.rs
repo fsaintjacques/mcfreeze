@@ -18,10 +18,37 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use mcfreeze_format::reader::SnapshotReader;
+use mcfreeze_format::reader::{GetOutcome, SnapshotReader};
 
 use crate::registry::{ActiveCatalog, Registry};
 use crate::ServeError;
+
+// ---------------------------------------------------------------------------
+// LookupOutcome
+// ---------------------------------------------------------------------------
+
+/// Result of a successful lookup.
+///
+/// `Collision` is a "slow miss": the underlying index produced at least one
+/// candidate slot but no pread'd record matched the query key's verify
+/// fingerprint.  These lookups pay for I/O; `Miss` lookups do not.  Keeping
+/// them distinct surfaces fingerprint-collision rate in `/metrics`.
+#[derive(Debug)]
+pub enum LookupOutcome {
+    Hit(Bytes),
+    Miss,
+    Collision,
+}
+
+impl From<GetOutcome> for LookupOutcome {
+    fn from(o: GetOutcome) -> Self {
+        match o {
+            GetOutcome::Hit(v) => LookupOutcome::Hit(Bytes::from(v)),
+            GetOutcome::Miss => LookupOutcome::Miss,
+            GetOutcome::Collision => LookupOutcome::Collision,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Lookup
@@ -33,7 +60,7 @@ use crate::ServeError;
 /// current [`ActiveCatalog`]) without any locking.
 #[async_trait]
 pub trait Lookup: Send + 'static {
-    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError>;
+    async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,13 +91,13 @@ impl SnapshotLookup {
 
 #[async_trait]
 impl Lookup for SnapshotLookup {
-    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+    async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
         let key = Bytes::copy_from_slice(key);
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             inner
                 .get(key.as_ref())
-                .map(|v| v.map(Bytes::from))
+                .map(LookupOutcome::from)
                 .map_err(Into::into)
         })
         .await
@@ -130,7 +157,7 @@ struct PerConnectionCatalogLookup {
 
 #[async_trait]
 impl Lookup for PerConnectionCatalogLookup {
-    async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, ServeError> {
+    async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
         // Guard is a temporary dropped before .await — future remains Send.
         {
             let guard = self.registry.load();
@@ -183,6 +210,17 @@ mod tests {
         dir
     }
 
+    fn assert_hit(o: LookupOutcome, expected: &[u8]) {
+        match o {
+            LookupOutcome::Hit(v) => assert_eq!(v, expected),
+            other => panic!("expected Hit({expected:?}), got {other:?}"),
+        }
+    }
+
+    fn assert_miss(o: LookupOutcome) {
+        assert!(matches!(o, LookupOutcome::Miss), "expected Miss, got {o:?}");
+    }
+
     // --- SnapshotLookup ---
 
     #[tokio::test]
@@ -190,18 +228,15 @@ mod tests {
         let dir = build_snapshot(&[(b"hello", b"world")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
-        assert_eq!(
-            lookup.get(b"hello").await.unwrap(),
-            Some(Bytes::from_static(b"world"))
-        );
+        assert_hit(lookup.get(b"hello").await.unwrap(), b"world");
     }
 
     #[tokio::test]
-    async fn miss_returns_none() {
+    async fn miss_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")]);
         let reader = SnapshotReader::open(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
-        assert_eq!(lookup.get(b"absent").await.unwrap(), None);
+        assert_miss(lookup.get(b"absent").await.unwrap());
     }
 
     #[tokio::test]
@@ -211,8 +246,8 @@ mod tests {
         let factory = SnapshotLookup::new(Arc::new(reader));
         let mut c1 = factory.for_connection();
         let mut c2 = factory.for_connection();
-        assert_eq!(c1.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
-        assert_eq!(c2.get(b"k").await.unwrap(), Some(Bytes::from_static(b"v")));
+        assert_hit(c1.get(b"k").await.unwrap(), b"v");
+        assert_hit(c2.get(b"k").await.unwrap(), b"v");
     }
 
     #[tokio::test]
@@ -260,17 +295,14 @@ mod tests {
     async fn catalog_hit() {
         let (reg, _dir) = make_registry(&[(b"key", b"val")], 1);
         let mut conn = CatalogLookup::new(reg).for_connection();
-        assert_eq!(
-            conn.get(b"ds:key").await.unwrap(),
-            Some(Bytes::from_static(b"val"))
-        );
+        assert_hit(conn.get(b"ds:key").await.unwrap(), b"val");
     }
 
     #[tokio::test]
     async fn catalog_miss_known_dataset() {
         let (reg, _dir) = make_registry(&[(b"key", b"val")], 1);
         let mut conn = CatalogLookup::new(reg).for_connection();
-        assert_eq!(conn.get(b"ds:absent").await.unwrap(), None);
+        assert_miss(conn.get(b"ds:absent").await.unwrap());
     }
 
     #[tokio::test]
@@ -281,7 +313,7 @@ mod tests {
             std::time::SystemTime::UNIX_EPOCH,
         ));
         let mut conn = CatalogLookup::new(reg).for_connection();
-        assert_eq!(conn.get(b"unknown:key").await.unwrap(), None);
+        assert_miss(conn.get(b"unknown:key").await.unwrap());
     }
 
     #[tokio::test]
@@ -321,10 +353,7 @@ mod tests {
         ));
         let mut conn = CatalogLookup::new(Arc::clone(&reg)).for_connection();
 
-        assert_eq!(
-            conn.get(b"ds:k").await.unwrap(),
-            Some(Bytes::from_static(b"v1"))
-        );
+        assert_hit(conn.get(b"ds:k").await.unwrap(), b"v1");
 
         reg.swap(Arc::new(ActiveCatalog::new(
             ds2,
@@ -332,10 +361,7 @@ mod tests {
             std::time::SystemTime::UNIX_EPOCH,
         )));
 
-        assert_eq!(
-            conn.get(b"ds:k").await.unwrap(),
-            Some(Bytes::from_static(b"v2"))
-        );
+        assert_hit(conn.get(b"ds:k").await.unwrap(), b"v2");
     }
 
     // --- split_prefix ---

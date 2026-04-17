@@ -3,7 +3,7 @@ use std::io::Write;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tempfile::TempDir;
 
-use mcfreeze_format::reader::SnapshotReader;
+use mcfreeze_format::reader::{GetOutcome, SnapshotReader};
 use mcfreeze_loader::{CsvSource, LoaderConfig, RawEncodingSource, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
@@ -11,6 +11,13 @@ use mcfreeze_loader::{CsvSource, LoaderConfig, RawEncodingSource, SnapshotLoader
 // ---------------------------------------------------------------------------
 
 type KeyValuePairs = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn assert_hit(o: GetOutcome, expected: &[u8]) {
+    match o {
+        GetOutcome::Hit(v) => assert_eq!(v, expected),
+        other => panic!("expected Hit({expected:?}), got {other:?}"),
+    }
+}
 
 /// Generate a CSV file with `key` and `value` columns (hex-encoded random bytes).
 fn gen_csv(n: usize, seed: u64) -> (TempDir, KeyValuePairs) {
@@ -87,7 +94,7 @@ async fn empty_source() {
     assert!(snap_dir.path().join("meta.json").exists());
 
     let reader = SnapshotReader::open(snap_dir.path()).unwrap();
-    assert_eq!(reader.get(b"anything").unwrap(), None);
+    assert_eq!(reader.get(b"anything").unwrap(), GetOutcome::Miss);
 }
 
 #[tokio::test]
@@ -106,10 +113,9 @@ async fn roundtrip_small() {
 
     let reader = SnapshotReader::open(snap_dir.path()).unwrap();
     for (key, val) in &pairs {
-        let got = reader.get(key).unwrap();
-        assert_eq!(got.as_deref(), Some(val.as_slice()), "key={key:?}");
+        assert_hit(reader.get(key).unwrap(), val);
     }
-    assert_eq!(reader.get(b"definitely-absent").unwrap(), None);
+    assert_eq!(reader.get(b"definitely-absent").unwrap(), GetOutcome::Miss);
 }
 
 #[tokio::test]
@@ -125,7 +131,7 @@ async fn roundtrip_large() {
 
     let reader = SnapshotReader::open(snap_dir.path()).unwrap();
     for (key, val) in &pairs {
-        assert_eq!(reader.get(key).unwrap().as_deref(), Some(val.as_slice()));
+        assert_hit(reader.get(key).unwrap(), val);
     }
 }
 
@@ -236,7 +242,7 @@ async fn load_parallel_roundtrip() {
 
     let reader = SnapshotReader::open(snap_dir.path()).unwrap();
     for (key, val) in &all_pairs {
-        assert_eq!(reader.get(key).unwrap().as_deref(), Some(val.as_slice()));
+        assert_hit(reader.get(key).unwrap(), val);
     }
 }
 

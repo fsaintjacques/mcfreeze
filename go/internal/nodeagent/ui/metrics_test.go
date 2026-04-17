@@ -5,16 +5,16 @@ import (
 )
 
 func TestParsePrometheusText(t *testing.T) {
-	input := `# HELP mcf_response_bytes Total value bytes sent to clients.
-# TYPE mcf_response_bytes counter
-mcf_response_bytes_total 42
-# HELP mcf_active_datasets Active dataset count.
+	input := `# HELP mcf_active_datasets Active dataset count.
 # TYPE mcf_active_datasets gauge
 mcf_active_datasets 3
 # HELP mcf_connections_active Currently open connections by transport.
 # TYPE mcf_connections_active gauge
 mcf_connections_active{transport="tcp"} 5
 mcf_connections_active{transport="uds"} 2
+# HELP mcf_connections_total Total connections accepted by transport.
+# TYPE mcf_connections_total counter
+mcf_connections_total_total{transport="tcp"} 42
 # EOF
 `
 	metrics := parsePrometheusText(input)
@@ -23,22 +23,21 @@ mcf_connections_active{transport="uds"} 2
 		t.Fatalf("expected 4 metrics, got %d: %+v", len(metrics), metrics)
 	}
 
-	// Check counter with _total suffix doubling.
-	assertMetric(t, metrics[0], "mcf_response_bytes_total", "42")
-	// Help should match via _total suffix stripping.
-	if metrics[0].Help != "Total value bytes sent to clients." {
+	// Check gauge.
+	assertMetric(t, metrics[0], "mcf_active_datasets", "3")
+	if metrics[0].Help != "Active dataset count." {
 		t.Errorf("expected help text, got %q", metrics[0].Help)
 	}
 
-	// Check gauge.
-	assertMetric(t, metrics[1], "mcf_active_datasets", "3")
-	if metrics[1].Help != "Active dataset count." {
-		t.Errorf("expected help text, got %q", metrics[1].Help)
-	}
+	// Check labeled gauge metrics.
+	assertMetric(t, metrics[1], `mcf_connections_active{transport="tcp"}`, "5")
+	assertMetric(t, metrics[2], `mcf_connections_active{transport="uds"}`, "2")
 
-	// Check labeled metrics.
-	assertMetric(t, metrics[2], `mcf_connections_active{transport="tcp"}`, "5")
-	assertMetric(t, metrics[3], `mcf_connections_active{transport="uds"}`, "2")
+	// Check labeled counter with _total suffix doubling.
+	assertMetric(t, metrics[3], `mcf_connections_total_total{transport="tcp"}`, "42")
+	if metrics[3].Help != "Total connections accepted by transport." {
+		t.Errorf("expected help text, got %q", metrics[3].Help)
+	}
 }
 
 func TestParsePrometheusText_Empty(t *testing.T) {

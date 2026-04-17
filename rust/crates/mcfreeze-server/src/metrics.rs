@@ -31,7 +31,13 @@ use serde::Serialize;
 // ---------------------------------------------------------------------------
 
 /// Label for `mcf_request_duration_seconds` and `mcf_catalog_swap_total`.
-/// Values: `"hit"`, `"miss"`, `"error"`.
+///
+/// Values on `mcf_request_duration_seconds`: `"hit"`, `"miss"`, `"collision"`,
+/// `"error"`.  `collision` is a fingerprint false positive — the index returned
+/// a candidate slot, the reader paid for `pread`, but the stored verify
+/// fingerprint didn't match.  Wire response is identical to a miss.
+///
+/// Values on `mcf_catalog_swap_total`: `"ok"`, `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ResultLabels {
     pub result: &'static str,
@@ -53,6 +59,18 @@ const REQUEST_DURATION_BUCKETS: [f64; 10] = [
     0.000_050, 0.000_100, 0.000_200, 0.000_500, 0.001, 0.002, 0.005, 0.010, 0.050, 0.100,
 ];
 
+/// Per-response value size: 64B – 1MiB (powers of 4).
+const RESPONSE_BYTES_BUCKETS: [f64; 8] = [
+    64.0,
+    256.0,
+    1_024.0,
+    4_096.0,
+    16_384.0,
+    65_536.0,
+    262_144.0,
+    1_048_576.0,
+];
+
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -63,8 +81,8 @@ pub struct Metrics {
     /// End-to-end per-key latency; label `result` ∈ {hit, miss, error}.
     /// The histogram's `_count` series gives per-result and total lookup counts.
     pub request_duration_seconds: Family<ResultLabels, Histogram>,
-    /// Total value bytes written to clients.
-    pub response_bytes_total: Counter,
+    /// Per-response value-size distribution (hits only); `_sum` is total bytes sent.
+    pub response_bytes: Histogram,
 
     // --- catalog (always present; snapshot mode uses static values) ---
     /// Current catalog generation; always 0 in snapshot mode.
@@ -103,11 +121,11 @@ impl Metrics {
                 Histogram::new(REQUEST_DURATION_BUCKETS.iter().copied())
             })
         );
-        let response_bytes_total = reg!(
+        let response_bytes = reg!(
             registry,
-            "mcf_response_bytes_total",
-            "Total value bytes sent to clients",
-            Counter::<u64, std::sync::atomic::AtomicU64>::default()
+            "mcf_response_bytes",
+            "Per-response value size in bytes (hits only)",
+            Histogram::new(RESPONSE_BYTES_BUCKETS.iter().copied())
         );
         let catalog_generation = reg!(
             registry,
@@ -142,7 +160,7 @@ impl Metrics {
 
         Arc::new(Self {
             request_duration_seconds,
-            response_bytes_total,
+            response_bytes,
             catalog_generation,
             catalog_swap_total,
             active_datasets,
@@ -259,7 +277,7 @@ mod tests {
         m.request_duration_seconds
             .get_or_create(&ResultLabels { result: "hit" })
             .observe(0.001);
-        m.response_bytes_total.inc_by(128);
+        m.response_bytes.observe(128.0);
         m.connections_active
             .get_or_create(&TransportLabels { transport: "tcp" })
             .inc();
