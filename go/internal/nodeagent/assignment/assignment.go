@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package assignment provides the control-plane assignment and state
 // reporting interfaces used by the node-agent.
 package assignment

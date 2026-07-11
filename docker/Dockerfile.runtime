@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY mcf      /usr/local/bin/mcf
 COPY mcfctl  /usr/local/bin/mcfctl

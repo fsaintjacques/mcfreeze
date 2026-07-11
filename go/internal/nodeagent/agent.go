@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package nodeagent implements the mcfctl node-agent: it watches the
 // control-plane for dataset version assignments, attaches Hyperdisk ML volumes,
 // mounts them read-only, and signals the KV server via catalog.json.

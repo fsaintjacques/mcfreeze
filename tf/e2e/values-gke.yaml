@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # GKE-specific Helm values. Used by `make helm-install-gke`.
 # image.repository and image.tag are set via --set at install time.
 

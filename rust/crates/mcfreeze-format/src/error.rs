@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("n_partitions must be a non-zero power of two, got {0}")]

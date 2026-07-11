@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package builder provides the AsyncBuilder interface and implementations
 // for running snapshot builds (fork, Kubernetes Job, fake).
 package builder

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 [workspace]
 members  = ["crates/mcfreeze-format", "crates/mcfreeze-loader", "crates/mcfreeze-bq", "crates/mcfreeze-encode", "crates/mcfreeze-cli", "crates/mcfreeze-server"]
 resolver = "2"

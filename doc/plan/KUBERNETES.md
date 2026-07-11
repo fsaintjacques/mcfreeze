@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Kubernetes-Native Control Plane: Implementation Plan
 
 This plan breaks the PRD (`doc/PRD-KUBERNETES-NATIVE.md`) into incremental

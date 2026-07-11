@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Serde config types, wire-compatible with the Go `api.DatasetSpec` JSON.
 
 use std::path::PathBuf;

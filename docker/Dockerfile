@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # syntax=docker/dockerfile:1.7
 
 # --- Rust builder (mcf binary) ---

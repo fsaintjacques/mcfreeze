@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 CARGO_FLAGS ?=
 
 .PHONY: build release format lint check-format check-lint check test test-unit test-integration test-kind clean \
