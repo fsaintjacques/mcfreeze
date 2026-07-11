@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 variable "project" {
   description = "GCP project ID."
   type        = string

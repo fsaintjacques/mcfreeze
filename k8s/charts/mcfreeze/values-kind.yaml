@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # KIND-specific overrides. Use with:
 #   helm upgrade --install mcfreeze ./k8s/charts/mcfreeze \
 #     -n mcfreeze-system --create-namespace \

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # GCP service accounts and Workload Identity bindings for e2e.
 
 # ---------------------------------------------------------------------------

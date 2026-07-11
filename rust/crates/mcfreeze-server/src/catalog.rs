@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Catalog file format deserialized from `catalog.json`.
 //!
 //! The Lifecycle Manager writes an atomic `rename(2)` of this file when

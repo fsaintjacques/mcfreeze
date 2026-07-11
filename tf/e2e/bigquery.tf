@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Deterministic BQ test fixture for e2e builds.
 
 resource "google_bigquery_dataset" "e2e" {

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # GCS bucket for e2e test artifacts (protobuf descriptors, etc.).
 
 resource "google_storage_bucket" "e2e_artifacts" {

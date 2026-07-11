@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ui provides an embedded web UI for the mcfreeze node agent.
 // It exposes dataset state, catalog/kv-server version comparisons, key
 // lookups, and kv-server metrics through a server-side rendered HTML

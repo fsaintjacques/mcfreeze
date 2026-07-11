@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 module github.com/fsaintjacques/mcfreeze/go
 
 go 1.26.1

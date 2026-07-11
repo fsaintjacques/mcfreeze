@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 # Control-Plane Phase 1: HTTP API Shell + Full-Loop Integration Test
 
 ## Goal

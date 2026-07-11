@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod data;
 pub mod index;
 pub mod meta;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use arrow_schema::Schema;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};

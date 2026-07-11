@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Default values for the mcfreeze Helm chart.
 
 image:

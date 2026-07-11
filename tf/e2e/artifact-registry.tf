@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Container image repository for e2e builds.
 
 resource "google_artifact_registry_repository" "mcfreeze" {

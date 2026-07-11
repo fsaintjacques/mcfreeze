@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 output "cluster_name" {
   description = "GKE cluster name (pass to gcloud container clusters get-credentials)."
   value       = google_container_cluster.e2e.name

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use bytemuck::{Pod, Zeroable};
 use xxhash_rust::xxh64::xxh64;
 

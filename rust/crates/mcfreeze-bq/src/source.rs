@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use arrow::buffer::Buffer;
 use arrow::ipc::reader::StreamDecoder;
 use bytes::Bytes;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Memcache meta protocol — parser and framer.
 //!
 //! ## Parser
