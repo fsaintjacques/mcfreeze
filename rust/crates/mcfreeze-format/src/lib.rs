@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod data;
-pub mod index;
 pub mod meta;
-pub mod reader;
-pub mod spill;
-pub mod writer;
+pub mod v4;
+
+// Path compatibility while consumers migrate to the `Snapshot` facade
+// (doc/plan/FORMAT_INTERFACE.md): `mcfreeze_format::reader::...` etc.
+// keep resolving to the V4 implementation.
+pub use v4::{index, reader, spill, writer};
 
 mod error;
 pub use error::Error;
