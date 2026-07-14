@@ -30,6 +30,12 @@ pub enum Error {
     #[error("unsupported hash algorithm: {0}")]
     UnsupportedHashAlgorithm(String),
 
+    #[error("unsupported format version: {0}")]
+    UnsupportedFormatVersion(u32),
+
+    #[error("unknown format: {got:?} (expected one of: {expected})")]
+    UnknownFormat { got: String, expected: String },
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
