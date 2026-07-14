@@ -1,6 +1,6 @@
 //! Snapshot mode: serve a single static snapshot directory.
 //!
-//! Opens one [`SnapshotReader`] at startup and passes it to the listener
+//! Opens one [`Snapshot`] at startup and passes it to the listener
 //! stack as a [`SnapshotLookup`].  No inotify, no catalog, no hot-swap.
 
 use std::net::SocketAddr;
@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcfreeze_format::reader::SnapshotReader;
+use mcfreeze_format::Snapshot;
 use prometheus_client::registry::Registry;
 
 use crate::listener::run_listeners;
@@ -51,7 +51,9 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     metrics.active_datasets.set(1);
     metrics.catalog_generation.set(0);
 
-    let reader = SnapshotReader::open(&cfg.dir)?;
+    // Blocking (residency work included), but this is startup: listeners
+    // have not been bound yet, so nothing is being starved.
+    let reader = Snapshot::open_path(&cfg.dir)?;
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
     let factory: Arc<dyn LookupFactory> = Arc::new(SnapshotLookup::new(Arc::new(reader)));

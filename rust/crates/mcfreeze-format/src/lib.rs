@@ -3,14 +3,16 @@
 pub mod data;
 pub mod desc;
 pub mod meta;
+pub mod snapshot;
 pub mod v4;
 
 pub use desc::{FormatId, SnapshotDesc};
+pub use snapshot::{GetOutcome, OpenOptions, Snapshot};
 
-// Path compatibility while consumers migrate to the `Snapshot` facade
-// (doc/plan/FORMAT_INTERFACE.md): `mcfreeze_format::reader::...` etc.
-// keep resolving to the V4 implementation.
-pub use v4::{index, reader, spill, writer};
+// Path compatibility for the loader's write path until it migrates to
+// `FormatBuilder` (doc/plan/FORMAT_INTERFACE.md). The reader is only
+// reachable through the `Snapshot` facade.
+pub use v4::{index, spill, writer};
 
 mod error;
 pub use error::Error;

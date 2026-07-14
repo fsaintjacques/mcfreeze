@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::Path;
 
 use memmap2::MmapOptions;
@@ -155,12 +155,8 @@ impl<'a> PartitionReader<'a> {
 /// table is a slice within that mapping. `data.bin` files are opened for
 /// on-demand `pread`.
 ///
-/// ```text
-/// let r = SnapshotReader::open("/snapshots/v42")?;
-/// if let Some(val) = r.get(b"my-key")? {
-///     // use val
-/// }
-/// ```
+/// Constructed by `Snapshot::open` with metadata parsed by
+/// `SnapshotDesc::load`.
 pub struct SnapshotReader {
     layout: Layout,
     verify_seed: u64,
@@ -171,13 +167,14 @@ pub struct SnapshotReader {
 }
 
 impl SnapshotReader {
-    /// Open a snapshot directory.  Reads `meta.json`, validates the format,
-    /// mmaps `index.all`, then opens every partition's `data.bin`.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+    /// Open a snapshot directory from already-parsed metadata (see
+    /// `SnapshotDesc::load`). Mmaps `index.all`, opens every partition's
+    /// `data.bin`, and synchronously populates the index into the page
+    /// cache (`MADV_POPULATE_READ`, Linux 5.14+) so the first serving
+    /// request does not page-fault against cold storage. Blocking and
+    /// potentially heavy — call from a blocking context.
+    pub fn open(root: impl AsRef<Path>, meta: &Meta) -> Result<Self> {
         let root = root.as_ref();
-
-        let json = fs::read_to_string(root.join("meta.json"))?;
-        let meta: Meta = serde_json::from_str(&json)?;
         let layout = meta.layout()?;
 
         let idx_file = File::open(index_path(root))?;
@@ -185,8 +182,21 @@ impl SnapshotReader {
 
         #[cfg(target_os = "linux")]
         {
+            // Access-pattern hints: best-effort, performance-only.
             let _ = index_mmap.advise(memmap2::Advice::Random);
             let _ = index_mmap.advise(memmap2::Advice::HugePage);
+            // Populate is load-bearing: open() promises a reader at
+            // steady-state latency, so a populate that fails for a real
+            // reason (ENOMEM, I/O error faulting from storage) must fail
+            // the open. EINVAL/unsupported means the kernel (< 5.14)
+            // does not know the hint — lazy faulting is the best
+            // available there, not an error.
+            if let Err(e) = index_mmap.advise(memmap2::Advice::PopulateRead) {
+                match e.kind() {
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported => {}
+                    _ => return Err(e.into()),
+                }
+            }
         }
 
         let mut data_files = Vec::with_capacity(layout.n_partitions as usize);
@@ -224,18 +234,6 @@ impl SnapshotReader {
         let fp = fingerprint(key);
         self.partition(self.layout.partition_of(fp)).get(key, fp)
     }
-
-    /// Synchronously populate the index mmap into the page cache.
-    ///
-    /// Issues `MADV_POPULATE_READ` (Linux 5.14+), which blocks until every
-    /// page of `index.all` is resident. Intended to be called from a blocking
-    /// context immediately after `open` so the first serving request does not
-    /// page-fault against cold storage. No-op on non-Linux targets and on
-    /// kernels that do not support the hint.
-    pub fn prewarm_index(&self) {
-        #[cfg(target_os = "linux")]
-        let _ = self.index_mmap.advise(memmap2::Advice::PopulateRead);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +256,13 @@ mod tests {
         dir
     }
 
+    /// Parse meta.json and open the reader, as `Snapshot::open` would.
+    fn open_snapshot(root: &Path) -> SnapshotReader {
+        let json = std::fs::read_to_string(root.join("meta.json")).unwrap();
+        let meta: Meta = serde_json::from_str(&json).unwrap();
+        SnapshotReader::open(root, &meta).unwrap()
+    }
+
     // --- basic roundtrip ---
 
     fn assert_hit(o: GetOutcome, expected: &[u8]) {
@@ -275,7 +280,7 @@ mod tests {
             (b"alpha", b"beta gamma delta"),
         ];
         let dir = build_snapshot(pairs, 4);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
 
         for &(k, v) in pairs {
             assert_hit(r.get(k).unwrap(), v);
@@ -285,7 +290,7 @@ mod tests {
     #[test]
     fn get_missing_key_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")], 4);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_eq!(r.get(b"absent").unwrap(), GetOutcome::Miss);
     }
 
@@ -294,7 +299,7 @@ mod tests {
     #[test]
     fn get_empty_value() {
         let dir = build_snapshot(&[(b"k", b"")], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_hit(r.get(b"k").unwrap(), b"");
     }
 
@@ -302,7 +307,7 @@ mod tests {
     fn get_large_value() {
         let big = vec![0xABu8; 1024 * 1024]; // 1 MiB
         let dir = build_snapshot(&[(b"big", &big)], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_hit(r.get(b"big").unwrap(), &big);
     }
 
@@ -325,7 +330,7 @@ mod tests {
             .collect();
 
         let dir = build_snapshot(&pairs, 64);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
 
         for (k, v) in &vals {
             assert_hit(r.get(k).unwrap(), v);
@@ -338,7 +343,7 @@ mod tests {
     fn single_partition_roundtrip() {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")];
         let dir = build_snapshot(pairs, 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         for &(k, v) in pairs {
             assert_hit(r.get(k).unwrap(), v);
         }
@@ -351,7 +356,7 @@ mod tests {
         // 200-byte value + 12-byte header = 212 bytes, fits in one 4KB page read.
         let val = vec![0xCCu8; 200];
         let dir = build_snapshot(&[(b"k", &val)], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_hit(r.get(b"k").unwrap(), &val);
     }
 
@@ -360,7 +365,7 @@ mod tests {
         // Value larger than 4KB forces the second pread path.
         let val = vec![0xDDu8; 8192];
         let dir = build_snapshot(&[(b"big", &val)], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_hit(r.get(b"big").unwrap(), &val);
     }
 
@@ -369,14 +374,14 @@ mod tests {
         // Single small value: data.bin is only one 64-byte block.
         // The speculative read requests up to 4KB but the file is smaller.
         let dir = build_snapshot(&[(b"tiny", b"x")], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         assert_hit(r.get(b"tiny").unwrap(), b"x");
     }
 
     #[test]
     fn truncated_data_file_returns_error() {
         let dir = build_snapshot(&[(b"k", b"v")], 1);
-        let r = SnapshotReader::open(dir.path()).unwrap();
+        let r = open_snapshot(dir.path());
         // Truncate data.bin to 0 — should error, not silently miss.
         std::fs::OpenOptions::new()
             .write(true)
@@ -406,7 +411,7 @@ mod tests {
                 let pairs: &[(&[u8], &[u8])] =
                     &[(prev.as_bytes(), b"value-a"), (k.as_bytes(), b"value-b")];
                 let dir = build_snapshot(pairs, 1);
-                let r = SnapshotReader::open(dir.path()).unwrap();
+                let r = open_snapshot(dir.path());
 
                 assert_hit(r.get(prev.as_bytes()).unwrap(), b"value-a");
                 assert_hit(r.get(k.as_bytes()).unwrap(), b"value-b");
@@ -433,7 +438,7 @@ mod tests {
             let cfp = compact_fingerprint(fp);
             if let Some(prev) = seen.get(&cfp) {
                 let dir = build_snapshot(&[(prev.as_bytes(), b"stored")], 1);
-                let r = SnapshotReader::open(dir.path()).unwrap();
+                let r = open_snapshot(dir.path());
                 assert_eq!(r.get(k.as_bytes()).unwrap(), GetOutcome::Collision);
                 return;
             }
