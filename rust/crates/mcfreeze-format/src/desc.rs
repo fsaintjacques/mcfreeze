@@ -162,6 +162,10 @@ impl SnapshotDesc {
             VersionedMeta::V4(m) => m.partitions.len() as u32,
         }
     }
+
+    pub(crate) fn meta(&self) -> &VersionedMeta {
+        &self.meta
+    }
 }
 
 // ---------------------------------------------------------------------------

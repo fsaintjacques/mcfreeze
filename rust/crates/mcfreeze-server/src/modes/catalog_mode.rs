@@ -5,12 +5,18 @@
 //! 1. Load the initial `catalog.json` at startup; build an [`ActiveCatalog`].
 //! 2. Spawn an inotify watcher task on the catalog file's parent directory.
 //! 3. On each `IN_MOVED_TO` event matching the catalog filename:
-//!    a. Open new [`SnapshotReader`]s and build a fresh [`ActiveCatalog`].
+//!    a. Open new [`Snapshot`]s and build a fresh [`ActiveCatalog`].
 //!    b. Atomically swap it into the [`Registry`].
-//!    c. Drop the old [`Arc<ActiveCatalog>`] (releases mmaps and fds).
-//!    d. Write the ack file so the Lifecycle Manager can proceed with unmount.
+//!    c. Detach old-generation teardown to the blocking pool.
 //! 4. Listeners run forever; their [`PerConnectionCatalogLookup`]s pick up the
 //!    new generation on the next request without any coordination.
+//!
+//! Teardown ordering: mmaps and fds are released when the last holder —
+//! the detached drop or an in-flight request still pinning the `Arc` —
+//! lets go; there is deliberately no ordering with the reload sequence.
+//! Any future ack-file write for the Lifecycle Manager must either await
+//! the teardown or tolerate a still-mapped old generation (unmount
+//! retries on EBUSY already assume the latter).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -222,7 +228,13 @@ async fn watch_catalog(
                 let old = registry.swap(Arc::clone(&new_arc));
 
                 log_catalog_diff(&old, &new_arc, next_gen);
-                drop(old); // release mmaps and file descriptors
+                // Teardown (munmap of multi-GB mappings, fd closes) can
+                // take milliseconds; run it on the blocking pool so this
+                // task and the serving path never pay it. If an in-flight
+                // request still holds the Arc, this drop is a cheap
+                // decrement and the request pays instead — rare, bounded
+                // by the idle timeout.
+                tokio::task::spawn_blocking(move || drop(old));
 
                 generation.store(next_gen, Ordering::Relaxed);
                 metrics.catalog_generation.set(next_gen as i64);
@@ -301,7 +313,8 @@ fn log_catalog_diff(old: &ActiveCatalog, new: &ActiveCatalog, generation: u64) {
 // ---------------------------------------------------------------------------
 
 /// Open all datasets listed in `catalog_path` and build an [`ActiveCatalog`].
-/// Runs in the blocking thread pool since `SnapshotReader::open` does file I/O.
+/// Runs in the blocking thread pool since `Snapshot::open` does file I/O
+/// and residency work.
 async fn build_catalog_blocking(
     catalog_path: PathBuf,
     generation: u64,

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
-use mcfreeze_format::reader::SnapshotReader;
+use mcfreeze_format::Snapshot;
 
 use crate::lookup::LookupOutcome;
 use crate::ServeError;
@@ -33,19 +33,19 @@ use crate::ServeError;
 pub struct DatasetHandle {
     pub name: String,
     pub version: String,
-    reader: Arc<SnapshotReader>,
+    reader: Arc<Snapshot>,
 }
 
 impl DatasetHandle {
     /// Open the snapshot at `dir` and wrap it in a named handle.
     ///
-    /// Pre-warms the index mmap synchronously so the first request against the
-    /// new handle does not page-fault against cold storage. Callers must run
-    /// this on a blocking-friendly context (the catalog builder uses
+    /// `Snapshot::open` performs all residency work (including populating
+    /// the index into the page cache), so the first request against the
+    /// new handle does not page-fault against cold storage. Callers must
+    /// run this on a blocking-friendly context (the catalog builder uses
     /// `spawn_blocking`).
     pub fn open(name: String, version: String, dir: &Path) -> Result<Self, ServeError> {
-        let reader = SnapshotReader::open(dir)?;
-        reader.prewarm_index();
+        let reader = Snapshot::open_path(dir)?;
         Ok(Self {
             name,
             version,
@@ -168,8 +168,10 @@ impl Registry {
 
     /// Replace the active catalog.  Called only by the catalog-watcher task.
     ///
-    /// Returns the previous `Arc<ActiveCatalog>`; it is dropped by the caller
-    /// after writing the ack file, allowing mmaps and fds to be released.
+    /// Returns the previous `Arc<ActiveCatalog>`; the caller detaches its
+    /// teardown to the blocking pool. Mmaps and fds are released whenever
+    /// the last reference (detached drop or in-flight request) goes away —
+    /// there is no ordering guarantee relative to the reload sequence.
     pub fn swap(&self, new: Arc<ActiveCatalog>) -> Arc<ActiveCatalog> {
         self.inner.swap(new)
     }

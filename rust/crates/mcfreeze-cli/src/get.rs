@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 
-use mcfreeze_format::reader::{GetOutcome, SnapshotReader};
+use mcfreeze_format::{GetOutcome, Snapshot};
 
 #[derive(Args)]
 pub struct GetArgs {
@@ -25,7 +25,7 @@ pub struct GetArgs {
 }
 
 pub fn run(args: GetArgs) -> Result<()> {
-    let reader = SnapshotReader::open(&args.snapshot).context("failed to open snapshot")?;
+    let reader = Snapshot::open_path(&args.snapshot).context("failed to open snapshot")?;
 
     match reader.get(args.key.as_bytes()).context("lookup failed")? {
         GetOutcome::Miss => {

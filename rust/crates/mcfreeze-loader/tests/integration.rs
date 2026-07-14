@@ -3,7 +3,7 @@ use std::io::Write;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use tempfile::TempDir;
 
-use mcfreeze_format::reader::{GetOutcome, SnapshotReader};
+use mcfreeze_format::{GetOutcome, Snapshot};
 use mcfreeze_loader::{CsvSource, LoaderConfig, RawEncodingSource, SnapshotLoader};
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ async fn empty_source() {
     assert_eq!(stats.n_keys, 0);
     assert!(snap_dir.path().join("meta.json").exists());
 
-    let reader = SnapshotReader::open(snap_dir.path()).unwrap();
+    let reader = Snapshot::open_path(snap_dir.path()).unwrap();
     assert_eq!(reader.get(b"anything").unwrap(), GetOutcome::Miss);
 }
 
@@ -111,7 +111,7 @@ async fn roundtrip_small() {
     assert_eq!(stats.n_keys, n as u64);
     assert!(snap_dir.path().join("meta.json").exists());
 
-    let reader = SnapshotReader::open(snap_dir.path()).unwrap();
+    let reader = Snapshot::open_path(snap_dir.path()).unwrap();
     for (key, val) in &pairs {
         assert_hit(reader.get(key).unwrap(), val);
     }
@@ -129,7 +129,7 @@ async fn roundtrip_large() {
         .await
         .unwrap();
 
-    let reader = SnapshotReader::open(snap_dir.path()).unwrap();
+    let reader = Snapshot::open_path(snap_dir.path()).unwrap();
     for (key, val) in &pairs {
         assert_hit(reader.get(key).unwrap(), val);
     }
@@ -240,7 +240,7 @@ async fn load_parallel_roundtrip() {
 
     assert_eq!(stats.n_keys, (n_streams * n_per_stream) as u64);
 
-    let reader = SnapshotReader::open(snap_dir.path()).unwrap();
+    let reader = Snapshot::open_path(snap_dir.path()).unwrap();
     for (key, val) in &all_pairs {
         assert_hit(reader.get(key).unwrap(), val);
     }

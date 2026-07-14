@@ -134,15 +134,13 @@ pub struct Meta {
 }
 
 impl Meta {
-    /// Validate the format version, hash algorithm, and partition count,
-    /// then return the derived [`Layout`].
+    /// Validate the hash algorithm and partition count, then return the
+    /// derived [`Layout`].
+    ///
+    /// `format_version` is not checked here: version dispatch has a
+    /// single owner, the probe in `SnapshotDesc::load` — a `Meta` only
+    /// exists once the probe has already committed to V4.
     pub fn layout(&self) -> Result<Layout> {
-        if self.format_version != FORMAT_VERSION {
-            return Err(Error::VersionMismatch {
-                expected: FORMAT_VERSION,
-                got: self.format_version,
-            });
-        }
         if self.hash_algorithm != HASH_ALGORITHM {
             return Err(Error::UnsupportedHashAlgorithm(self.hash_algorithm.clone()));
         }
@@ -209,13 +207,6 @@ mod tests {
         let meta = test_meta(64);
         let layout = meta.layout().unwrap();
         assert_eq!(layout.n_partitions, 64);
-    }
-
-    #[test]
-    fn meta_rejects_old_format_version() {
-        let mut meta = test_meta(64);
-        meta.format_version = 2;
-        assert!(meta.layout().is_err());
     }
 
     #[test]

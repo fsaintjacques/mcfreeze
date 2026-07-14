@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use mcfreeze_format::reader::{GetOutcome, SnapshotReader};
+use mcfreeze_format::{GetOutcome, Snapshot};
 
 use crate::registry::{ActiveCatalog, Registry};
 use crate::ServeError;
@@ -78,13 +78,13 @@ pub trait LookupFactory: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// Single-snapshot lookup.  `pread` is offloaded to the blocking thread pool;
-/// the inner `Arc<SnapshotReader>` is cheaply cloned per connection.
+/// the inner `Arc<Snapshot>` is cheaply cloned per connection.
 pub struct SnapshotLookup {
-    inner: Arc<SnapshotReader>,
+    inner: Arc<Snapshot>,
 }
 
 impl SnapshotLookup {
-    pub fn new(reader: Arc<SnapshotReader>) -> Self {
+    pub fn new(reader: Arc<Snapshot>) -> Self {
         Self { inner: reader }
     }
 }
@@ -196,7 +196,7 @@ fn split_prefix(key: &[u8]) -> Result<(&[u8], &[u8]), ServeError> {
 mod tests {
     use super::*;
     use crate::registry::{DatasetHandle, Registry};
-    use mcfreeze_format::{reader::SnapshotReader, writer::SnapshotWriter};
+    use mcfreeze_format::writer::SnapshotWriter;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -226,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn hit_returns_value() {
         let dir = build_snapshot(&[(b"hello", b"world")]);
-        let reader = SnapshotReader::open(dir.path()).unwrap();
+        let reader = Snapshot::open_path(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
         assert_hit(lookup.get(b"hello").await.unwrap(), b"world");
     }
@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn miss_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")]);
-        let reader = SnapshotReader::open(dir.path()).unwrap();
+        let reader = Snapshot::open_path(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
         assert_miss(lookup.get(b"absent").await.unwrap());
     }
@@ -242,7 +242,7 @@ mod tests {
     #[tokio::test]
     async fn factory_creates_independent_connection_lookups() {
         let dir = build_snapshot(&[(b"k", b"v")]);
-        let reader = SnapshotReader::open(dir.path()).unwrap();
+        let reader = Snapshot::open_path(dir.path()).unwrap();
         let factory = SnapshotLookup::new(Arc::new(reader));
         let mut c1 = factory.for_connection();
         let mut c2 = factory.for_connection();
@@ -260,7 +260,7 @@ mod tests {
             w.finish().unwrap();
             d
         };
-        let reader = SnapshotReader::open(dir.path()).unwrap();
+        let reader = Snapshot::open_path(dir.path()).unwrap();
         let mut lookup = SnapshotLookup::new(Arc::new(reader));
         std::fs::OpenOptions::new()
             .write(true)

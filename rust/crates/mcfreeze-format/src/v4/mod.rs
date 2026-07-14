@@ -4,6 +4,6 @@
 //! values read via `pread` (`data.bin`). See `doc/format.md`.
 
 pub mod index;
-pub mod reader;
+pub(crate) mod reader;
 pub mod spill;
 pub mod writer;
