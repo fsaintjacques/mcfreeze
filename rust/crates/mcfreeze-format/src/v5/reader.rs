@@ -9,7 +9,7 @@
 //! there is no populate step and nothing for the kernel to evict from
 //! under the reader; only `blocks.bin`/`heap.bin` fds stay open.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::path::Path;
 
 use crate::{
@@ -40,10 +40,14 @@ struct FenceArray {
 
 impl FenceArray {
     /// Read `path` into a fresh anonymous mapping and close the file.
-    /// `expected_blocks` comes from `meta.json`; a size mismatch is
-    /// corruption (truncated or foreign `fences.bin`), caught at open.
+    /// `expected_blocks` comes from `meta.json` (already bounded by
+    /// `Meta::layout`, so the `× 4` cannot overflow); a size mismatch
+    /// is corruption (truncated or foreign `fences.bin`), caught at
+    /// open. One open, sized from the handle: the stat and the read
+    /// see the same file.
     fn load(path: &Path, expected_blocks: u64, partition: usize) -> Result<Self> {
-        let len = fs::metadata(path)?.len();
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
         if len != expected_blocks * 4 {
             return Err(Error::SnapshotFileSize {
                 partition,
@@ -63,7 +67,7 @@ impl FenceArray {
             let _ = map.advise(memmap2::Advice::HugePage);
         }
         use std::io::Read;
-        File::open(path)?.read_exact(&mut map)?;
+        file.read_exact(&mut map)?;
         Ok(Self { map: Some(map) })
     }
 
@@ -110,6 +114,7 @@ impl SnapshotReader {
 
             let blocks = File::open(dir.join("blocks.bin"))?;
             let blocks_len = blocks.metadata()?.len();
+            // No overflow: Meta::layout bounds n_blocks × block_size.
             if blocks_len != pm.n_blocks * block_size {
                 return Err(Error::SnapshotFileSize {
                     partition: i,
@@ -301,6 +306,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn paid_miss_reports_io_true() {
+        // Guards the exported expected_miss_io_rate contract: sketchless
+        // V5 misses that reach a block must say so. With 100 present
+        // keys, only a fingerprint below the partition's first fence
+        // misses for free (~1% of random keys), so an absent key paying
+        // I/O is found within a handful of tries.
+        let vals: Vec<(Vec<u8>, Vec<u8>)> = (0..100)
+            .map(|i| {
+                (
+                    format!("key-{i}").into_bytes(),
+                    format!("val-{i}").into_bytes(),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = vals.iter().map(|(k, v)| (&k[..], &v[..])).collect();
+        let dir = build(&pairs, 1);
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+
+        let paid = (0..1000).any(
+            |i| match snap.get(format!("absent-{i}").as_bytes()).unwrap() {
+                GetOutcome::Miss { io } => io,
+                GetOutcome::Hit(_) => panic!("absent key hit"),
+            },
+        );
+        assert!(paid, "no absent key produced a paid miss in 1000 tries");
     }
 
     #[test]

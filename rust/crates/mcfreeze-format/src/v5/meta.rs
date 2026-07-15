@@ -62,6 +62,15 @@ impl Meta {
             return Err(Error::UnsupportedHashAlgorithm(self.hash_algorithm.clone()));
         }
         validate_block_size(self.block_size)?;
+        // Bound n_blocks so `n_blocks × block_size` (and a fortiori
+        // `n_blocks × 4` for fences.bin) cannot overflow u64: a corrupt
+        // meta.json must fail here with a typed error, not wrap the
+        // reader's open-time size checks into accepting garbage.
+        for pm in &self.partitions {
+            if pm.n_blocks.checked_mul(self.block_size as u64).is_none() {
+                return Err(Error::InvalidBlockCount(pm.n_blocks));
+            }
+        }
         Layout::new(self.partitions.len() as u32)
     }
 }
@@ -106,6 +115,18 @@ mod tests {
         let mut m = test_meta(1);
         m.hash_algorithm = "sha256".into();
         assert!(m.layout().is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_n_blocks() {
+        // A corrupt meta.json with a huge n_blocks must fail at load
+        // with a typed error, not wrap the reader's size arithmetic.
+        let mut m = test_meta(1);
+        m.partitions[0].n_blocks = u64::MAX / 2;
+        assert!(matches!(
+            m.layout(),
+            Err(Error::InvalidBlockCount(n)) if n == u64::MAX / 2
+        ));
     }
 
     #[test]

@@ -36,6 +36,9 @@ pub enum Error {
     #[error("block_size must be a power of two >= 4096, got {0}")]
     InvalidBlockSize(u32),
 
+    #[error("n_blocks {0} overflows the addressable partition size")]
+    InvalidBlockCount(u64),
+
     #[error("heap value checksum mismatch")]
     ValueChecksumMismatch,
 
