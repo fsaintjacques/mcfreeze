@@ -94,7 +94,10 @@ async fn empty_source() {
     assert!(snap_dir.path().join("meta.json").exists());
 
     let reader = Snapshot::open_path(snap_dir.path()).unwrap();
-    assert_eq!(reader.get(b"anything").unwrap(), GetOutcome::Miss);
+    assert_eq!(
+        reader.get(b"anything").unwrap(),
+        GetOutcome::Miss { io: false }
+    );
 }
 
 #[tokio::test]
@@ -115,7 +118,10 @@ async fn roundtrip_small() {
     for (key, val) in &pairs {
         assert_hit(reader.get(key).unwrap(), val);
     }
-    assert_eq!(reader.get(b"definitely-absent").unwrap(), GetOutcome::Miss);
+    assert_eq!(
+        reader.get(b"definitely-absent").unwrap(),
+        GetOutcome::Miss { io: false }
+    );
 }
 
 #[tokio::test]

@@ -13,24 +13,7 @@ use crate::{
     Result,
 };
 
-// ---------------------------------------------------------------------------
-// GetOutcome — distinguishes a no-candidate miss from a fingerprint collision
-// ---------------------------------------------------------------------------
-
-/// Result of a successful (non-Err) lookup.
-///
-/// `Collision` is a "slow miss": the index produced at least one candidate
-/// slot (compact-fingerprint match) but none of the pread'd records passed
-/// verify-fingerprint check.  Lookups reaching this state paid for one or
-/// more `pread` syscalls; lookups ending in `Miss` paid nothing.
-///
-/// The `Collision` rate is the health signal for seed / fingerprint quality.
-#[derive(Debug, PartialEq, Eq)]
-pub enum GetOutcome {
-    Hit(Vec<u8>),
-    Miss,
-    Collision,
-}
+use crate::snapshot::GetOutcome;
 
 // ---------------------------------------------------------------------------
 // PartitionReader — index probe + data read for a single partition
@@ -54,16 +37,18 @@ impl<'a> PartitionReader<'a> {
         }
     }
 
-    /// Look up `key`.  Returns [`GetOutcome::Miss`] when the index yields no
-    /// candidate slots, [`GetOutcome::Collision`] when candidates existed but
-    /// none verified, or [`GetOutcome::Hit`] with the value.
+    /// Look up `key`.  Returns `Miss { io: false }` when the index yields
+    /// no candidate slots (no disk touched), `Miss { io: true }` when
+    /// candidates existed — a compact-fingerprint collision paid one or
+    /// more `pread`s — but none verified, or [`GetOutcome::Hit`] with the
+    /// value.
     ///
     /// The caller must supply the full 64-bit `fingerprint` so that
     /// `compact_fingerprint` and `home_position` can be derived.
     pub fn get(&self, key: &[u8], fp: u64) -> Result<GetOutcome> {
         let n = self.buckets.len();
         if n == 0 {
-            return Ok(GetOutcome::Miss);
+            return Ok(GetOutcome::Miss { io: false });
         }
 
         let cfp = compact_fingerprint(fp);
@@ -94,11 +79,7 @@ impl<'a> PartitionReader<'a> {
             steps += GROUP_SIZE;
         }
 
-        Ok(if had_candidate {
-            GetOutcome::Collision
-        } else {
-            GetOutcome::Miss
-        })
+        Ok(GetOutcome::Miss { io: had_candidate })
     }
 
     /// Speculatively read to the next 4KB page boundary. This avoids a
@@ -291,7 +272,7 @@ mod tests {
     fn get_missing_key_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")], 4);
         let r = open_snapshot(dir.path());
-        assert_eq!(r.get(b"absent").unwrap(), GetOutcome::Miss);
+        assert_eq!(r.get(b"absent").unwrap(), GetOutcome::Miss { io: false });
     }
 
     // --- value sizes ---
@@ -423,7 +404,7 @@ mod tests {
     }
 
     /// Writing key_a but querying key_b — where both share a compact-fingerprint —
-    /// yields a `Collision` outcome, not a plain `Miss`. The index returns a
+    /// yields `Miss { io: true }`, not a free miss. The index returns a
     /// candidate slot, the pread succeeds, but the stored verify-fingerprint
     /// doesn't match and no further candidates exist.
     #[test]
@@ -439,7 +420,7 @@ mod tests {
             if let Some(prev) = seen.get(&cfp) {
                 let dir = build_snapshot(&[(prev.as_bytes(), b"stored")], 1);
                 let r = open_snapshot(dir.path());
-                assert_eq!(r.get(k.as_bytes()).unwrap(), GetOutcome::Collision);
+                assert_eq!(r.get(k.as_bytes()).unwrap(), GetOutcome::Miss { io: true });
                 return;
             }
             seen.insert(cfp, k);

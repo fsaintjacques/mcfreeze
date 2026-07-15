@@ -85,6 +85,9 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
 
     metrics.active_datasets.set(n_ds);
     metrics.catalog_generation.set(0);
+    metrics
+        .expected_miss_io_rate
+        .set(registry.load().max_expected_miss_io_rate());
 
     let generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let factory: Arc<dyn LookupFactory> = Arc::new(CatalogLookup::new(Arc::clone(&registry)));
@@ -224,6 +227,7 @@ async fn watch_catalog(
             }
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
+                let expected_miss_io = new_catalog.max_expected_miss_io_rate();
                 let new_arc = Arc::new(new_catalog);
                 let old = registry.swap(Arc::clone(&new_arc));
 
@@ -239,6 +243,7 @@ async fn watch_catalog(
                 generation.store(next_gen, Ordering::Relaxed);
                 metrics.catalog_generation.set(next_gen as i64);
                 metrics.active_datasets.set(n_ds);
+                metrics.expected_miss_io_rate.set(expected_miss_io);
             }
         }
     }

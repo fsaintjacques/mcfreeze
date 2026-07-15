@@ -6,7 +6,7 @@
 //! [`run_metrics_server`] to expose the Prometheus text exposition format.
 
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -32,10 +32,13 @@ use serde::Serialize;
 
 /// Label for `mcf_request_duration_seconds` and `mcf_catalog_swap_total`.
 ///
-/// Values on `mcf_request_duration_seconds`: `"hit"`, `"miss"`, `"collision"`,
-/// `"error"`.  `collision` is a fingerprint false positive — the index returned
-/// a candidate slot, the reader paid for `pread`, but the stored verify
-/// fingerprint didn't match.  Wire response is identical to a miss.
+/// Values on `mcf_request_duration_seconds`: `"hit"`, `"miss"`,
+/// `"miss_io"`, `"error"`.  `miss_io` is a miss that paid one or more
+/// `pread`s to conclude absence — a fingerprint or filter false positive.
+/// Its expected rate is format-dependent: compare the observed
+/// `miss_io / (miss + miss_io)` ratio against `mcf_expected_miss_io_rate`
+/// rather than alerting on absolute counts. Wire response is identical
+/// to a miss.
 ///
 /// Values on `mcf_catalog_swap_total`: `"ok"`, `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -78,11 +81,17 @@ const RESPONSE_BYTES_BUCKETS: [f64; 8] = [
 /// All Prometheus metrics for the server.  Shared via `Arc<Metrics>`.
 pub struct Metrics {
     // --- request ---
-    /// End-to-end per-key latency; label `result` ∈ {hit, miss, error}.
-    /// The histogram's `_count` series gives per-result and total lookup counts.
+    /// End-to-end per-key latency; label `result` ∈ {hit, miss, miss_io,
+    /// error}.  The histogram's `_count` series gives per-result and total
+    /// lookup counts.
     pub request_duration_seconds: Family<ResultLabels, Histogram>,
     /// Per-response value-size distribution (hits only); `_sum` is total bytes sent.
     pub response_bytes: Histogram,
+    /// Expected fraction of misses that pay I/O, from the active
+    /// snapshots' formats (max across datasets; ≈0 for V4). The observed
+    /// counterpart is `miss_io / (miss + miss_io)` from
+    /// `mcf_request_duration_seconds_count`.
+    pub expected_miss_io_rate: Gauge<f64, AtomicU64>,
 
     // --- catalog (always present; snapshot mode uses static values) ---
     /// Current catalog generation; always 0 in snapshot mode.
@@ -127,6 +136,12 @@ impl Metrics {
             "Per-response value size in bytes (hits only)",
             Histogram::new(RESPONSE_BYTES_BUCKETS.iter().copied())
         );
+        let expected_miss_io_rate = reg!(
+            registry,
+            "mcf_expected_miss_io_rate",
+            "Expected fraction of misses paying I/O for the active formats",
+            Gauge::<f64, AtomicU64>::default()
+        );
         let catalog_generation = reg!(
             registry,
             "mcf_catalog_generation",
@@ -161,6 +176,7 @@ impl Metrics {
         Arc::new(Self {
             request_duration_seconds,
             response_bytes,
+            expected_miss_io_rate,
             catalog_generation,
             catalog_swap_total,
             active_datasets,

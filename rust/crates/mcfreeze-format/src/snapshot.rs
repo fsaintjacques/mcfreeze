@@ -26,7 +26,23 @@ use crate::{
     v4, Result,
 };
 
-pub use crate::v4::reader::GetOutcome;
+/// Result of a successful (non-Err) lookup.
+///
+/// Cost-defined, not mechanism-defined, so it means the same thing for
+/// every format behind the facade:
+///
+/// - `Miss { io: false }` — absence concluded without touching disk.
+/// - `Miss { io: true }` — one or more `pread`s were paid to conclude
+///   absence. V4 reaches this through a compact-fingerprint collision
+///   (expected rate ≈ 0; a sustained rise signals a hashing anomaly).
+///   Formats with probabilistic filters reach it at their configured
+///   false-positive rate. Alert on divergence from
+///   [`Snapshot::expected_miss_io_rate`], not on absolute counts.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GetOutcome {
+    Hit(Vec<u8>),
+    Miss { io: bool },
+}
 
 /// Process-local choices about *how* to open, as opposed to *what/where*
 /// (the [`SnapshotDesc`]). Deliberately empty for now: the extension slot
@@ -81,6 +97,16 @@ impl Snapshot {
     pub fn desc(&self) -> &SnapshotDesc {
         &self.desc
     }
+
+    /// Expected fraction of misses that pay I/O for this snapshot's
+    /// format and configuration. V4: ≈0 (32-bit fingerprint collisions
+    /// only). Exported as `mcf_expected_miss_io_rate`; dashboards compare
+    /// the observed `miss_io / (miss + miss_io)` ratio against it.
+    pub fn expected_miss_io_rate(&self) -> f64 {
+        match &self.inner {
+            Inner::V4(_) => 0.0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -102,7 +128,7 @@ mod tests {
             GetOutcome::Hit(v) => assert_eq!(v, b"v"),
             other => panic!("expected hit, got {other:?}"),
         }
-        assert_eq!(snap.get(b"absent").unwrap(), GetOutcome::Miss);
+        assert_eq!(snap.get(b"absent").unwrap(), GetOutcome::Miss { io: false });
     }
 
     #[test]

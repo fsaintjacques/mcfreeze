@@ -29,23 +29,21 @@ use crate::ServeError;
 
 /// Result of a successful lookup.
 ///
-/// `Collision` is a "slow miss": the underlying index produced at least one
-/// candidate slot but no pread'd record matched the query key's verify
-/// fingerprint.  These lookups pay for I/O; `Miss` lookups do not.  Keeping
-/// them distinct surfaces fingerprint-collision rate in `/metrics`.
+/// Mirrors [`GetOutcome`]'s cost semantics: `Miss { io: true }` paid one
+/// or more `pread`s to conclude absence (a fingerprint or filter false
+/// positive, surfaced as `result="miss_io"` in `/metrics`); `Miss { io:
+/// false }` touched no disk. The wire response is identical for both.
 #[derive(Debug)]
 pub enum LookupOutcome {
     Hit(Bytes),
-    Miss,
-    Collision,
+    Miss { io: bool },
 }
 
 impl From<GetOutcome> for LookupOutcome {
     fn from(o: GetOutcome) -> Self {
         match o {
             GetOutcome::Hit(v) => LookupOutcome::Hit(Bytes::from(v)),
-            GetOutcome::Miss => LookupOutcome::Miss,
-            GetOutcome::Collision => LookupOutcome::Collision,
+            GetOutcome::Miss { io } => LookupOutcome::Miss { io },
         }
     }
 }
@@ -218,7 +216,10 @@ mod tests {
     }
 
     fn assert_miss(o: LookupOutcome) {
-        assert!(matches!(o, LookupOutcome::Miss), "expected Miss, got {o:?}");
+        assert!(
+            matches!(o, LookupOutcome::Miss { .. }),
+            "expected Miss, got {o:?}"
+        );
     }
 
     // --- SnapshotLookup ---

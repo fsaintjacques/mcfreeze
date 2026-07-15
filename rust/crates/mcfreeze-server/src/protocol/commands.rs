@@ -91,13 +91,13 @@ async fn dispatch_mg(
             metrics.response_bytes.observe(bytes);
             "hit"
         }
-        Ok(LookupOutcome::Miss) => {
+        Ok(LookupOutcome::Miss { io: false }) => {
             write_en(dst);
             "miss"
         }
-        Ok(LookupOutcome::Collision) => {
+        Ok(LookupOutcome::Miss { io: true }) => {
             write_en(dst);
-            "collision"
+            "miss_io"
         }
         Err(e) => {
             tracing::error!(key = %String::from_utf8_lossy(key), "lookup error: {e}");
@@ -144,7 +144,7 @@ mod tests {
         async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
             Ok(match self.0.get(key) {
                 Some(&v) => LookupOutcome::Hit(Bytes::from_static(v)),
-                None => LookupOutcome::Miss,
+                None => LookupOutcome::Miss { io: false },
             })
         }
     }
@@ -159,13 +159,13 @@ mod tests {
         }
     }
 
-    // Lookup stub that always reports a fingerprint collision.
-    struct CollisionLookup;
+    // Lookup stub that always reports a paid-IO miss (filter/fingerprint false positive).
+    struct MissIoLookup;
 
     #[async_trait]
-    impl Lookup for CollisionLookup {
+    impl Lookup for MissIoLookup {
         async fn get(&mut self, _key: &[u8]) -> Result<LookupOutcome, ServeError> {
-            Ok(LookupOutcome::Collision)
+            Ok(LookupOutcome::Miss { io: true })
         }
     }
 
@@ -233,10 +233,10 @@ mod tests {
         assert_eq!(&dst[..], b"EN\r\n");
     }
 
-    // --- mg: collision (fingerprint false positive) ---
+    // --- mg: paid-IO miss (fingerprint/filter false positive) ---
 
     #[tokio::test]
-    async fn mg_collision_writes_en() {
+    async fn mg_miss_io_writes_en() {
         let mut dst = buf();
         let cmd = Command::Mg {
             key: Bytes::from_static(b"k"),
@@ -244,7 +244,7 @@ mod tests {
         };
         let d = dispatch(
             cmd,
-            &mut CollisionLookup,
+            &mut MissIoLookup,
             &mut dst,
             "0.1.0",
             0,

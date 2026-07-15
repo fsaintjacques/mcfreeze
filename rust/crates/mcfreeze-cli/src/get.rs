@@ -28,12 +28,12 @@ pub fn run(args: GetArgs) -> Result<()> {
     let reader = Snapshot::open_path(&args.snapshot).context("failed to open snapshot")?;
 
     match reader.get(args.key.as_bytes()).context("lookup failed")? {
-        GetOutcome::Miss => {
+        GetOutcome::Miss { io: false } => {
             eprintln!("not found");
             std::process::exit(1);
         }
-        GetOutcome::Collision => {
-            eprintln!("not found (fingerprint collision)");
+        GetOutcome::Miss { io: true } => {
+            eprintln!("not found (paid I/O: fingerprint/filter false positive)");
             std::process::exit(1);
         }
         GetOutcome::Hit(bytes) => {
