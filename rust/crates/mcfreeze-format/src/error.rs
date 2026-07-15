@@ -33,6 +33,9 @@ pub enum Error {
     #[error("unknown format: {got:?} (expected one of: {expected})")]
     UnknownFormat { got: String, expected: String },
 
+    #[error("finalize called before build")]
+    FinalizeBeforeBuild,
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 

@@ -3,6 +3,7 @@
 //! Format V4: Robin Hood hash index (`index.all`) + 64-byte-aligned
 //! values read via `pread` (`data.bin`). See `doc/format.md`.
 
+pub mod builder;
 pub mod index;
 pub(crate) mod reader;
 pub mod spill;

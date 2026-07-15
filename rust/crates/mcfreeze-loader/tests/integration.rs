@@ -263,6 +263,7 @@ async fn progress_callback_fires() {
     let calls2 = calls.clone();
 
     let config = LoaderConfig {
+        format: mcfreeze_format::FormatId::DEFAULT,
         n_partitions: 4,
         data_buf_bytes: 1024 * 1024,
         spill_buf_bytes: 64 * 1024,

@@ -26,9 +26,20 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Stable identifier for an on-disk snapshot format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializes as its `as_str` form (`"v4"`); used in transient phase
+/// sentinels (`scatter.done`) so resume paths can detect a `--format`
+/// mismatch before touching any data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FormatId {
     V4,
+}
+
+impl Default for FormatId {
+    fn default() -> Self {
+        FormatId::DEFAULT
+    }
 }
 
 impl FormatId {
