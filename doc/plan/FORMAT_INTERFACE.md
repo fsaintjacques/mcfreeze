@@ -157,12 +157,17 @@ implement honestly.
 | V5 | block scanned, no match (sketch fp, or no sketch) | `Miss { io: true }` |
 
 Metrics: `result ∈ {hit, miss, miss_io, error}`; the `collision` label is
-retired (the word stays as internal V4 vocabulary). Each snapshot also
-exports its **expected** paid-miss rate as a gauge
-(`mcf_expected_miss_io_rate`: ≈0 for V4, the sketch ε for V5, 1.0 for a
-sketch-less V5), so alerting compares observed vs expected instead of
-hard-coding per-format thresholds — the V4 rule "any collision is weird"
-falls out as the ε≈0 special case.
+retired (the word stays as internal V4 vocabulary). The observed and
+expected sides compare **per dataset**: `mcf_lookup_total{dataset,
+result}` counts outcomes where the dataset is resolved (unroutable
+prefixes under the bounded `_unknown` sentinel — raw client input never
+becomes a label value), and `mcf_expected_miss_io_rate{dataset}` carries
+each snapshot's expected paid-miss rate (≈0 for V4, the sketch ε for V5,
+1.0 for a sketch-less V5). Alert when a dataset's observed
+`miss_io / (miss + miss_io)` **exceeds** its expected rate — the V4 rule
+"any collision is weird" falls out as the ε≈0 special case. The latency
+histogram stays fleet-wide; the dataset dimension lives only on cheap
+counters.
 
 Finer cost (preads per lookup, heap follow-ups, fence ties) is
 measurement, not semantics: histograms, never new enum variants.

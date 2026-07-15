@@ -241,9 +241,10 @@ at `:9090/metrics`.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, miss_io, error}. `miss_io` = miss that paid `pread`s (fingerprint/filter false positive); expected rate is format-dependent — compare against `mcf_expected_miss_io_rate`. `_count` series gives per-result and total lookup counts. |
+| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency, fleet-wide; `result` ∈ {hit, miss, miss_io, error}. `miss_io` = miss that paid `pread`s (fingerprint/filter false positive). `_count` series gives per-result and total lookup counts. |
 | `mcf_response_bytes` | Histogram | — | Per-response value size (hits only); `_sum` is total bytes sent |
-| `mcf_expected_miss_io_rate` | Gauge | — | Expected fraction of misses paying I/O for the active formats (max across datasets; ≈0 for V4). Alert when observed `miss_io / (miss + miss_io)` diverges from it |
+| `mcf_lookup_total` | Counter | `dataset`, `result` | Lookup outcomes per dataset (latency stays fleet-wide; the dataset dimension lives on this cheap counter). Unroutable key prefixes count under `dataset="_unknown"` — never raw client input. Snapshot mode uses `dataset="snapshot"` |
+| `mcf_expected_miss_io_rate` | Gauge | `dataset` | Expected fraction of misses paying I/O per dataset (≈0 for V4; a sketched format's configured false-positive rate). Alert when the observed per-dataset `miss_io / (miss + miss_io)` from `mcf_lookup_total` **exceeds** it |
 | `mcf_catalog_generation` | Gauge | — | Current generation; 0 in snapshot mode |
 | `mcf_catalog_swap_total` | Counter | `result` | Catalog swaps; `result` ∈ {ok, error} |
 | `mcf_active_datasets` | Gauge | — | Dataset count; always 1 in snapshot mode |
