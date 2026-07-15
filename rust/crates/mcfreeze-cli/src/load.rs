@@ -118,7 +118,9 @@ pub enum Source {
         no_compression: bool,
 
         /// Column projection — only read these columns.
-        #[arg(long)]
+        /// Comma-separated or repeated (`--selected-fields a,b` or
+        /// `--selected-fields a --selected-fields b`).
+        #[arg(long, value_delimiter = ',')]
         selected_fields: Vec<String>,
     },
     /// Load from a CSV file with headers. Reads from stdin if --file is omitted or "-".
