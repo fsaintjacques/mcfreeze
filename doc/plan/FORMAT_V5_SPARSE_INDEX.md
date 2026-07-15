@@ -468,6 +468,27 @@ write sequentially. Total I/O volume is two passes over the data — the
 same as any external sort — but reorganized into embarrassingly parallel
 in-RAM sorts with no merge machinery.
 
+### Sizing N for large builds
+
+Lookup performance is indifferent to N (there is a fence every 4 KiB
+regardless), and so is serving RAM (fences and sketches scale with data
+bytes and keys, not partitions). N is chosen by build and operational
+ergonomics: keep a partition's arrival data at **~2–8 GB**, so that
+
+- the radix bucket count `S = partition_bytes / bucket_bytes` stays
+  well under the per-partition open-file cap (64) at the default
+  128–256 MiB bucket target;
+- the crash-recovery unit (one partition rebuild) stays minutes, not
+  hours;
+- hot-swap fd count (4 files × 2 generations × N) stays in the low
+  thousands.
+
+At 10B keys / 2.5 TiB that lands at **N = 512–1024** (~2.4 GB and
+S ≈ 16–32 per partition at N = 1024). Below N ≈ 256 the bucket cap
+inflates bucket size past the target (peak sort RAM grows; the build
+warns); above N ≈ 4096 fd, fan-out, and per-sketch overheads are paid
+for nothing.
+
 ### Phase 3 — Finalize
 
 Write `meta.json` last. There is no concat step: `fences.bin` and
@@ -533,6 +554,15 @@ column or double `block_size`.
   space*, so concatenation suffices. A sort-the-spill-then-gather variant
   was also rejected: gathering issues one random read per record against
   the arrival-order file.
+- **Separate key file for the sort** (sort a compact `(fp, vfp, len)`
+  sidecar, leave values in place): the in-RAM sort already operates on
+  32-byte frame references, never moving values, so this only changes
+  what is *read* during the sort pass — and the values must still reach
+  `blocks.bin` in sorted order, which is either the rejected random
+  gather (values permuted arrival→sorted, ~4 KiB page per ~record read)
+  or a full sequential rewrite, i.e. exactly the radix pass. When a
+  partition fits one bucket (every current dataset), the build already
+  reads values exactly once — unbeatable.
 
 ## Open questions
 
@@ -554,6 +584,18 @@ column or double `block_size`.
 - Radix bucket sizing: number of top-of-fingerprint bits (equivalently,
   target bucket bytes, default 128–256 MiB) as a build flag alongside
   `--index-parallelism`; the product of the two bounds peak build RAM.
+- **Scatter-time bucketing**: the radix pass exists only because arrival
+  order and key order disagree — but the scatter writer already knows
+  each record's `fp` and could route to `bucket-XX.bin` by the top bits
+  at the same moment it routes to the partition by the low bits.
+  Arrival state is then born bucketed: build = load bucket, sort, emit —
+  the entire radix read+rewrite (2.5 TiB at 10B keys) disappears, making
+  build I/O write-once + sorted-rewrite-once, the external-sort minimum.
+  Cost: N × S simultaneously open buffered files during scatter (~32K at
+  N=1024, S=32), the same fan-out pressure that caps N. Worthless below
+  ~8 GB per partition (S=1 today: there is no radix pass to delete).
+  Decide from the stage-6 synthetic-10B build benchmark: pull this lever
+  only if the radix pass dominates build wall time.
 - Fence search structure: v1 ships flat `binary_search` (~23 dependent
   cache misses over a ~39 MB per-partition slice at 10B keys, ~1–2 µs —
   material only against page-cache-hot preads). If profiles justify it,
