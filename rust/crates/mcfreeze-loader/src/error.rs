@@ -19,4 +19,13 @@ pub enum LoaderError {
 
     #[error("task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
+
+    #[error(
+        "snapshot directory holds {found} scatter state but --format {requested} was requested; \
+         delete the directory or rerun with --format {found}"
+    )]
+    FormatMismatch {
+        requested: mcfreeze_format::FormatId,
+        found: mcfreeze_format::FormatId,
+    },
 }

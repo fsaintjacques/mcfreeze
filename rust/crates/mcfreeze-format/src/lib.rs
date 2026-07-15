@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod builder;
 pub mod data;
 pub mod desc;
 pub mod meta;
 pub mod snapshot;
 pub mod v4;
 
+pub use builder::{builder_for, BuildDone, BuilderConfig, FormatBuilder, PartitionAppender};
 pub use desc::{FormatId, SnapshotDesc};
 pub use snapshot::{GetOutcome, OpenOptions, Snapshot};
 

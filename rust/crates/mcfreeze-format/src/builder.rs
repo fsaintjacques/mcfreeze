@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The `FormatBuilder` seam: format-erased snapshot construction.
+//!
+//! The loader owns orchestration — sources, fingerprint derivation and
+//! partition routing, scatter concurrency, progress, the phase-sentinel
+//! protocol — and drives one of these per load. What varies per format is
+//! what gets written per record and what "build the index phase" means;
+//! that is this trait. See `doc/plan/FORMAT_INTERFACE.md`.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::{desc::FormatId, meta::Stats, v4, Result};
+
+/// Per-partition scatter sink. One appender exists per partition, driven
+/// from a single blocking task — no locking on the hot path.
+pub trait PartitionAppender: Send {
+    /// Append one record. `fp` is the loader-derived full fingerprint;
+    /// storage details (verify fingerprint, alignment, transient files)
+    /// belong to the format.
+    fn append(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()>;
+
+    /// Flush and seal this partition's transient scatter state.
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
+/// Result of the format's build phase, for the loader's stats plumbing.
+/// The format's detailed build statistics live in its `index.done`
+/// sentinel (opaque JSON), which the loader embeds into `meta.json`.
+pub struct BuildDone {
+    pub n_keys: u64,
+}
+
+/// What a [`FormatBuilder::scatter_probe`] found for one partition.
+pub struct ScatterProbe {
+    pub n_keys: u64,
+    pub data_bytes: u64,
+}
+
+/// Format-erased snapshot construction. `Send + Sync`: the loader shares
+/// it across scatter tasks and the build pool via `Arc`.
+pub trait FormatBuilder: Send + Sync {
+    fn format(&self) -> FormatId;
+
+    /// Create partition `p`'s scatter sink. Called once per partition at
+    /// scatter start; never called for a resumed (already-scattered) run.
+    fn appender(&self, p: usize) -> Result<Box<dyn PartitionAppender>>;
+
+    /// Crash-recovery probe: `Some` if partition `p`'s transient scatter
+    /// state (or final artifacts) prove scatter completed for it, `None`
+    /// otherwise. Key count may be 0 when only final artifacts remain and
+    /// the count is unknowable without the phase sentinel.
+    fn scatter_probe(&self, p: usize) -> Result<Option<ScatterProbe>>;
+
+    /// Barrier between scatter and build. Global, whole-snapshot
+    /// decisions belong here (a future format derives `block_size` from
+    /// the observed size distribution). V4: no-op.
+    fn plan(&self) -> Result<()>;
+
+    /// Run the entire index phase: per-partition builds (bounded by
+    /// `parallelism`), cross-partition artifacts, the format's
+    /// `index.done` sentinel (idempotent: skipped if present), and
+    /// transient-state cleanup. Blocking; the loader calls it from a
+    /// blocking context. `progress` is invoked `(1, 0)` per partition.
+    fn build(
+        &self,
+        parallelism: usize,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> Result<BuildDone>;
+
+    /// Write `meta.json` — last, as the snapshot completeness sentinel.
+    fn finalize(&self, stats: Stats, encoding: Option<serde_json::Value>) -> Result<()>;
+}
+
+/// Construction parameters shared by every format.
+pub struct BuilderConfig {
+    pub root: PathBuf,
+    pub n_partitions: u32,
+    pub verify_seed: u64,
+    /// `BufWriter` capacity for each partition's primary data stream.
+    pub data_buf_bytes: usize,
+    /// `BufWriter` capacity for each partition's secondary stream
+    /// (V4: spill.bin).
+    pub spill_buf_bytes: usize,
+}
+
+/// Instantiate the builder for `format`. The single dispatch point on the
+/// write path, mirroring `SnapshotDesc::load` on the read path.
+pub fn builder_for(format: FormatId, config: BuilderConfig) -> Result<Arc<dyn FormatBuilder>> {
+    match format {
+        FormatId::V4 => Ok(Arc::new(v4::builder::V4Builder::new(config)?)),
+    }
+}

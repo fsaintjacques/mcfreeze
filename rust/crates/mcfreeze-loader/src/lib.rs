@@ -1,6 +1,5 @@
 pub mod source;
 
-mod build;
 mod error;
 mod scatter;
 
@@ -16,11 +15,10 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
+use mcfreeze_format::builder::{builder_for, BuilderConfig, FormatBuilder, PartitionAppender};
 use mcfreeze_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
-use mcfreeze_format::spill::SpillReader;
-use mcfreeze_format::writer::{PartitionBuildReady, PartitionWriter, SnapshotFinalizer};
+use mcfreeze_format::FormatId;
 
-use build::IndexBuildPhase;
 use scatter::{Fanout, PartitionDone, ScatterDone, ScatterPhase};
 
 // ---------------------------------------------------------------------------
@@ -46,6 +44,7 @@ struct ScatterDoneInfo {
 async fn check_scatter_done(
     root: &Path,
     layout: Layout,
+    builder: &Arc<dyn FormatBuilder>,
 ) -> Result<Option<ScatterDoneInfo>, LoaderError> {
     let sentinel = root.join("scatter.done");
 
@@ -55,55 +54,46 @@ async fn check_scatter_done(
         let done: ScatterDone = serde_json::from_str(&json).map_err(|e| {
             LoaderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
+        // Resuming with a different --format would re-scatter new-format
+        // state into a directory still holding the old format's artifacts.
+        // Fail fast instead.
+        if done.format != builder.format() {
+            return Err(LoaderError::FormatMismatch {
+                requested: builder.format(),
+                found: done.format,
+            });
+        }
         return Ok(Some(ScatterDoneInfo {
             n_keys: done.n_keys,
             data_bytes: 0,
         }));
     }
 
-    // Fallback: derive completion from per-partition files.
+    // Fallback: derive completion from the format's transient state.
+    // Value-size histograms are unavailable on this crash-recovery path
+    // (the happy path gets them via scatter.done); key counts may also be
+    // unknowable for already-built partitions.
     let n = layout.n_partitions as usize;
     let mut partitions = Vec::with_capacity(n);
     let mut data_bytes = 0u64;
 
     for i in 0..n {
-        let dir = mcfreeze_format::meta::partition_dir(root, layout.n_partitions, i);
-        let data_path = dir.join("data.bin");
-        let spill_path = dir.join("spill.bin");
-
-        if !data_path.exists() {
-            return Ok(None);
-        }
-        data_bytes += std::fs::metadata(&data_path)?.len();
-
-        if spill_path.exists() {
-            // Spill no longer carries value sizes (they live in each value's
-            // 12-byte header in data.bin). On this crash-recovery fallback
-            // we record key counts only; the histogram is left as None. The
-            // happy path still gets the full histogram via scatter.done.
-            // TODO: re-introduce histogram reconstruction (by walking
-            // data.bin headers or via a per-partition sidecar).
-            let n_part = SpillReader::open(&spill_path)?.count();
-            partitions.push(PartitionDone {
-                n_keys: n_part,
-                value_sizes: None,
-            });
-        } else if mcfreeze_format::meta::index_path(root).exists() {
-            // index.all exists but no spill — partition was already indexed.
-            // We can't know per-partition key counts without index.done, so
-            // read it from the phase sentinel if available.
-            partitions.push(PartitionDone {
-                n_keys: 0,
-                value_sizes: None,
-            });
-        } else {
-            return Ok(None);
+        match builder.scatter_probe(i)? {
+            None => return Ok(None),
+            Some(probe) => {
+                data_bytes += probe.data_bytes;
+                partitions.push(PartitionDone {
+                    n_keys: probe.n_keys,
+                    value_sizes: None,
+                });
+            }
         }
     }
 
     let n_keys = partitions.iter().map(|p| p.n_keys).sum();
 
     let done = ScatterDone {
+        format: builder.format(),
         n_keys,
         n_partitions: layout.n_partitions,
         data_bytes,
@@ -128,6 +118,9 @@ async fn check_scatter_done(
 
 #[derive(Clone)]
 pub struct LoaderConfig {
+    /// On-disk format to write. Default: [`FormatId::DEFAULT`].
+    pub format: FormatId,
+
     /// Number of partitions. Must be a power of two. Default: 64.
     pub n_partitions: u32,
 
@@ -155,6 +148,7 @@ pub struct LoaderConfig {
 impl std::fmt::Debug for LoaderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoaderConfig")
+            .field("format", &self.format)
             .field("n_partitions", &self.n_partitions)
             .field("data_buf_bytes", &self.data_buf_bytes)
             .field("spill_buf_bytes", &self.spill_buf_bytes)
@@ -169,6 +163,7 @@ impl std::fmt::Debug for LoaderConfig {
 impl Default for LoaderConfig {
     fn default() -> Self {
         Self {
+            format: FormatId::DEFAULT,
             n_partitions: 64,
             data_buf_bytes: 8 * 1024 * 1024,
             spill_buf_bytes: 256 * 1024,
@@ -197,9 +192,9 @@ pub struct LoadStats {
 // ---------------------------------------------------------------------------
 
 /// Opaque result of a completed scatter phase, consumed by [`SnapshotLoader::finalize`].
+/// The format's per-partition build state lives inside the loader's
+/// [`FormatBuilder`], not here.
 pub struct ScatterResult {
-    finalizer: SnapshotFinalizer,
-    partitions_ready: Vec<PartitionBuildReady>,
     n_keys: u64,
     data_bytes: u64,
     duration: Duration,
@@ -218,13 +213,31 @@ pub struct ScatterResult {
 pub struct SnapshotLoader {
     root: std::path::PathBuf,
     config: LoaderConfig,
+    /// Format-erased write path, selected by `config.format`. The loader
+    /// owns orchestration (sources, fingerprint routing, concurrency,
+    /// sentinels); the builder owns what bytes hit disk.
+    builder: Arc<dyn FormatBuilder>,
 }
 
 impl SnapshotLoader {
     pub fn new(root: impl AsRef<Path>, config: LoaderConfig) -> Result<Self, LoaderError> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root, config })
+        let builder = builder_for(
+            config.format,
+            BuilderConfig {
+                root: root.clone(),
+                n_partitions: config.n_partitions,
+                verify_seed: DEFAULT_VERIFY_SEED,
+                data_buf_bytes: config.data_buf_bytes,
+                spill_buf_bytes: config.spill_buf_bytes,
+            },
+        )?;
+        Ok(Self {
+            root,
+            config,
+            builder,
+        })
     }
 
     /// Scatter sources into partition files, returning a [`ScatterResult`] that
@@ -238,23 +251,11 @@ impl SnapshotLoader {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let layout = Layout::new(self.config.n_partitions)?;
-        let finalizer =
-            SnapshotFinalizer::from_existing(self.root.clone(), layout, DEFAULT_VERIFY_SEED);
         let scatter_start = Instant::now();
 
-        if let Some(info) = check_scatter_done(&self.root, layout).await? {
+        if let Some(info) = check_scatter_done(&self.root, layout, &self.builder).await? {
             tracing::info!(n_keys = info.n_keys, "scatter already complete, skipping");
-            let n = layout.n_partitions as usize;
-            let partitions_ready = (0..n)
-                .map(|i| {
-                    let dir =
-                        mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
-                    PartitionBuildReady::from_existing(dir)
-                })
-                .collect();
             Ok(ScatterResult {
-                finalizer,
-                partitions_ready,
                 n_keys: info.n_keys,
                 data_bytes: info.data_bytes,
                 duration: Duration::ZERO,
@@ -264,8 +265,6 @@ impl SnapshotLoader {
                 .run_scatter_sources(layout, sources, scatter_start)
                 .await?;
             Ok(ScatterResult {
-                finalizer,
-                partitions_ready: stats.partitions_ready,
                 n_keys: stats.n_keys,
                 data_bytes: stats.data_bytes,
                 duration: scatter_start.elapsed(),
@@ -284,21 +283,10 @@ impl SnapshotLoader {
     /// already spilled every partition to disk.
     pub async fn scatter_result_from_done(&self) -> Result<Option<ScatterResult>, LoaderError> {
         let layout = Layout::new(self.config.n_partitions)?;
-        let Some(stats) = check_scatter_done(&self.root, layout).await? else {
+        let Some(stats) = check_scatter_done(&self.root, layout, &self.builder).await? else {
             return Ok(None);
         };
-        let finalizer =
-            SnapshotFinalizer::from_existing(self.root.clone(), layout, DEFAULT_VERIFY_SEED);
-        let n = layout.n_partitions as usize;
-        let partitions_ready: Vec<PartitionBuildReady> = (0..n)
-            .map(|i| {
-                let dir = mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
-                PartitionBuildReady::from_existing(dir)
-            })
-            .collect();
         Ok(Some(ScatterResult {
-            finalizer,
-            partitions_ready,
             n_keys: stats.n_keys,
             data_bytes: stats.data_bytes,
             duration: Duration::ZERO,
@@ -315,8 +303,6 @@ impl SnapshotLoader {
         index_progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<LoadStats, LoaderError> {
         let ScatterResult {
-            finalizer,
-            partitions_ready,
             n_keys: _scatter_n_keys,
             data_bytes,
             duration: scatter_duration,
@@ -325,10 +311,14 @@ impl SnapshotLoader {
         let index_start = Instant::now();
         let parallelism = self.config.index_parallelism;
 
-        let (index_done, finalizer) = tokio::task::spawn_blocking(move || {
-            IndexBuildPhase::new(finalizer, partitions_ready, parallelism, index_progress_fn).run()
-        })
-        .await??;
+        // Barrier between scatter and build: global, whole-snapshot
+        // decisions (no-op for V4).
+        self.builder.plan()?;
+
+        let builder = Arc::clone(&self.builder);
+        let build_done =
+            tokio::task::spawn_blocking(move || builder.build(parallelism, index_progress_fn))
+                .await??;
 
         let index_duration = index_start.elapsed();
 
@@ -353,24 +343,20 @@ impl SnapshotLoader {
                 v
             });
 
-        let info = mcfreeze_format::index::UnifiedIndexInfo {
-            offsets: index_done.index_offsets,
-            n_buckets: index_done.index_n_buckets,
-        };
         let stats = Stats {
-            n_keys: index_done.n_keys,
+            n_keys: build_done.n_keys,
             created_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             scatter: scatter_val,
             index: index_val,
         };
-        finalizer.write_meta(&info, Some(stats), None)?;
+        self.builder.finalize(stats, None)?;
 
         // Remove sentinels — their data is now in meta.json.
         let _ = tokio::fs::remove_file(&scatter_path).await;
         let _ = tokio::fs::remove_file(&index_path).await;
 
         Ok(LoadStats {
-            n_keys: index_done.n_keys,
+            n_keys: build_done.n_keys,
             data_bytes,
             scatter_duration,
             index_duration,
@@ -393,63 +379,49 @@ impl SnapshotLoader {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let layout = Layout::new(self.config.n_partitions)?;
-        let finalizer =
-            SnapshotFinalizer::from_existing(self.root.clone(), layout, DEFAULT_VERIFY_SEED);
         let scatter_start = Instant::now();
 
-        let (n_keys, data_bytes, partitions_ready, duration) = if let Some(stats) =
-            check_scatter_done(&self.root, layout).await?
-        {
-            tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
-            let n = layout.n_partitions as usize;
-            let partitions_ready: Vec<PartitionBuildReady> = (0..n)
-                .map(|i| {
-                    let dir =
-                        mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
-                    PartitionBuildReady::from_existing(dir)
-                })
-                .collect();
-            (
-                stats.n_keys,
-                stats.data_bytes,
-                partitions_ready,
-                Duration::ZERO,
-            )
-        } else {
-            let writers = self.create_partition_writers(layout)?;
-            let phase =
-                ScatterPhase::new(&self.root, layout, writers, self.config.channel_capacity)?;
-            let mut fanout = phase.fanout();
-            let progress_fn = self.config.progress_fn.clone();
-            let interval = self.config.progress_interval;
-            let mut last_reported_keys = 0u64;
-            let mut last_reported_bytes = 0u64;
+        let (n_keys, data_bytes, duration) =
+            if let Some(stats) = check_scatter_done(&self.root, layout, &self.builder).await? {
+                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
+                (stats.n_keys, stats.data_bytes, Duration::ZERO)
+            } else {
+                let appenders = self.create_appenders(layout)?;
+                let phase = ScatterPhase::new(
+                    &self.root,
+                    layout,
+                    self.builder.format(),
+                    appenders,
+                    self.config.channel_capacity,
+                )?;
+                let mut fanout = phase.fanout();
+                let progress_fn = self.config.progress_fn.clone();
+                let interval = self.config.progress_interval;
+                let mut last_reported_keys = 0u64;
+                let mut last_reported_bytes = 0u64;
 
-            while let Some(batch) = source
-                .next_batch()
-                .await
-                .map_err(|e| LoaderError::Source(Box::new(e)))?
-            {
-                fanout.scatter_batch(&batch).await?;
-                if let Some(ref cb) = progress_fn {
-                    let (n, b) = fanout.counters();
-                    if n - last_reported_keys >= interval {
-                        cb(n - last_reported_keys, b - last_reported_bytes);
-                        last_reported_keys = n;
-                        last_reported_bytes = b;
+                while let Some(batch) = source
+                    .next_batch()
+                    .await
+                    .map_err(|e| LoaderError::Source(Box::new(e)))?
+                {
+                    fanout.scatter_batch(&batch).await?;
+                    if let Some(ref cb) = progress_fn {
+                        let (n, b) = fanout.counters();
+                        if n - last_reported_keys >= interval {
+                            cb(n - last_reported_keys, b - last_reported_bytes);
+                            last_reported_keys = n;
+                            last_reported_bytes = b;
+                        }
                     }
                 }
-            }
 
-            let stats = phase.finish(vec![fanout], scatter_start).await?;
-            let pr = stats.partitions_ready;
-            (stats.n_keys, stats.data_bytes, pr, scatter_start.elapsed())
-        };
+                let stats = phase.finish(vec![fanout], scatter_start).await?;
+                (stats.n_keys, stats.data_bytes, scatter_start.elapsed())
+            };
 
         self.finalize(
             ScatterResult {
-                finalizer,
-                partitions_ready,
                 n_keys,
                 data_bytes,
                 duration,
@@ -463,22 +435,12 @@ impl SnapshotLoader {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    fn create_partition_writers(
+    fn create_appenders(
         &self,
         layout: Layout,
-    ) -> Result<Vec<PartitionWriter<std::io::BufWriter<std::fs::File>>>, LoaderError> {
+    ) -> Result<Vec<Box<dyn PartitionAppender>>, LoaderError> {
         let n = layout.n_partitions as usize;
-        (0..n)
-            .map(|i| {
-                let dir = mcfreeze_format::meta::partition_dir(&self.root, layout.n_partitions, i);
-                Ok(PartitionWriter::new_buffered(
-                    &dir,
-                    DEFAULT_VERIFY_SEED,
-                    self.config.data_buf_bytes,
-                    self.config.spill_buf_bytes,
-                )?)
-            })
-            .collect()
+        (0..n).map(|p| Ok(self.builder.appender(p)?)).collect()
     }
 
     async fn run_scatter_sources<S, I>(
@@ -492,8 +454,14 @@ impl SnapshotLoader {
         I: IntoIterator<Item = S>,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        let writers = self.create_partition_writers(layout)?;
-        let phase = ScatterPhase::new(&self.root, layout, writers, self.config.channel_capacity)?;
+        let appenders = self.create_appenders(layout)?;
+        let phase = ScatterPhase::new(
+            &self.root,
+            layout,
+            self.builder.format(),
+            appenders,
+            self.config.channel_capacity,
+        )?;
 
         let interval = self.config.progress_interval;
         let progress_fn = self.config.progress_fn.clone();

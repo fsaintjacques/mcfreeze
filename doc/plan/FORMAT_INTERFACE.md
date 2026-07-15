@@ -220,29 +220,42 @@ gets written per record and what "build a partition" means. That is the
 trait:
 
 ```rust
+pub trait PartitionAppender: Send {
+    /// One per partition, driven from a single blocking task — the hot
+    /// path is lock-free. V4: data.bin append + spill record.
+    fn append(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()>;
+    /// Flush and seal this partition's transient scatter state.
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
 pub trait FormatBuilder: Send + Sync {
-    /// Called concurrently from scatter workers. Appends one record to
-    /// partition `p`'s transient state.
-    ///   V4: data.bin append + spill record
-    ///   V5: arrival.bin append + size histogram
-    fn append(&self, p: usize, fp: u64, vfp: u64, value: &[u8]) -> Result<()>;
-
+    fn format(&self) -> FormatId;
+    /// Partition p's scatter sink (never called on a resumed run).
+    fn appender(&self, p: usize) -> Result<Box<dyn PartitionAppender>>;
+    /// Crash-recovery probe: did partition p's scatter complete?
+    fn scatter_probe(&self, p: usize) -> Result<Option<ScatterProbe>>;
     /// Barrier between scatter and build. Global decisions go here.
-    ///   V4: no-op
-    ///   V5: derive block_size from the merged histogram
-    fn plan(&mut self) -> Result<()>;
-
-    /// Build partition `p`'s final artifacts from its transient state,
-    /// then delete the transient state. Called from the build pool
-    /// (`--index-parallelism`); must be independent across partitions.
-    ///   V4: Robin Hood table
-    ///   V5: radix buckets → sort → blocks/fences/sketch
-    fn build_partition(&self, p: usize) -> Result<PartitionStats>;
-
-    /// Write meta.json (last) from accumulated stats.
-    fn finalize(self, stats: BuildStats) -> Result<()>;
+    ///   V4: no-op; V5: derive block_size from the size distribution.
+    fn plan(&self) -> Result<()>;
+    /// The whole index phase: per-partition builds bounded by
+    /// `parallelism`, cross-partition artifacts, the format's
+    /// `index.done` sentinel (idempotent), transient cleanup.
+    fn build(&self, parallelism: usize, progress: Option<ProgressFn>)
+        -> Result<BuildDone>;
+    /// Write meta.json — last, the completeness sentinel.
+    fn finalize(&self, stats: Stats, encoding: Option<Value>) -> Result<()>;
 }
 ```
+
+Two deliberate deviations from this plan's first sketch, discovered
+during the port: per-partition **appenders** replace `append(&self, p,
+…)` (the loader already runs one blocking task per partition, so handing
+each task its own sink avoids any hot-path locking, and the verify
+fingerprint stays a storage detail inside the format); and
+`build_partition` + index-artifact assembly collapsed into one
+**`build`** call, because per-partition build statistics and the
+`index.done` schema are format-owned (V4's fill rates and PSL retries
+mean nothing to V5) — the loader cannot aggregate what it cannot name.
 
 The loader keeps owning the phase protocol (scatter → `scatter.done` →
 plan → per-partition build + done markers → finalize/meta.json) and its

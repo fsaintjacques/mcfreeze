@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,11 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use mcfreeze_format::{
-    index::fingerprint,
-    meta::Layout,
-    writer::{PartitionBuildReady, PartitionWriter},
-};
+use mcfreeze_format::{builder::PartitionAppender, index::fingerprint, meta::Layout};
 
 use crate::{error::LoaderError, source::KvBatch};
 
@@ -28,7 +22,6 @@ type PartitionBatch = Vec<(Vec<u8>, u64, Vec<u8>)>;
 pub struct ScatterStats {
     pub n_keys: u64,
     pub data_bytes: u64,
-    pub partitions_ready: Vec<PartitionBuildReady>,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +99,10 @@ pub struct PartitionDone {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScatterDone {
+    /// Format that produced the transient scatter state. Defaults to V4
+    /// when absent (sentinels written before this field existed).
+    #[serde(default)]
+    pub format: mcfreeze_format::FormatId,
     pub n_keys: u64,
     pub n_partitions: u32,
     pub data_bytes: u64,
@@ -127,7 +124,6 @@ pub fn new_size_histogram() -> Histogram<u64> {
 
 // Internal: what each partition_writer task returns.
 struct PartitionStats {
-    build_ready: PartitionBuildReady,
     n_keys: u64,
     sum_bytes: u64,
     histogram: Histogram<u64>,
@@ -206,6 +202,7 @@ impl Fanout {
 pub struct ScatterPhase {
     root: std::path::PathBuf,
     layout: Layout,
+    format: mcfreeze_format::FormatId,
     senders: Vec<mpsc::Sender<PartitionBatch>>,
     handles: Vec<JoinHandle<Result<PartitionStats, LoaderError>>>,
 }
@@ -214,18 +211,19 @@ impl ScatterPhase {
     pub fn new(
         root: &Path,
         layout: Layout,
-        writers: Vec<PartitionWriter<BufWriter<File>>>,
+        format: mcfreeze_format::FormatId,
+        appenders: Vec<Box<dyn PartitionAppender>>,
         channel_capacity: usize,
     ) -> Result<Self, LoaderError> {
         let n = layout.n_partitions as usize;
-        assert_eq!(writers.len(), n);
+        assert_eq!(appenders.len(), n);
 
         let mut senders = Vec::with_capacity(n);
         let mut handles = Vec::with_capacity(n);
 
-        for writer in writers {
+        for appender in appenders {
             let (tx, rx) = mpsc::channel::<PartitionBatch>(channel_capacity.max(1));
-            let handle = tokio::task::spawn_blocking(move || partition_writer(writer, rx));
+            let handle = tokio::task::spawn_blocking(move || partition_writer(appender, rx));
 
             senders.push(tx);
             handles.push(handle);
@@ -234,6 +232,7 @@ impl ScatterPhase {
         Ok(Self {
             root: root.to_path_buf(),
             layout,
+            format,
             senders,
             handles,
         })
@@ -287,7 +286,6 @@ impl ScatterPhase {
         let mut merged = new_size_histogram();
         let mut total_sum = 0u64;
         let mut partitions: Vec<PartitionDone> = Vec::with_capacity(all_partition_stats.len());
-        let mut partitions_ready = Vec::with_capacity(all_partition_stats.len());
 
         for ps in all_partition_stats {
             merged
@@ -300,7 +298,6 @@ impl ScatterPhase {
                 n_keys: ps.n_keys,
                 value_sizes: Some(part_sizes),
             });
-            partitions_ready.push(ps.build_ready);
         }
 
         let n_keys = partitions.iter().map(|p| p.n_keys).sum();
@@ -309,6 +306,7 @@ impl ScatterPhase {
         ));
 
         let done = ScatterDone {
+            format: self.format,
             n_keys,
             n_partitions: self.layout.n_partitions,
             data_bytes,
@@ -321,11 +319,7 @@ impl ScatterPhase {
             .map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
         tokio::fs::write(self.root.join("scatter.done"), json).await?;
 
-        Ok(ScatterStats {
-            n_keys,
-            data_bytes,
-            partitions_ready,
-        })
+        Ok(ScatterStats { n_keys, data_bytes })
     }
 }
 
@@ -334,7 +328,7 @@ impl ScatterPhase {
 // ---------------------------------------------------------------------------
 
 fn partition_writer(
-    mut writer: PartitionWriter<BufWriter<File>>,
+    mut appender: Box<dyn PartitionAppender>,
     mut rx: mpsc::Receiver<PartitionBatch>,
 ) -> Result<PartitionStats, LoaderError> {
     let mut histogram = new_size_histogram();
@@ -347,14 +341,13 @@ fn partition_writer(
             // record(0) is invalid; empty values map to 1 for histogram purposes.
             histogram.record(size.max(1)).unwrap_or_default();
             sum_bytes += size;
-            writer.write(&key, fp, &value)?;
+            appender.append(&key, fp, &value)?;
             n_keys += 1;
         }
     }
 
-    let build_ready = writer.finish_data()?;
+    appender.finish()?;
     Ok(PartitionStats {
-        build_ready,
         n_keys,
         sum_bytes,
         histogram,
@@ -375,25 +368,41 @@ mod tests {
         data::pread,
         meta::{VALUE_ALIGNMENT, VALUE_HEADER_SIZE},
     };
+    use std::fs::File;
     use tempfile::TempDir;
 
     fn layout(n: u32) -> Layout {
         Layout::new(n).unwrap()
     }
 
-    fn make_writers(root: &std::path::Path, n: u32) -> Vec<PartitionWriter<BufWriter<File>>> {
+    fn make_appenders(root: &std::path::Path, n: u32) -> Vec<Box<dyn PartitionAppender>> {
+        let builder = mcfreeze_format::builder_for(
+            mcfreeze_format::FormatId::V4,
+            mcfreeze_format::BuilderConfig {
+                root: root.to_path_buf(),
+                n_partitions: n,
+                verify_seed: DEFAULT_VERIFY_SEED,
+                data_buf_bytes: 1024 * 1024,
+                spill_buf_bytes: 4096,
+            },
+        )
+        .unwrap();
         (0..n as usize)
-            .map(|i| {
-                let dir = mcfreeze_format::meta::partition_dir(root, n, i);
-                PartitionWriter::new_buffered(&dir, DEFAULT_VERIFY_SEED, 1024 * 1024, 4096).unwrap()
-            })
+            .map(|p| builder.appender(p).unwrap())
             .collect()
     }
 
     async fn scatter(pairs: &[(&[u8], &[u8])], n: u32) -> (TempDir, ScatterStats) {
         let dir = TempDir::new().unwrap();
-        let writers = make_writers(dir.path(), n);
-        let phase = ScatterPhase::new(dir.path(), layout(n), writers, 4).unwrap();
+        let writers = make_appenders(dir.path(), n);
+        let phase = ScatterPhase::new(
+            dir.path(),
+            layout(n),
+            mcfreeze_format::FormatId::V4,
+            writers,
+            4,
+        )
+        .unwrap();
         let batch = VecBatch(
             pairs
                 .iter()
@@ -476,8 +485,14 @@ mod tests {
     #[tokio::test]
     async fn multiple_batches_accumulate() {
         let dir = TempDir::new().unwrap();
-        let phase =
-            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 4).unwrap();
+        let phase = ScatterPhase::new(
+            dir.path(),
+            layout(1),
+            mcfreeze_format::FormatId::V4,
+            make_appenders(dir.path(), 1),
+            4,
+        )
+        .unwrap();
         let mut fanout = phase.fanout();
 
         for i in 0u64..10 {
@@ -506,8 +521,14 @@ mod tests {
     async fn parallel_fanouts_no_data_loss() {
         // Two concurrent fanouts writing to the same partition writers.
         let dir = TempDir::new().unwrap();
-        let phase =
-            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 8).unwrap();
+        let phase = ScatterPhase::new(
+            dir.path(),
+            layout(1),
+            mcfreeze_format::FormatId::V4,
+            make_appenders(dir.path(), 1),
+            8,
+        )
+        .unwrap();
         let mut f0 = phase.fanout();
         let mut f1 = phase.fanout();
 
@@ -541,8 +562,14 @@ mod tests {
     #[tokio::test]
     async fn backpressure_does_not_deadlock() {
         let dir = TempDir::new().unwrap();
-        let phase =
-            ScatterPhase::new(dir.path(), layout(1), make_writers(dir.path(), 1), 1).unwrap();
+        let phase = ScatterPhase::new(
+            dir.path(),
+            layout(1),
+            mcfreeze_format::FormatId::V4,
+            make_appenders(dir.path(), 1),
+            1,
+        )
+        .unwrap();
         let mut fanout = phase.fanout();
         let batch = VecBatch(
             (0u64..1000)

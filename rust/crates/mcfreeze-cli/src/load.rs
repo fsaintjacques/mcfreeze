@@ -32,6 +32,10 @@ pub struct LoadArgs {
     #[arg(long, default_value = "64")]
     pub partitions: u32,
 
+    /// On-disk snapshot format to write (e.g. "v4").
+    #[arg(long, default_value_t = mcfreeze_format::FormatId::DEFAULT)]
+    pub format: mcfreeze_format::FormatId,
+
     /// Rayon threads used for the parallel index build phase
     #[arg(long, default_value = "2")]
     pub index_parallelism: usize,
@@ -153,7 +157,13 @@ struct Pipeline {
 
 impl Pipeline {
     /// Run the full load pipeline: encode → scatter → index → meta.json.
-    async fn load(self, output: &Path, partitions: u32, index_parallelism: usize) -> Result<()> {
+    async fn load(
+        self,
+        output: &Path,
+        format: mcfreeze_format::FormatId,
+        partitions: u32,
+        index_parallelism: usize,
+    ) -> Result<()> {
         let Self {
             sources,
             schema,
@@ -180,6 +190,7 @@ impl Pipeline {
                 .await?;
                 load_sources(
                     output,
+                    format,
                     partitions,
                     index_parallelism,
                     progress_secs,
@@ -202,6 +213,7 @@ impl Pipeline {
                     .collect();
                 load_sources(
                     output,
+                    format,
                     partitions,
                     index_parallelism,
                     progress_secs,
@@ -314,7 +326,12 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
     } else {
         let output = args.output.context("--output is required")?;
         pipeline
-            .load(&output, args.partitions, args.index_parallelism)
+            .load(
+                &output,
+                args.format,
+                args.partitions,
+                args.index_parallelism,
+            )
             .await
     }
 }
@@ -338,6 +355,7 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         .context("--output is required for index-only resume")?;
 
     let loader_config = LoaderConfig {
+        format: args.format,
         n_partitions: args.partitions,
         index_parallelism: args.index_parallelism,
         ..LoaderConfig::default()
@@ -584,6 +602,7 @@ async fn apply_protobuf_encoding(
 
 async fn load_sources<S>(
     output: &Path,
+    format: mcfreeze_format::FormatId,
     partitions: u32,
     index_parallelism: usize,
     progress_secs: u64,
@@ -597,6 +616,7 @@ where
     let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
 
     let loader_config = LoaderConfig {
+        format,
         n_partitions: partitions,
         index_parallelism,
         progress_fn: Some(scatter_reporter.updater()),
