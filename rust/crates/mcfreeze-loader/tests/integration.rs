@@ -273,6 +273,7 @@ async fn progress_callback_fires() {
         progress_fn: Some(Arc::new(move |n, b| {
             calls2.lock().unwrap().push((n, b));
         })),
+        ..LoaderConfig::default()
     };
     SnapshotLoader::new(snap_dir.path(), config)
         .unwrap()

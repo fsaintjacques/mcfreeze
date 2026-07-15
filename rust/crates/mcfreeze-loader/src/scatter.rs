@@ -151,6 +151,10 @@ pub struct Fanout {
     sub_batches: Vec<PartitionBatch>,
     pub n_keys: u64,
     pub data_bytes: u64,
+    /// Operational value-size cap ([`LoaderConfig::max_value_bytes`]),
+    /// enforced here — the earliest point every record passes through,
+    /// before any routing or disk write.
+    max_value_bytes: usize,
 }
 
 impl Fanout {
@@ -159,13 +163,30 @@ impl Fanout {
     /// Blocks (async-awaits) only if the target partition's channel is full,
     /// providing natural backpressure from slow writers to the source.
     pub async fn scatter_batch(&mut self, batch: &impl KvBatch) -> Result<(), LoaderError> {
+        // for_each_kv's callback cannot return an error; capture the
+        // first violation and fail the batch after the walk.
+        let mut oversized: Option<LoaderError> = None;
         batch.for_each_kv(|key, value| {
+            if oversized.is_some() {
+                return;
+            }
+            if value.len() > self.max_value_bytes {
+                oversized = Some(LoaderError::ValueTooLarge {
+                    key: key_preview(key),
+                    len: value.len(),
+                    max: self.max_value_bytes,
+                });
+                return;
+            }
             let fp = fingerprint(key);
             let idx = self.layout.partition_of(fp);
             self.sub_batches[idx].push((key.to_vec(), fp, value.to_vec()));
             self.n_keys += 1;
             self.data_bytes += value.len() as u64;
         });
+        if let Some(e) = oversized {
+            return Err(e);
+        }
 
         for (idx, slot) in self.sub_batches.iter_mut().enumerate() {
             if slot.is_empty() {
@@ -189,6 +210,18 @@ impl Fanout {
     }
 }
 
+/// Lossy UTF-8 preview of a key for error messages, truncated so a
+/// pathological key cannot flood the log line that reports it.
+fn key_preview(key: &[u8]) -> String {
+    const MAX_CHARS: usize = 64;
+    let s = String::from_utf8_lossy(key);
+    if s.chars().count() <= MAX_CHARS {
+        return s.into_owned();
+    }
+    let truncated: String = s.chars().take(MAX_CHARS).collect();
+    format!("{truncated}…")
+}
+
 // ---------------------------------------------------------------------------
 // ScatterPhase
 // ---------------------------------------------------------------------------
@@ -205,6 +238,7 @@ pub struct ScatterPhase {
     format: mcfreeze_format::FormatId,
     senders: Vec<mpsc::Sender<PartitionBatch>>,
     handles: Vec<JoinHandle<Result<PartitionStats, LoaderError>>>,
+    max_value_bytes: usize,
 }
 
 impl ScatterPhase {
@@ -214,6 +248,7 @@ impl ScatterPhase {
         format: mcfreeze_format::FormatId,
         appenders: Vec<Box<dyn PartitionAppender>>,
         channel_capacity: usize,
+        max_value_bytes: usize,
     ) -> Result<Self, LoaderError> {
         let n = layout.n_partitions as usize;
         assert_eq!(appenders.len(), n);
@@ -235,6 +270,7 @@ impl ScatterPhase {
             format,
             senders,
             handles,
+            max_value_bytes,
         })
     }
 
@@ -250,6 +286,7 @@ impl ScatterPhase {
             sub_batches: (0..n).map(|_| Vec::new()).collect(),
             n_keys: 0,
             data_bytes: 0,
+            max_value_bytes: self.max_value_bytes,
         }
     }
 
@@ -402,6 +439,7 @@ mod tests {
             mcfreeze_format::FormatId::V4,
             writers,
             4,
+            usize::MAX,
         )
         .unwrap();
         let batch = VecBatch(
@@ -424,6 +462,42 @@ mod tests {
         let pairs: &[(&[u8], &[u8])] = &[(b"a", b"1"), (b"b", b"2"), (b"c", b"3"), (b"d", b"4")];
         let (_, stats) = scatter(pairs, 4).await;
         assert_eq!(stats.n_keys, pairs.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn oversized_value_is_rejected_with_key_context() {
+        let dir = TempDir::new().unwrap();
+        let phase = ScatterPhase::new(
+            dir.path(),
+            layout(1),
+            mcfreeze_format::FormatId::V4,
+            make_appenders(dir.path(), 1),
+            4,
+            8, // max_value_bytes
+        )
+        .unwrap();
+        let mut fanout = phase.fanout();
+        let batch = VecBatch(vec![
+            (b"fine".to_vec(), b"small".to_vec()),
+            (b"the-culprit".to_vec(), vec![0u8; 9]),
+        ]);
+        match fanout.scatter_batch(&batch).await {
+            Err(LoaderError::ValueTooLarge { key, len, max }) => {
+                assert_eq!(key, "the-culprit");
+                assert_eq!(len, 9);
+                assert_eq!(max, 8);
+            }
+            other => panic!("expected ValueTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_preview_truncates_and_lossy_decodes() {
+        assert_eq!(key_preview(b"short"), "short");
+        let long = "k".repeat(200);
+        let preview = key_preview(long.as_bytes());
+        assert_eq!(preview.chars().count(), 65); // 64 + ellipsis
+        assert!(key_preview(&[0xFF, 0xFE, b'x']).contains('x')); // lossy, no panic
     }
 
     #[tokio::test]
@@ -492,6 +566,7 @@ mod tests {
             mcfreeze_format::FormatId::V4,
             make_appenders(dir.path(), 1),
             4,
+            usize::MAX,
         )
         .unwrap();
         let mut fanout = phase.fanout();
@@ -528,6 +603,7 @@ mod tests {
             mcfreeze_format::FormatId::V4,
             make_appenders(dir.path(), 1),
             8,
+            usize::MAX,
         )
         .unwrap();
         let mut f0 = phase.fanout();
@@ -569,6 +645,7 @@ mod tests {
             mcfreeze_format::FormatId::V4,
             make_appenders(dir.path(), 1),
             1,
+            usize::MAX,
         )
         .unwrap();
         let mut fanout = phase.fanout();
