@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::{
     meta::{self, Stats},
-    Error, Result,
+    v5, Error, Result,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,9 +49,7 @@ impl FormatId {
 
     /// Every format this binary knows *end to end*. Single source of
     /// truth for `FromStr`, error messages, and conformance coverage.
-    /// V5 joins once its reader lands behind the `Snapshot` facade —
-    /// until then the builder exists but the format is not selectable.
-    pub const ALL: &'static [FormatId] = &[FormatId::V4];
+    pub const ALL: &'static [FormatId] = &[FormatId::V4, FormatId::V5];
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -107,6 +105,7 @@ struct VersionProbe {
 #[derive(Debug, Clone)]
 pub(crate) enum VersionedMeta {
     V4(meta::Meta),
+    V5(v5::meta::Meta),
 }
 
 /// Parsed, validated description of a snapshot directory.
@@ -141,6 +140,11 @@ impl SnapshotDesc {
                 m.layout()?; // validates hash algorithm + partition count
                 VersionedMeta::V4(m)
             }
+            v5::meta::FORMAT_VERSION => {
+                let m: v5::meta::Meta = serde_json::from_str(&json)?;
+                m.layout()?; // validates hash algorithm, block size, partitions
+                VersionedMeta::V5(m)
+            }
             v => return Err(Error::UnsupportedFormatVersion(v)),
         };
 
@@ -154,6 +158,7 @@ impl SnapshotDesc {
     pub fn format(&self) -> FormatId {
         match &self.meta {
             VersionedMeta::V4(_) => FormatId::V4,
+            VersionedMeta::V5(_) => FormatId::V5,
         }
     }
 
@@ -161,6 +166,7 @@ impl SnapshotDesc {
     pub fn stats(&self) -> Option<&Stats> {
         match &self.meta {
             VersionedMeta::V4(m) => m.stats.as_ref(),
+            VersionedMeta::V5(m) => m.stats.as_ref(),
         }
     }
 
@@ -168,6 +174,7 @@ impl SnapshotDesc {
     pub fn encoding(&self) -> Option<&serde_json::Value> {
         match &self.meta {
             VersionedMeta::V4(m) => m.encoding.as_ref(),
+            VersionedMeta::V5(m) => m.encoding.as_ref(),
         }
     }
 
@@ -175,6 +182,7 @@ impl SnapshotDesc {
     pub fn n_partitions(&self) -> u32 {
         match &self.meta {
             VersionedMeta::V4(m) => m.partitions.len() as u32,
+            VersionedMeta::V5(m) => m.partitions.len() as u32,
         }
     }
 

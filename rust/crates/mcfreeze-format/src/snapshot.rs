@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use crate::{
     desc::{SnapshotDesc, VersionedMeta},
-    v4, Result,
+    v4, v5, Result,
 };
 
 /// Result of a successful (non-Err) lookup.
@@ -63,6 +63,7 @@ pub struct Snapshot {
 
 enum Inner {
     V4(v4::reader::SnapshotReader),
+    V5(v5::reader::SnapshotReader),
 }
 
 impl Snapshot {
@@ -78,6 +79,7 @@ impl Snapshot {
     pub fn open(desc: SnapshotDesc, _opts: &OpenOptions) -> Result<Self> {
         let inner = match desc.meta() {
             VersionedMeta::V4(m) => Inner::V4(v4::reader::SnapshotReader::open(desc.root(), m)?),
+            VersionedMeta::V5(m) => Inner::V5(v5::reader::SnapshotReader::open(desc.root(), m)?),
         };
         Ok(Self { desc, inner })
     }
@@ -91,6 +93,7 @@ impl Snapshot {
     pub fn get(&self, key: &[u8]) -> Result<GetOutcome> {
         match &self.inner {
             Inner::V4(r) => r.get(key),
+            Inner::V5(r) => r.get(key),
         }
     }
 
@@ -100,11 +103,15 @@ impl Snapshot {
 
     /// Expected fraction of misses that pay I/O for this snapshot's
     /// format and configuration. V4: ≈0 (32-bit fingerprint collisions
-    /// only). Exported as `mcf_expected_miss_io_rate`; dashboards compare
-    /// the observed `miss_io / (miss + miss_io)` ratio against it.
+    /// only). V5 without a sketch: ≈1 (nearly every miss scans a block;
+    /// only a fingerprint below the partition's first fence is free). A
+    /// future V5 sketch lowers this to the filter's false-positive rate.
+    /// Exported as `mcf_expected_miss_io_rate`; dashboards compare the
+    /// observed `miss_io / (miss + miss_io)` ratio against it.
     pub fn expected_miss_io_rate(&self) -> f64 {
         match &self.inner {
             Inner::V4(_) => 0.0,
+            Inner::V5(_) => 1.0,
         }
     }
 }
