@@ -6,6 +6,7 @@ pub mod desc;
 pub mod meta;
 pub mod snapshot;
 pub mod v4;
+pub mod v5;
 
 pub use builder::{builder_for, BuildDone, BuilderConfig, FormatBuilder, PartitionAppender};
 pub use desc::{FormatId, SnapshotDesc};

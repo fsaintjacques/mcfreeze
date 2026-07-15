@@ -24,6 +24,21 @@ pub enum Error {
         max_tolerated: usize,
     },
 
+    #[error("record encoding of {encoded} bytes exceeds block capacity {capacity}")]
+    RecordTooLarge { encoded: usize, capacity: usize },
+
+    #[error("value of {len} bytes exceeds the 31-bit length field (max {max})")]
+    ValueTooLarge { len: u64, max: u32 },
+
+    #[error("block assembler used after a sink error")]
+    AssemblerPoisoned,
+
+    #[error("block checksum mismatch")]
+    BlockChecksumMismatch,
+
+    #[error("corrupt block: {0}")]
+    CorruptBlock(&'static str),
+
     #[error("unsupported hash algorithm: {0}")]
     UnsupportedHashAlgorithm(String),
 
