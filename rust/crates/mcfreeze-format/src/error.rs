@@ -36,6 +36,17 @@ pub enum Error {
     #[error("block_size must be a power of two >= 4096, got {0}")]
     InvalidBlockSize(u32),
 
+    #[error("heap value checksum mismatch")]
+    ValueChecksumMismatch,
+
+    #[error("partition {partition}: {file} is {got} bytes, expected {expected}")]
+    SnapshotFileSize {
+        partition: usize,
+        file: &'static str,
+        got: u64,
+        expected: u64,
+    },
+
     #[error("block checksum mismatch")]
     BlockChecksumMismatch,
 

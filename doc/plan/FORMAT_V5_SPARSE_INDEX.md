@@ -74,7 +74,13 @@ concerns (data volume / heap capacity, fd budget), exactly as in V4.
       heap.bin            out-of-line values > inline_threshold
       fences.bin          this partition's fence array
       sketch.bin          optional; this partition's filter
+      build.done          per-partition build stats; resume evidence
 ```
+
+`build.done` is permanent: it is the partition's "scatter and build
+completed" evidence for `scatter_probe` on a rerun, playing the role
+V4's `index.all`-exists check plays. (V4 needs no extra file because
+its unified index doubles as the evidence.)
 
 There is no `index.all` successor. Fences and sketches are small enough
 to be **owned, not borrowed**: at open, the reader copies each

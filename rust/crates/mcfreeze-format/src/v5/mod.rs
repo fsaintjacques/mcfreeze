@@ -5,14 +5,15 @@
 //!
 //! In-memory primitives — record and block encode/scan ([`block`]),
 //! fence build and candidate search ([`fence`]) — plus the
-//! [`FormatBuilder`](crate::FormatBuilder) implementation ([`builder`])
-//! and the V5 `meta.json` payload ([`meta`]). The reader and `Snapshot`
-//! facade wiring arrive next.
+//! [`FormatBuilder`](crate::FormatBuilder) implementation ([`builder`]),
+//! the V5 `meta.json` payload ([`meta`]), and the read path behind the
+//! `Snapshot` facade ([`reader`]).
 
 pub mod block;
 pub mod builder;
 pub mod fence;
 pub mod meta;
+pub(crate) mod reader;
 
 use xxhash_rust::xxh64::xxh64;
 

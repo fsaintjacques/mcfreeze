@@ -79,11 +79,18 @@ fn conformance(format: FormatId) {
         assert_hit(&snap, k, v);
     }
 
-    // --- absent key: free miss ---
-    assert_eq!(
-        snap.get(b"definitely-absent").unwrap(),
-        GetOutcome::Miss { io: false }
-    );
+    // --- absent key: a miss, with cost honest to the format's contract.
+    // Formats promising free misses (expected_miss_io_rate == 0) must
+    // report io: false; paid-miss formats may report either (a key can
+    // land below a partition's first fence and miss for free).
+    match snap.get(b"definitely-absent").unwrap() {
+        GetOutcome::Miss { io } => {
+            if snap.expected_miss_io_rate() == 0.0 {
+                assert!(!io, "free-miss format paid I/O on a miss");
+            }
+        }
+        other => panic!("expected Miss, got {other:?}"),
+    }
 
     // --- empty and large values ---
     let big = vec![0xABu8; 1024 * 1024];
@@ -109,18 +116,29 @@ fn conformance(format: FormatId) {
     }
 
     // --- cost contract: Miss { io: false } touches no data file ---
-    // Truncating every data file after open makes any pread fail loudly,
-    // so a free miss that still succeeds proves zero data I/O.
+    // Truncating every data file after open makes any pread fail loudly.
+    // Any miss reported as free must therefore reproduce identically on
+    // truncated data — that proves zero data I/O, for every format.
     let dir = build_snapshot(format, &[(b"present", b"yes")], 2);
     let snap = Snapshot::open_path(dir.path()).unwrap();
-    assert_eq!(
-        snap.get(b"definitely-absent").unwrap(),
-        GetOutcome::Miss { io: false }
-    );
+    let before = snap.get(b"definitely-absent").unwrap();
+    let free_miss = match before {
+        GetOutcome::Miss { io } => !io,
+        other => panic!("expected Miss, got {other:?}"),
+    };
     truncate_data_files(dir.path());
-    match snap.get(b"definitely-absent").unwrap() {
-        GetOutcome::Miss { io: false } => {}
-        other => panic!("free miss must not touch data files, got {other:?}"),
+    if free_miss {
+        match snap.get(b"definitely-absent").unwrap() {
+            GetOutcome::Miss { io: false } => {}
+            other => panic!("free miss must not touch data files, got {other:?}"),
+        }
+    } else {
+        // A paid miss must fail loudly on truncated data — never
+        // silently degrade into a fabricated answer.
+        assert!(
+            snap.get(b"definitely-absent").is_err(),
+            "paid miss on truncated data must error"
+        );
     }
 
     // --- corruption: truncated data is an error, not a miss ---
