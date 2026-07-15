@@ -3,13 +3,16 @@
 //! Format V5: fingerprint-sorted fixed-size blocks + per-block fences.
 //! See `doc/plan/FORMAT_V5_SPARSE_INDEX.md`.
 //!
-//! This module currently holds the pure in-memory primitives — record
-//! and block encode/scan ([`block`]), fence build and candidate search
-//! ([`fence`]). The `FormatBuilder` implementation, reader, and facade
-//! wiring arrive in later stages.
+//! In-memory primitives — record and block encode/scan ([`block`]),
+//! fence build and candidate search ([`fence`]) — plus the
+//! [`FormatBuilder`](crate::FormatBuilder) implementation ([`builder`])
+//! and the V5 `meta.json` payload ([`meta`]). The reader and `Snapshot`
+//! facade wiring arrive next.
 
 pub mod block;
+pub mod builder;
 pub mod fence;
+pub mod meta;
 
 use xxhash_rust::xxh64::xxh64;
 

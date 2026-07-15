@@ -26,6 +26,7 @@ fn build_snapshot(format: FormatId, pairs: &[(&[u8], &[u8])], n_partitions: u32)
             verify_seed: DEFAULT_VERIFY_SEED,
             data_buf_bytes: 1024 * 1024,
             spill_buf_bytes: 4096,
+            v5: Default::default(),
         },
     )
     .unwrap();

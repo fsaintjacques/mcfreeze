@@ -231,6 +231,7 @@ impl SnapshotLoader {
                 verify_seed: DEFAULT_VERIFY_SEED,
                 data_buf_bytes: config.data_buf_bytes,
                 spill_buf_bytes: config.spill_buf_bytes,
+                v5: Default::default(),
             },
         )?;
         Ok(Self {

@@ -34,6 +34,7 @@ use crate::{
 #[serde(rename_all = "lowercase")]
 pub enum FormatId {
     V4,
+    V5,
 }
 
 impl Default for FormatId {
@@ -46,13 +47,16 @@ impl FormatId {
     /// The format `mcf load` writes when `--format` is not given.
     pub const DEFAULT: FormatId = FormatId::V4;
 
-    /// Every format this binary knows. Single source of truth for
-    /// `FromStr` and error messages.
+    /// Every format this binary knows *end to end*. Single source of
+    /// truth for `FromStr`, error messages, and conformance coverage.
+    /// V5 joins once its reader lands behind the `Snapshot` facade —
+    /// until then the builder exists but the format is not selectable.
     pub const ALL: &'static [FormatId] = &[FormatId::V4];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             FormatId::V4 => "v4",
+            FormatId::V5 => "v5",
         }
     }
 

@@ -33,6 +33,9 @@ pub enum Error {
     #[error("block assembler used after a sink error")]
     AssemblerPoisoned,
 
+    #[error("block_size must be a power of two >= 4096, got {0}")]
+    InvalidBlockSize(u32),
+
     #[error("block checksum mismatch")]
     BlockChecksumMismatch,
 

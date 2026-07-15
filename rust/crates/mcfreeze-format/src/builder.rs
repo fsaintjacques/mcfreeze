@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::{desc::FormatId, meta::Stats, v4, Result};
+use crate::{desc::FormatId, meta::Stats, v4, v5, Result};
 
 /// Per-partition scatter sink. One appender exists per partition, driven
 /// from a single blocking task — no locking on the hot path.
@@ -83,6 +83,18 @@ pub struct BuilderConfig {
     /// `BufWriter` capacity for each partition's secondary stream
     /// (V4: spill.bin).
     pub spill_buf_bytes: usize,
+    /// V5-specific knobs; ignored by other formats.
+    pub v5: V5Options,
+}
+
+/// V5-specific construction knobs (`doc/plan/FORMAT_V5_SPARSE_INDEX.md`).
+#[derive(Debug, Clone, Default)]
+pub struct V5Options {
+    /// Override the auto-tuned `block_size`. Power of two, ≥ 4 KiB.
+    pub block_size: Option<u32>,
+    /// Target radix bucket size in bytes (default 128 MiB). Peak build
+    /// RAM ≈ `index_parallelism × bucket_bytes`.
+    pub bucket_bytes: Option<u64>,
 }
 
 /// Instantiate the builder for `format`. The single dispatch point on the
@@ -90,5 +102,6 @@ pub struct BuilderConfig {
 pub fn builder_for(format: FormatId, config: BuilderConfig) -> Result<Arc<dyn FormatBuilder>> {
     match format {
         FormatId::V4 => Ok(Arc::new(v4::builder::V4Builder::new(config)?)),
+        FormatId::V5 => Ok(Arc::new(v5::builder::V5Builder::new(config)?)),
     }
 }
