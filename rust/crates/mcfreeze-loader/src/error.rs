@@ -28,4 +28,15 @@ pub enum LoaderError {
         requested: mcfreeze_format::FormatId,
         found: mcfreeze_format::FormatId,
     },
+
+    #[error(
+        "value for key {key:?} is {len} bytes, exceeding --max-value-bytes {max}; \
+         raise the limit or fix the source column mapping"
+    )]
+    ValueTooLarge {
+        /// Lossy UTF-8 preview of the key, truncated for display.
+        key: String,
+        len: usize,
+        max: usize,
+    },
 }

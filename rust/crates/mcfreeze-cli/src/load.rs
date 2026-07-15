@@ -40,6 +40,12 @@ pub struct LoadArgs {
     #[arg(long, default_value = "2")]
     pub index_parallelism: usize,
 
+    /// Reject any value larger than this many bytes at scatter time.
+    /// Policy guard against mis-mapped source columns; the format's own
+    /// hard limit is 2 GiB.
+    #[arg(long, default_value_t = mcfreeze_loader::DEFAULT_MAX_VALUE_BYTES)]
+    pub max_value_bytes: usize,
+
     /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
@@ -163,6 +169,7 @@ impl Pipeline {
         format: mcfreeze_format::FormatId,
         partitions: u32,
         index_parallelism: usize,
+        max_value_bytes: usize,
     ) -> Result<()> {
         let Self {
             sources,
@@ -190,11 +197,14 @@ impl Pipeline {
                 .await?;
                 load_sources(
                     output,
-                    format,
-                    partitions,
-                    index_parallelism,
-                    progress_secs,
-                    estimated_rows,
+                    LoadParams {
+                        format,
+                        partitions,
+                        index_parallelism,
+                        max_value_bytes,
+                        progress_secs,
+                        estimated_rows,
+                    },
                     sources,
                 )
                 .await?;
@@ -213,11 +223,14 @@ impl Pipeline {
                     .collect();
                 load_sources(
                     output,
-                    format,
-                    partitions,
-                    index_parallelism,
-                    progress_secs,
-                    estimated_rows,
+                    LoadParams {
+                        format,
+                        partitions,
+                        index_parallelism,
+                        max_value_bytes,
+                        progress_secs,
+                        estimated_rows,
+                    },
                     sources,
                 )
                 .await
@@ -331,6 +344,7 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
                 args.format,
                 args.partitions,
                 args.index_parallelism,
+                args.max_value_bytes,
             )
             .await
     }
@@ -600,25 +614,36 @@ async fn apply_protobuf_encoding(
 // Shared load orchestration
 // ---------------------------------------------------------------------------
 
-async fn load_sources<S>(
-    output: &Path,
+/// Scalar knobs for [`load_sources`], bundled to keep the signature flat.
+struct LoadParams {
     format: mcfreeze_format::FormatId,
     partitions: u32,
     index_parallelism: usize,
+    max_value_bytes: usize,
     progress_secs: u64,
     estimated_rows: Option<u64>,
-    sources: Vec<S>,
-) -> Result<()>
+}
+
+async fn load_sources<S>(output: &Path, params: LoadParams, sources: Vec<S>) -> Result<()>
 where
     S: KvSource + Send + 'static,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
+    let LoadParams {
+        format,
+        partitions,
+        index_parallelism,
+        max_value_bytes,
+        progress_secs,
+        estimated_rows,
+    } = params;
     let scatter_reporter = ProgressReporter::new("scatter", estimated_rows, progress_secs);
 
     let loader_config = LoaderConfig {
         format,
         n_partitions: partitions,
         index_parallelism,
+        max_value_bytes,
         progress_fn: Some(scatter_reporter.updater()),
         progress_interval: 0,
         ..LoaderConfig::default()

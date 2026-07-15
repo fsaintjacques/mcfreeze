@@ -143,7 +143,19 @@ pub struct LoaderConfig {
 
     /// Optional progress callback: `fn(keys_processed, unpadded_bytes_written)`.
     pub progress_fn: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+
+    /// Reject any value larger than this many bytes at scatter time.
+    /// Operational policy, not a format limit: a serving cache has no
+    /// business holding values ~1000× the read-path latency budget, and
+    /// an oversized value usually means a mis-mapped source column.
+    /// Default: [`DEFAULT_MAX_VALUE_BYTES`] (16 MiB).
+    pub max_value_bytes: usize,
 }
+
+/// Default for [`LoaderConfig::max_value_bytes`]: 16 MiB — well above
+/// any sane cache value (memcached's own default cap is 1 MiB), low
+/// enough to catch a mis-mapped blob column before hours of scatter.
+pub const DEFAULT_MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
 impl std::fmt::Debug for LoaderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -156,6 +168,7 @@ impl std::fmt::Debug for LoaderConfig {
             .field("index_parallelism", &self.index_parallelism)
             .field("progress_interval", &self.progress_interval)
             .field("progress_fn", &self.progress_fn.as_ref().map(|_| "<fn>"))
+            .field("max_value_bytes", &self.max_value_bytes)
             .finish()
     }
 }
@@ -171,6 +184,7 @@ impl Default for LoaderConfig {
             index_parallelism: 2,
             progress_interval: 100_000,
             progress_fn: None,
+            max_value_bytes: DEFAULT_MAX_VALUE_BYTES,
         }
     }
 }
@@ -394,6 +408,7 @@ impl SnapshotLoader {
                     self.builder.format(),
                     appenders,
                     self.config.channel_capacity,
+                    self.config.max_value_bytes,
                 )?;
                 let mut fanout = phase.fanout();
                 let progress_fn = self.config.progress_fn.clone();
@@ -462,6 +477,7 @@ impl SnapshotLoader {
             self.builder.format(),
             appenders,
             self.config.channel_capacity,
+            self.config.max_value_bytes,
         )?;
 
         let interval = self.config.progress_interval;
