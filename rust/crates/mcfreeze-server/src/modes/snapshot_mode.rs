@@ -54,6 +54,9 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     // Blocking (residency work included), but this is startup: listeners
     // have not been bound yet, so nothing is being starved.
     let reader = Snapshot::open_path(&cfg.dir)?;
+    metrics
+        .expected_miss_io_rate
+        .set(reader.expected_miss_io_rate());
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
     let factory: Arc<dyn LookupFactory> = Arc::new(SnapshotLookup::new(Arc::new(reader)));

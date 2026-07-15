@@ -219,8 +219,9 @@ The `Registry` wraps an `ArcSwap<ActiveCatalog>` for lock-free replacement:
   when the generation changes — so the guard is held for nanoseconds, not
   across `pread` syscalls.
 - **Swap path (catalog watcher):** `registry.swap(new)` atomically replaces the
-  catalog and returns the old `Arc`. The watcher drops the old Arc after swap,
-  releasing mmaps and file descriptors.
+  catalog and returns the old `Arc`. The watcher detaches the old Arc's
+  teardown to the blocking pool; mmaps and fds are released when the last
+  holder (detached drop or in-flight request) lets go.
 
 No `Mutex` or `RwLock` on the hot path.
 
@@ -240,8 +241,9 @@ at `:9090/metrics`.
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, collision, error}. `collision` = fingerprint false positive (paid `pread`, no match). `_count` series gives per-result and total lookup counts. |
+| `mcf_request_duration_seconds` | Histogram | `result` | Per-key latency; `result` ∈ {hit, miss, miss_io, error}. `miss_io` = miss that paid `pread`s (fingerprint/filter false positive); expected rate is format-dependent — compare against `mcf_expected_miss_io_rate`. `_count` series gives per-result and total lookup counts. |
 | `mcf_response_bytes` | Histogram | — | Per-response value size (hits only); `_sum` is total bytes sent |
+| `mcf_expected_miss_io_rate` | Gauge | — | Expected fraction of misses paying I/O for the active formats (max across datasets; ≈0 for V4). Alert when observed `miss_io / (miss + miss_io)` diverges from it |
 | `mcf_catalog_generation` | Gauge | — | Current generation; 0 in snapshot mode |
 | `mcf_catalog_swap_total` | Counter | `result` | Catalog swaps; `result` ∈ {ok, error} |
 | `mcf_active_datasets` | Gauge | — | Dataset count; always 1 in snapshot mode |

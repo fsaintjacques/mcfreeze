@@ -109,6 +109,15 @@ impl ActiveCatalog {
         self.datasets.len()
     }
 
+    /// Worst-case expected paid-miss rate across active datasets, for the
+    /// `mcf_expected_miss_io_rate` gauge (0.0 for an empty catalog).
+    pub fn max_expected_miss_io_rate(&self) -> f64 {
+        self.datasets
+            .values()
+            .map(|h| h.reader.expected_miss_io_rate())
+            .fold(0.0, f64::max)
+    }
+
     /// Iterator over `(key_prefix, dataset_name, version_id)` triples.
     pub fn datasets(&self) -> impl Iterator<Item = (&str, &str, &str)> {
         self.datasets
@@ -132,11 +141,11 @@ impl ActiveCatalog {
         entries
     }
 
-    /// Look up `key` in `dataset`.  Returns [`LookupOutcome::Miss`] for
-    /// unknown datasets (no index was ever consulted).
+    /// Look up `key` in `dataset`.  Returns a free miss for unknown
+    /// datasets (no index was ever consulted).
     pub async fn get(&self, dataset: &str, key: &[u8]) -> Result<LookupOutcome, ServeError> {
         match self.datasets.get(dataset) {
-            None => Ok(LookupOutcome::Miss),
+            None => Ok(LookupOutcome::Miss { io: false }),
             Some(h) => h.get(key).await,
         }
     }
@@ -205,7 +214,10 @@ mod tests {
     }
 
     fn assert_miss(o: LookupOutcome) {
-        assert!(matches!(o, LookupOutcome::Miss), "expected Miss, got {o:?}");
+        assert!(
+            matches!(o, LookupOutcome::Miss { .. }),
+            "expected Miss, got {o:?}"
+        );
     }
 
     // --- DatasetHandle ---

@@ -339,7 +339,7 @@ mod tests {
         async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
             Ok(match self.0.get(key) {
                 Some(&v) => LookupOutcome::Hit(Bytes::from_static(v)),
-                None => LookupOutcome::Miss,
+                None => LookupOutcome::Miss { io: false },
             })
         }
     }
