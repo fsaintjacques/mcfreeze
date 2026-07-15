@@ -26,7 +26,7 @@ use crate::{
     desc::FormatId,
     meta::{partition_dir, Layout, Stats, HASH_ALGORITHM},
     v5::{
-        block::{checksum32, encoded_len, BlockAssembler, Stub},
+        block::{checksum32, encoded_len, BlockAssembler, Stub, MAX_VALUE_LEN},
         meta::{self, validate_block_size, PartitionMeta, SketchMeta},
         verify_fingerprint,
     },
@@ -82,6 +82,9 @@ struct Plan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionBuildDone {
     pub n_keys: u64,
+    /// Scatter-time frame bytes (`arrival.bin` size), preserved so
+    /// `scatter_probe` reports the same value before and after build.
+    pub data_bytes: u64,
     pub n_blocks: u64,
     pub n_stubs: u64,
     pub blocks_bytes: u64,
@@ -119,6 +122,16 @@ struct V5Appender {
 
 impl PartitionAppender for V5Appender {
     fn append(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
+        // Enforce the format's 31-bit value limit at scatter time: an
+        // oversized value must fail here, not corrupt the u32 frame
+        // length (≥ 4 GiB wraps) or surface hours later when build()
+        // feeds the assembler.
+        if value.len() as u64 > MAX_VALUE_LEN as u64 {
+            return Err(Error::ValueTooLarge {
+                len: value.len() as u64,
+                max: MAX_VALUE_LEN,
+            });
+        }
         let vfp = verify_fingerprint(key, self.verify_seed);
         self.out.write_all(&fp.to_le_bytes())?;
         self.out.write_all(&vfp.to_le_bytes())?;
@@ -139,8 +152,10 @@ impl PartitionAppender for V5Appender {
             data_bytes: self.data_bytes,
             hist: self.hist,
         };
-        fs::write(self.dir.join(ARRIVAL_STATS), serde_json::to_string(&stats)?)?;
-        Ok(())
+        write_marker(
+            &self.dir.join(ARRIVAL_STATS),
+            &serde_json::to_string(&stats)?,
+        )
     }
 }
 
@@ -213,7 +228,7 @@ impl V5Builder {
                 block_size,
                 inline_threshold: block_size / 2,
             };
-            fs::write(&path, serde_json::to_string(&plan)?)?;
+            write_marker(&path, &serde_json::to_string(&plan)?)?;
             plan
         };
         *guard = Some(plan);
@@ -236,19 +251,39 @@ fn sweep_partition_transients(dir: &Path) {
     remove_bucket_files(dir);
 }
 
+/// Removes radix bucket files and orphaned `.tmp` marker files (a crash
+/// between `write_marker`'s create and rename leaves one behind).
 fn remove_bucket_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(BUCKET_PREFIX)
-        {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(BUCKET_PREFIX) || name.ends_with(".tmp") {
             let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+/// Atomically publish a marker file: write + fsync a temp sibling, then
+/// rename it into place. Marker *presence* is a completion signal
+/// (`arrival.stats`, `v5.plan`, `build.done`, `index.done`, `meta.json`),
+/// so a marker must never exist truncated — a plain `fs::write`
+/// interrupted by a crash or full disk leaves a file that asserts
+/// completion while its JSON no longer parses, wedging every resume
+/// path until it is manually deleted.
+fn write_marker(path: &Path, json: &str) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// `clamp(next_pow2(2 × median_record_size), 4 KiB, 64 KiB)`, with the
@@ -315,7 +350,9 @@ impl FormatBuilder for V5Builder {
             let done: PartitionBuildDone = serde_json::from_str(&fs::read_to_string(done_path)?)?;
             return Ok(Some(ScatterProbe {
                 n_keys: done.n_keys,
-                data_bytes: done.blocks_bytes + done.heap_bytes,
+                // The scatter-time byte count, persisted through the
+                // marker so the probe answer is stable across a resume.
+                data_bytes: done.data_bytes,
             }));
         }
         // arrival.bin without arrival.stats is a crashed scatter: report
@@ -387,7 +424,7 @@ impl FormatBuilder for V5Builder {
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
         };
-        fs::write(&sentinel, serde_json::to_string_pretty(&done)?)?;
+        write_marker(&sentinel, &serde_json::to_string_pretty(&done)?)?;
         // The plan is never needed once the phase sentinel exists.
         let _ = fs::remove_file(self.root.join(PLAN_FILE));
 
@@ -416,11 +453,12 @@ impl FormatBuilder for V5Builder {
             stats: Some(stats),
             encoding,
         };
-        fs::write(
-            self.root.join("meta.json"),
-            serde_json::to_string_pretty(&meta)?,
-        )?;
-        Ok(())
+        // meta.json is the snapshot completeness sentinel — atomic like
+        // every other marker.
+        write_marker(
+            &self.root.join("meta.json"),
+            &serde_json::to_string_pretty(&meta)?,
+        )
     }
 }
 
@@ -455,9 +493,16 @@ fn build_partition(
     // Radix pass: split arrival.bin into S sorted-concatenable bucket
     // files by the top log2(S) bits of fp. S == 1 sorts arrival.bin
     // directly — no copy.
-    let n_buckets = (arrival_bytes.div_ceil(bucket_bytes.max(1)))
-        .next_power_of_two()
-        .clamp(1, 4096) as usize;
+    let n_buckets = bucket_count(arrival_bytes, bucket_bytes);
+    if (n_buckets as u64) * bucket_bytes < arrival_bytes {
+        tracing::warn!(
+            arrival_bytes,
+            n_buckets,
+            actual_bucket_bytes = arrival_bytes / n_buckets as u64,
+            target_bucket_bytes = bucket_bytes,
+            "radix bucket count capped; sort RAM per bucket exceeds target"
+        );
+    }
     let buckets: Vec<PathBuf> = if n_buckets == 1 {
         vec![arrival.clone()]
     } else {
@@ -516,6 +561,7 @@ fn build_partition(
 
     let done = PartitionBuildDone {
         n_keys,
+        data_bytes: arrival_bytes,
         n_blocks: fences.len() as u64,
         n_stubs,
         blocks_bytes: fences.len() as u64 * plan.block_size as u64,
@@ -523,9 +569,25 @@ fn build_partition(
     };
     // Marker before cleanup: a crash in between leaves the partition
     // skippable, with only idempotent deletion left to redo.
-    fs::write(&done_path, serde_json::to_string(&done)?)?;
+    write_marker(&done_path, &serde_json::to_string(&done)?)?;
     sweep_partition_transients(dir);
     Ok(done)
+}
+
+/// Radix bucket count for a partition: enough buckets to hit the target
+/// bucket size, capped to bound simultaneously open bucket files
+/// (`n_buckets` fds per building partition, times the build
+/// parallelism). At the cap, buckets grow past the target — sort RAM
+/// per bucket rises, the build still completes (warned at the call
+/// site).
+const MAX_RADIX_BUCKETS: u64 = 64;
+
+fn bucket_count(arrival_bytes: u64, bucket_bytes: u64) -> usize {
+    arrival_bytes
+        .div_ceil(bucket_bytes.max(1))
+        .checked_next_power_of_two()
+        .unwrap_or(u64::MAX)
+        .clamp(1, MAX_RADIX_BUCKETS) as usize
 }
 
 /// One streaming pass over `arrival.bin`, appending each frame to the
@@ -845,12 +907,47 @@ mod tests {
         let probe = builder.scatter_probe(0).unwrap().unwrap();
         assert_eq!(probe.n_keys, 1);
         assert!(probe.data_bytes > 0);
+        let scatter_bytes = probe.data_bytes;
 
-        // Built: transient state gone, marker answers the probe.
+        // Built: transient state gone, marker answers the probe with
+        // the same numbers as before the build.
         builder.plan().unwrap();
         builder.build(1, None).unwrap();
         let probe = builder.scatter_probe(0).unwrap().unwrap();
         assert_eq!(probe.n_keys, 1);
+        assert_eq!(
+            probe.data_bytes, scatter_bytes,
+            "probe must be stable across a resume boundary"
+        );
+    }
+
+    #[test]
+    fn bucket_count_caps_open_files() {
+        assert_eq!(bucket_count(0, 128), 1);
+        assert_eq!(bucket_count(100, 128), 1);
+        assert_eq!(bucket_count(1000, 128), 8);
+        // Cap: tiny bucket target on a large partition must not demand
+        // thousands of simultaneously open files.
+        assert_eq!(bucket_count(u64::MAX, 1), MAX_RADIX_BUCKETS as usize);
+        assert_eq!(bucket_count(1 << 40, 4096), MAX_RADIX_BUCKETS as usize);
+        // Degenerate knob value: treated as a 1-byte target, capped.
+        assert_eq!(bucket_count(100, 0), MAX_RADIX_BUCKETS as usize);
+    }
+
+    #[test]
+    fn markers_are_published_atomically() {
+        // write_marker must leave no .tmp sibling on success, and the
+        // sweep must remove one orphaned by a crash.
+        let dir = TempDir::new().unwrap();
+        let marker = dir.path().join(BUILD_DONE);
+        write_marker(&marker, "{}").unwrap();
+        assert!(marker.exists());
+        assert!(!dir.path().join("build.done.tmp").exists());
+
+        fs::write(dir.path().join("build.done.tmp"), b"orphan").unwrap();
+        sweep_partition_transients(dir.path());
+        assert!(!dir.path().join("build.done.tmp").exists());
+        assert!(marker.exists(), "sweep must not touch the real marker");
     }
 
     #[test]
