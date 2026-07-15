@@ -15,7 +15,8 @@ dominant RAM cost of a serving node:
 | 10B  | 84 GB |
 
 Target for V5: **≥10× smaller resident footprint** (10B keys ≤ 8 GB) while
-keeping the lookup I/O budget at **median 1 `pread`, worst case 2**.
+keeping the lookup I/O budget at **median 1 `pread`, worst case 2 in
+practice** (probabilistic, not invariant — quantified in fences.bin).
 
 ## Core idea
 
@@ -205,13 +206,73 @@ first record's fingerprint in block `i`. Sorted by construction. Loaded
 into an owned, 2 MiB-aligned, `MADV_HUGEPAGE`-advised allocation at open;
 the fd is closed immediately after the copy.
 
-Lookup: binary search for the last `fence[i] ≤ high32(fp)`. Truncation to
-32 bits creates an ambiguity only when adjacent fences are equal (a run of
-keys sharing their top 32 bits split across a block boundary); on equality,
-the next block is also a candidate — bounded at 2 `pread`s, and rare (at
-10B keys, ~1% of lookups; negligible below 4B keys). If measurement ever
-disagrees, `fence_width` can grow to 40/64 bits via meta — the reader
-treats it as a parameter.
+Fences are non-decreasing, not strictly increasing: all records sharing
+`h = high32(fp)` form one contiguous run in the sorted partition, and a
+run crossing a block boundary makes the next block's fence repeat `h`.
+The run may also *start* mid-block, so the block before the first
+`fence == h` is always a candidate.
+
+Lookup: let `lo = partition_point(fence, f < h)` (index of the first
+fence ≥ `h`):
+
+- if `lo == 0` and `fence[0] > h`: miss, zero I/O;
+- otherwise the candidates are every block `i ≥ lo` with `fence[i] == h`
+  (ascending), then block `lo − 1` (if `lo > 0`) **last**. Return on the
+  first vfp match.
+
+Probe order matters: about `1/B` of present keys (B = records/block,
+~6% at B = 16) share their block head's high32, making `fence[lo] == h`
+— and for essentially all of them the key is in block `lo`, not
+`lo − 1`. Probing `lo − 1` first would waste a `pread` on every such
+lookup (~1.06 expected preads/hit instead of ~1.0001). The backward
+block holds the key only on a true backward straddle, at the tie rate
+quantified below, so it is probed last. When no fence equals `h` (the
+overwhelmingly common case), `lo − 1` is the only candidate.
+
+In the common case no fence equals `h` and this degenerates to the
+single block `lo − 1`: one binary search, one `pread`. The equal-fence
+peek is a forward linear scan from `lo`, not a second binary search; it
+examines exactly as many entries as there are blocks the lookup must
+read anyway.
+
+Tie rate: partition routing consumes the *low* bits of `fp` and fences
+the *high* 32, so only same-partition keys can collide in fence space —
+the tie rate scales with keys per partition, not total keys. With `n`
+keys per partition and `B` records per block, the number of other
+same-partition keys sharing a given key's high32 is Poisson with
+`λ = n / 2^32`, giving
+
+```
+P(lookup needs a 2nd candidate block) ≈ 1 − e^(−λ/B) ≈ n / (2^32 × B)
+```
+
+(verified by simulation). At `B ≈ 16` (256 B records, 4 KiB blocks),
+by total keys and partition count N:
+
+| Keys | N = 64 | N = 256 | N = 1024 | N = 4096 |
+|------|--------|---------|----------|----------|
+| 500M | 0.011% | 0.003%  | 0.0007%  | 0.0002%  |
+| 1B   | 0.023% | 0.006%  | 0.0014%  | 0.0004%  |
+| 10B  | 0.23%  | 0.057%  | 0.014%   | 0.0036%  |
+
+Three or more candidate blocks require more than `B` keys sharing one
+high32 value inside one partition — Poisson tail ~10⁻⁴² per fence value
+at 10B keys / 1024 partitions, expected count zero for every realistic
+configuration. (The ~3 full-64-bit birthday collisions expected at 10B
+keys land in one partition by construction but form 2-record runs,
+inside the 2-block candidate set.) "Worst case 2 `pread`s" therefore
+holds in practice as a probabilistic statement, not an invariant: the
+reader must handle arbitrary run lengths, and the budget table cites
+the formula. A wider `fence_width` (40/64 bits via meta) buys nothing
+at these scales; 32 bits suffices once the per-partition collision
+domain is accounted for.
+
+Ties are a correctness obligation, not a performance one: at 10B keys /
+1024 partitions, ~1.4M present keys live in boundary-straddling runs,
+and a reader that skips the backward or equal-fence candidates
+false-misses every one of them. Such runs will essentially never arise
+in a random test corpus of feasible size, so the conformance suite must
+construct them deliberately (see Implementation order).
 
 Sizing: fences cost `32 bits × block_size⁻¹ × avg_record_size` per key —
 they scale with **data bytes**, not key count:
@@ -223,16 +284,85 @@ fence_bytes = blocks.bin bytes / block_size × 4
 ## sketch.bin
 
 Optional per-partition filter over the full 64-bit key fingerprints,
-queried before the fence search. Loaded and owned like `fences.bin`. Immutable build-once filters fit the
-static-snapshot model; candidates:
+queried before the fence search. Loaded and owned like `fences.bin`.
+Immutable build-once filters fit the static-snapshot model.
 
-| Kind | Bits/key | False-positive rate |
-|------|----------|---------------------|
-| blocked Bloom | 4 | ~15% |
-| blocked Bloom | 6 | ~5.6% |
-| binary fuse 8 | ~9 | ~0.4% |
+Selection criteria, in the order they actually discriminate:
 
-A false positive costs one wasted `pread`; expected miss cost = ε reads.
+1. **False-positive rate ε** — every false positive is one wasted
+   50–100 µs `pread`; expected miss cost = ε reads.
+2. **Bits/key** — resident RAM, 1 bit/key = 1.25 GB at 10B keys.
+3. **Probe cost (cachelines)** — see below; a tiebreaker only.
+
+Candidates, measured at 10M keys/partition (10B keys / 1024) on the
+static-filter bench (`xorf` 0.12 for fuse; 64 B cache-line-blocked
+Bloom):
+
+| Kind | Bits/key | ε (measured) | b/key ÷ log₂(1/ε) | Lines/probe |
+|------|----------|--------------|--------------------|-------------|
+| blocked Bloom k=3 | 4.0 | 14.8% | 1.45 | 1 |
+| blocked Bloom k=4 | 6.0 | 5.8% | 1.46 | 1 |
+| blocked Bloom k=5 | 8.0 | 2.3% | 1.47 | 1 |
+| binary fuse 8 | 9.0 | 0.39% | 1.13 | 3, independent |
+| binary fuse 16 | 18.0 | 0.0014% | 1.12 | 3, independent |
+| ribbon/BuRR r=5 | ~5.1 | 3.1% | ~1.01 | ~2, adjacent |
+| cuckoo f=8 | 8.4 | ~3% | ~1.7 | 2, independent |
+
+The middle column is the honest comparison: bits spent per bit of
+rejection power (information-theoretic optimum 1.0). Fuse filters beat
+Bloom by ~30% per bit; ribbon (BuRR) is near-optimal but its Rust
+implementations are immature; cuckoo is dominated (worse ratio than
+Bloom, plus a build that can fail and needs eviction loops — its
+strengths are deletion and incremental insert, which a build-once
+snapshot never uses).
+
+**Probe cost is a non-criterion at this design's scale.** The worst
+candidate touches 3 cachelines, and fuse's 3 loads are independent, so
+they overlap into ~1 DRAM latency (~100 ns; measured 8–19 ns/probe
+while cache-warm). The probe defends a 50–100 µs `pread` — three
+orders of magnitude — and at 1M probes/s even 3 lines/probe is
+~200 MB/s of DRAM traffic against >100 GB/s available. Cachelines
+would discriminate only in a CPU-bound batched (MGET) path, and even
+there prefetch pipelining hides the difference.
+
+**Default: `binary_fuse8`.** Versus bloom-4 it spends 2.3× the bits to
+cut wasted preads 38× (ε 14.8% → 0.39%); versus bloom-8 it spends
++1 bit/key for 6×. At 0.39%, a fully miss-dominated node wastes one
+pread per 256 lookups — the sketch is no longer a factor in I/O
+provisioning, whereas at bloom-4's 15% it still is. Small-partition
+overhead is negligible (9.18 b/key at 500k keys vs 9.00 at 40M), so
+the per-partition split costs nothing. `blocked_bloom` (4–6 b/key,
+k=3–4) remains in `meta.sketch.kind` for the RAM-capped 10B tier,
+where fuse-8's 11.3 GB breaks the ≤8 GB budget and bloom-4's 5 GB
+fits.
+
+Implementation notes:
+
+- `xorf::BinaryFuse8` fits the owned-load model exactly: its
+  `DmaSerializable` trait emits a fixed-size descriptor + the raw
+  fingerprint array (that pair *is* the `sketch.bin` layout), and
+  `BinaryFuse8Ref::from_dma(descriptor, fingerprints)` queries
+  zero-copy over the 2 MiB-aligned owned allocation.
+- Fuse construction fails on duplicate keys. The builder feeds fps in
+  sorted order (phase 2 buckets ascend), so dedup is a free
+  adjacent-equal skip — required anyway, since the ~3 expected 64-bit
+  fp collisions at 10B keys would otherwise abort the build. Build
+  cost is ~0.4 s and ~24 B/key transient RAM per 10M-key partition,
+  inside the phase-2 `sketch_builder` budget.
+- Binary fuse 16 is not worth a kind: 9 more bits/key to go from
+  1-in-256 to 1-in-71000 wasted preads buys nothing observable.
+- If the 10B tier materializes and bloom-4's 15% ε hurts, the upgrade
+  path is a BuRR-style ribbon filter (ε=2⁻ʳ at ~0.1–0.5% space
+  overhead — e.g. 3.1% at ~5.0 b/key, 6.25% at ~4.0), which strictly
+  dominates Bloom at equal bits; RocksDB's Standard128Ribbon measures
+  ~30% space savings over its Bloom at equal FPR, for 3–4× the build
+  CPU (~140 ns/key). That is a new `sketch.kind`, not a format change;
+  the Rust implementations are pre-production (`ribbon-filter` 0.2,
+  `pleat` 0.1, neither implements bumping) — vet one or port RocksDB's
+  C++ when the need is real, not before. (ZOR filters, arXiv
+  2602.03525, promise near-BuRR space with fuse-like queries but are
+  prototype-only as of early 2026.)
+
 Size by miss traffic: hit-dominated workloads can disable the sketch
 entirely; miss-heavy workloads want binary-fuse-8.
 
@@ -246,8 +376,13 @@ lookup(key):
   if sketch enabled and !sketch[partition].contains(fp):
     return NOT_FOUND                     // 0 preads
 
-  b = binary_search(fences[partition], high32(fp))   // RAM only
-  for block in [b, b+1 if fence tie]:
+  h  = high32(fp)
+  lo = partition_point(fences[partition], f < h)     // RAM only
+  if lo == 0 and fences[partition][0] > h:
+    return NOT_FOUND                                 // 0 preads
+  candidates = [i for i in lo.. while fence[i] == h]
+             ++ [lo - 1 if lo > 0]     // backward block last (see fences.bin)
+  for block in candidates:
     buf = pread(blocks_fd[partition], block_size, block * block_size)
     verify_block_checksum(buf) or return ERROR
     for record in scan(buf):             // walk headers, stop at vfp == 0
@@ -267,10 +402,10 @@ I/O budget:
 | Case | preads |
 |------|--------|
 | Inline hit (the bulk) | 1 |
-| Fence-tie hit (rare) | 2 |
+| Fence-tie hit (rate ≈ n/(2³²·B), see fences.bin) | ≤ 2 in practice |
 | Out-of-line hit | 2 |
 | Miss, sketch negative | 0 |
-| Miss, sketch false positive or sketch disabled | 1 |
+| Miss, sketch false positive or sketch disabled | 1 (full candidate set on a fence tie) |
 
 Metrics mapping: `result=miss` stays "0 preads paid" only when the sketch
 rejects; a block scanned without a vfp match is the V5 analog of
@@ -404,8 +539,10 @@ column or double `block_size`.
   measure first.
 - Per-block `u16` offset footer for binary search within large blocks:
   only relevant if `block_size` ≥ 16 KiB; ~1% disk, zero RAM.
-- Sketch default: off, bloom-4, or fuse-8? Depends on fleet-wide miss rate;
-  ship off + a `--sketch` build flag, decide after production numbers.
+- Sketch default: the *kind* question is settled (binary-fuse-8;
+  blocked-bloom only for the RAM-capped 10B tier — see sketch.bin).
+  Whether `--sketch` is on or off by default depends on fleet-wide miss
+  rate; ship off + the flag, decide after production numbers.
 - `heap_offset` width: `u64` is simple; `u40` in 64 B units would shave
   3 B/stub if stub density ever matters.
 - Radix bucket sizing: number of top-of-fingerprint bits (equivalently,
@@ -433,7 +570,13 @@ no server changes.
 
 1. **mcfreeze-format**: block/record encode + scan, fence build + search,
    unit tests (roundtrip, boundary padding, fence ties, stub/heap, empty
-   partition, corrupted block and heap bytes → error not miss).
+   partition, corrupted block and heap bytes → error not miss). Fence-tie
+   coverage must use deliberately constructed keys — an equal-high32 run
+   straddling one block boundary, a run spanning ≥ 2 full blocks, and an
+   absent key sharing the run's high32 (forces the full candidate scan
+   to a clean miss). At realistic λ these configurations never occur in
+   a feasible random corpus, which is exactly how the original
+   last-≤-plus-next lookup spec would have shipped a false-miss bug.
 2. **mcfreeze-loader**: arrival-order scatter, radix-bucket sort + block
    build, per-partition output files, done-marker recovery; delete spill
    machinery.
