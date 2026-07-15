@@ -83,7 +83,8 @@ pub struct LoadArgs {
     #[arg(long)]
     pub protobuf_package: Option<String>,
 
-    /// Base64-encoded FileDescriptorSet, or path to a .desc file.
+    /// FileDescriptorSet: path to a .desc file, gs:// URI, or inline
+    /// base64.
     #[arg(long)]
     pub protobuf_descriptor: Option<String>,
 
@@ -837,9 +838,22 @@ fn build_protobuf_config(args: &LoadArgs) -> Result<ProtobufEncoding> {
         .as_ref()
         .context("--protobuf-message is required for protobuf encoding")?
         .clone();
+    // --protobuf-descriptor accepts three spellings: a gs:// URI, a
+    // local file path, or inline base64. Paths are detected by
+    // existence, so a base64 blob can never be misread as a path.
+    let (descriptor, descriptor_uri) = match args.protobuf_descriptor.as_deref() {
+        None => (None, None),
+        Some(uri) if uri.starts_with("gs://") => (None, Some(uri.to_string())),
+        Some(path) if std::path::Path::new(path).exists() => {
+            let bytes = std::fs::read(path)
+                .with_context(|| format!("failed to read descriptor file {path}"))?;
+            (Some(STANDARD.encode(bytes)), None)
+        }
+        Some(b64) => (Some(b64.to_string()), None),
+    };
     Ok(ProtobufEncoding {
-        descriptor: args.protobuf_descriptor.clone(),
-        descriptor_uri: None,
+        descriptor,
+        descriptor_uri,
         package: args.protobuf_package.clone(),
         message_name,
     })
