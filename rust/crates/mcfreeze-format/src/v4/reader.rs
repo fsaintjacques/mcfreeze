@@ -408,7 +408,7 @@ mod tests {
     /// candidate slot, the pread succeeds, but the stored verify-fingerprint
     /// doesn't match and no further candidates exist.
     #[test]
-    fn collision_outcome_when_cfp_matches_but_key_missing() {
+    fn cfp_collision_yields_paid_io_miss() {
         use crate::index::{compact_fingerprint, fingerprint};
         use std::collections::HashMap;
 

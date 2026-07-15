@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use mcfreeze_format::{GetOutcome, Snapshot};
 
+use crate::metrics::LookupCounters;
 use crate::registry::{ActiveCatalog, Registry};
 use crate::ServeError;
 
@@ -77,13 +78,18 @@ pub trait LookupFactory: Send + Sync + 'static {
 
 /// Single-snapshot lookup.  `pread` is offloaded to the blocking thread pool;
 /// the inner `Arc<Snapshot>` is cheaply cloned per connection.
+/// Outcomes are counted under `mcf_lookup_total{dataset="snapshot"}`.
 pub struct SnapshotLookup {
     inner: Arc<Snapshot>,
+    counters: LookupCounters,
 }
 
 impl SnapshotLookup {
-    pub fn new(reader: Arc<Snapshot>) -> Self {
-        Self { inner: reader }
+    pub fn new(reader: Arc<Snapshot>, counters: LookupCounters) -> Self {
+        Self {
+            inner: reader,
+            counters,
+        }
     }
 }
 
@@ -92,14 +98,16 @@ impl Lookup for SnapshotLookup {
     async fn get(&mut self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
         let key = Bytes::copy_from_slice(key);
         let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             inner
                 .get(key.as_ref())
                 .map(LookupOutcome::from)
                 .map_err(Into::into)
         })
         .await
-        .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
+        .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?;
+        self.counters.record(&result);
+        result
     }
 }
 
@@ -107,6 +115,7 @@ impl LookupFactory for SnapshotLookup {
     fn for_connection(&self) -> Box<dyn Lookup> {
         Box::new(Self {
             inner: Arc::clone(&self.inner),
+            counters: self.counters.clone(),
         })
     }
 }
@@ -198,6 +207,17 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    fn family() -> prometheus_client::metrics::family::Family<
+        crate::metrics::DatasetResultLabels,
+        prometheus_client::metrics::counter::Counter,
+    > {
+        Default::default()
+    }
+
+    fn test_counters() -> LookupCounters {
+        LookupCounters::new(&family(), "test")
+    }
+
     fn build_snapshot(pairs: &[(&[u8], &[u8])]) -> TempDir {
         let dir = TempDir::new().unwrap();
         let mut w = SnapshotWriter::new(dir.path(), 4).unwrap();
@@ -228,7 +248,7 @@ mod tests {
     async fn hit_returns_value() {
         let dir = build_snapshot(&[(b"hello", b"world")]);
         let reader = Snapshot::open_path(dir.path()).unwrap();
-        let mut lookup = SnapshotLookup::new(Arc::new(reader));
+        let mut lookup = SnapshotLookup::new(Arc::new(reader), test_counters());
         assert_hit(lookup.get(b"hello").await.unwrap(), b"world");
     }
 
@@ -236,7 +256,7 @@ mod tests {
     async fn miss_returns_miss() {
         let dir = build_snapshot(&[(b"present", b"yes")]);
         let reader = Snapshot::open_path(dir.path()).unwrap();
-        let mut lookup = SnapshotLookup::new(Arc::new(reader));
+        let mut lookup = SnapshotLookup::new(Arc::new(reader), test_counters());
         assert_miss(lookup.get(b"absent").await.unwrap());
     }
 
@@ -244,7 +264,7 @@ mod tests {
     async fn factory_creates_independent_connection_lookups() {
         let dir = build_snapshot(&[(b"k", b"v")]);
         let reader = Snapshot::open_path(dir.path()).unwrap();
-        let factory = SnapshotLookup::new(Arc::new(reader));
+        let factory = SnapshotLookup::new(Arc::new(reader), test_counters());
         let mut c1 = factory.for_connection();
         let mut c2 = factory.for_connection();
         assert_hit(c1.get(b"k").await.unwrap(), b"v");
@@ -262,7 +282,7 @@ mod tests {
             d
         };
         let reader = Snapshot::open_path(dir.path()).unwrap();
-        let mut lookup = SnapshotLookup::new(Arc::new(reader));
+        let mut lookup = SnapshotLookup::new(Arc::new(reader), test_counters());
         std::fs::OpenOptions::new()
             .write(true)
             .open(dir.path().join("data/part-0/data.bin"))
@@ -280,13 +300,14 @@ mod tests {
         let mut ds = HashMap::new();
         ds.insert(
             "ds".into(),
-            DatasetHandle::open("ds".into(), "v1".into(), dir.path()).unwrap(),
+            DatasetHandle::open("ds".into(), "v1".into(), dir.path(), &family()).unwrap(),
         );
         (
             Registry::new(ActiveCatalog::new(
                 ds,
                 gen,
                 std::time::SystemTime::UNIX_EPOCH,
+                &family(),
             )),
             dir,
         )
@@ -312,6 +333,7 @@ mod tests {
             HashMap::new(),
             0,
             std::time::SystemTime::UNIX_EPOCH,
+            &family(),
         ));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert_miss(conn.get(b"unknown:key").await.unwrap());
@@ -323,6 +345,7 @@ mod tests {
             HashMap::new(),
             0,
             std::time::SystemTime::UNIX_EPOCH,
+            &family(),
         ));
         let mut conn = CatalogLookup::new(reg).for_connection();
         assert!(matches!(
@@ -339,18 +362,19 @@ mod tests {
         let mut ds1 = HashMap::new();
         ds1.insert(
             "ds".into(),
-            DatasetHandle::open("ds".into(), "v1".into(), dir1.path()).unwrap(),
+            DatasetHandle::open("ds".into(), "v1".into(), dir1.path(), &family()).unwrap(),
         );
         let mut ds2 = HashMap::new();
         ds2.insert(
             "ds".into(),
-            DatasetHandle::open("ds".into(), "v2".into(), dir2.path()).unwrap(),
+            DatasetHandle::open("ds".into(), "v2".into(), dir2.path(), &family()).unwrap(),
         );
 
         let reg = Registry::new(ActiveCatalog::new(
             ds1,
             0,
             std::time::SystemTime::UNIX_EPOCH,
+            &family(),
         ));
         let mut conn = CatalogLookup::new(Arc::clone(&reg)).for_connection();
 
@@ -360,6 +384,7 @@ mod tests {
             ds2,
             1,
             std::time::SystemTime::UNIX_EPOCH,
+            &family(),
         )));
 
         assert_hit(conn.get(b"ds:k").await.unwrap(), b"v2");

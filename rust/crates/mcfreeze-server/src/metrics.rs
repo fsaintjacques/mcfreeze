@@ -35,10 +35,10 @@ use serde::Serialize;
 /// Values on `mcf_request_duration_seconds`: `"hit"`, `"miss"`,
 /// `"miss_io"`, `"error"`.  `miss_io` is a miss that paid one or more
 /// `pread`s to conclude absence — a fingerprint or filter false positive.
-/// Its expected rate is format-dependent: compare the observed
-/// `miss_io / (miss + miss_io)` ratio against `mcf_expected_miss_io_rate`
-/// rather than alerting on absolute counts. Wire response is identical
-/// to a miss.
+/// Its expected rate is format-dependent: compare the per-dataset
+/// observed ratio `miss_io / (miss + miss_io)` from `mcf_lookup_total`
+/// against `mcf_expected_miss_io_rate{dataset}` — alert when observed
+/// exceeds expected. Wire response is identical to a miss.
 ///
 /// Values on `mcf_catalog_swap_total`: `"ok"`, `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -51,6 +51,71 @@ pub struct ResultLabels {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TransportLabels {
     pub transport: &'static str,
+}
+
+/// Labels for `mcf_lookup_total`: the dataset the lookup resolved to and
+/// its result (`hit`, `miss`, `miss_io`, `error`).
+///
+/// `dataset` is always a catalog-validated name, never raw client input —
+/// lookups whose key prefix matches no dataset are counted under the
+/// bounded sentinel [`UNKNOWN_DATASET`], so cardinality is capped by the
+/// catalog, not by what clients send.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct DatasetResultLabels {
+    pub dataset: String,
+    pub result: &'static str,
+}
+
+/// Label for `mcf_expected_miss_io_rate`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct DatasetLabels {
+    pub dataset: String,
+}
+
+/// Sentinel `dataset` label for lookups whose prefix matched no dataset.
+pub const UNKNOWN_DATASET: &str = "_unknown";
+
+/// Pre-resolved `mcf_lookup_total` counter handles for one dataset.
+///
+/// Built once when the dataset is opened; recording an outcome on the
+/// hot path is a single atomic increment — no label construction, no
+/// allocation, no family lock.
+#[derive(Clone)]
+pub struct LookupCounters {
+    hit: Counter,
+    miss: Counter,
+    miss_io: Counter,
+    error: Counter,
+}
+
+impl LookupCounters {
+    pub fn new(family: &Family<DatasetResultLabels, Counter>, dataset: &str) -> Self {
+        let counter = |result: &'static str| {
+            family
+                .get_or_create(&DatasetResultLabels {
+                    dataset: dataset.to_string(),
+                    result,
+                })
+                .clone()
+        };
+        Self {
+            hit: counter("hit"),
+            miss: counter("miss"),
+            miss_io: counter("miss_io"),
+            error: counter("error"),
+        }
+    }
+
+    /// Record one lookup outcome.
+    pub fn record(&self, result: &Result<crate::lookup::LookupOutcome, crate::ServeError>) {
+        use crate::lookup::LookupOutcome;
+        match result {
+            Ok(LookupOutcome::Hit(_)) => self.hit.inc(),
+            Ok(LookupOutcome::Miss { io: false }) => self.miss.inc(),
+            Ok(LookupOutcome::Miss { io: true }) => self.miss_io.inc(),
+            Err(_) => self.error.inc(),
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,11 +152,15 @@ pub struct Metrics {
     pub request_duration_seconds: Family<ResultLabels, Histogram>,
     /// Per-response value-size distribution (hits only); `_sum` is total bytes sent.
     pub response_bytes: Histogram,
-    /// Expected fraction of misses that pay I/O, from the active
-    /// snapshots' formats (max across datasets; ≈0 for V4). The observed
-    /// counterpart is `miss_io / (miss + miss_io)` from
-    /// `mcf_request_duration_seconds_count`.
-    pub expected_miss_io_rate: Gauge<f64, AtomicU64>,
+    /// Per-dataset lookup outcomes. The per-dataset observed miss-I/O
+    /// ratio is `miss_io / (miss + miss_io)`; alert when it exceeds
+    /// `mcf_expected_miss_io_rate{dataset}`. The latency histogram stays
+    /// fleet-wide — the dataset dimension lives on this cheap counter.
+    pub lookup_total: Family<DatasetResultLabels, Counter>,
+    /// Expected fraction of misses that pay I/O, per dataset, from the
+    /// snapshot's format (≈0 for V4; a sketched format's configured
+    /// false-positive rate). Snapshot mode uses `dataset="snapshot"`.
+    pub expected_miss_io_rate: Family<DatasetLabels, Gauge<f64, AtomicU64>>,
 
     // --- catalog (always present; snapshot mode uses static values) ---
     /// Current catalog generation; always 0 in snapshot mode.
@@ -136,11 +205,17 @@ impl Metrics {
             "Per-response value size in bytes (hits only)",
             Histogram::new(RESPONSE_BYTES_BUCKETS.iter().copied())
         );
+        let lookup_total = reg!(
+            registry,
+            "mcf_lookup_total",
+            "Lookup outcomes by dataset and result",
+            Family::<DatasetResultLabels, Counter>::default()
+        );
         let expected_miss_io_rate = reg!(
             registry,
             "mcf_expected_miss_io_rate",
-            "Expected fraction of misses paying I/O for the active formats",
-            Gauge::<f64, AtomicU64>::default()
+            "Expected fraction of misses paying I/O, by dataset",
+            Family::<DatasetLabels, Gauge<f64, AtomicU64>>::default()
         );
         let catalog_generation = reg!(
             registry,
@@ -176,6 +251,7 @@ impl Metrics {
         Arc::new(Self {
             request_duration_seconds,
             response_bytes,
+            lookup_total,
             expected_miss_io_rate,
             catalog_generation,
             catalog_swap_total,
@@ -358,13 +434,14 @@ mod tests {
     #[tokio::test]
     async fn version_handler_returns_loaded_datasets() {
         let dir = build_snapshot(&[(b"k", b"v")]);
+        let fam = Family::<DatasetResultLabels, Counter>::default();
         let mut ds = HashMap::new();
         ds.insert(
             "pfx".into(),
-            DatasetHandle::open("my-ds".into(), "v42".into(), dir.path()).unwrap(),
+            DatasetHandle::open("my-ds".into(), "v42".into(), dir.path(), &fam).unwrap(),
         );
         let loaded_at = SystemTime::UNIX_EPOCH;
-        let catalog = ActiveCatalog::new(ds, 1, loaded_at);
+        let catalog = ActiveCatalog::new(ds, 1, loaded_at, &fam);
         let reg = DataRegistry::new(catalog);
 
         let Json(resp) = version_handler(State(make_state(Some(reg)))).await;

@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::catalog::CatalogFile;
 use crate::listener::run_listeners;
 use crate::lookup::{CatalogLookup, LookupFactory};
-use crate::metrics::Metrics;
+use crate::metrics::{DatasetLabels, Metrics};
 use crate::registry::{ActiveCatalog, DatasetHandle, Registry as DataRegistry};
 use crate::ServeError;
 
@@ -70,24 +70,32 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
     // Load initial catalog synchronously.  If the file does not exist yet
     // (e.g. the node-agent hasn't written it), start with an empty catalog;
     // the watcher will pick up the first write.
-    let initial = match build_catalog_blocking(cfg.catalog_path.clone(), 0).await {
+    let initial = match build_catalog_blocking(cfg.catalog_path.clone(), 0, &metrics).await {
         Ok(cat) => cat,
         Err(ServeError::Io(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!("catalog file not found; starting with empty catalog");
-            ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::now())
+            ActiveCatalog::new(
+                HashMap::new(),
+                0,
+                std::time::SystemTime::now(),
+                &metrics.lookup_total,
+            )
         }
         Err(e) => return Err(e),
     };
-    let empty = ActiveCatalog::new(HashMap::new(), 0, std::time::SystemTime::now());
+    let empty = ActiveCatalog::new(
+        HashMap::new(),
+        0,
+        std::time::SystemTime::now(),
+        &metrics.lookup_total,
+    );
     log_catalog_diff(&empty, &initial, 0);
+    update_expected_miss_io_gauge(&metrics, &initial);
     let registry = DataRegistry::new(initial);
     let n_ds = registry.load().dataset_count() as i64;
 
     metrics.active_datasets.set(n_ds);
     metrics.catalog_generation.set(0);
-    metrics
-        .expected_miss_io_rate
-        .set(registry.load().max_expected_miss_io_rate());
 
     let generation: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let factory: Arc<dyn LookupFactory> = Arc::new(CatalogLookup::new(Arc::clone(&registry)));
@@ -221,13 +229,13 @@ async fn watch_catalog(
     while rx.recv().await.is_some() {
         let next_gen = generation.load(Ordering::Relaxed) + 1;
 
-        match build_catalog_blocking(catalog_path.clone(), next_gen).await {
+        match build_catalog_blocking(catalog_path.clone(), next_gen, &metrics).await {
             Err(e) => {
                 tracing::error!("catalog reload failed (keeping current catalog): {e}");
             }
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
-                let expected_miss_io = new_catalog.max_expected_miss_io_rate();
+                update_expected_miss_io_gauge(&metrics, &new_catalog);
                 let new_arc = Arc::new(new_catalog);
                 let old = registry.swap(Arc::clone(&new_arc));
 
@@ -243,7 +251,6 @@ async fn watch_catalog(
                 generation.store(next_gen, Ordering::Relaxed);
                 metrics.catalog_generation.set(next_gen as i64);
                 metrics.active_datasets.set(n_ds);
-                metrics.expected_miss_io_rate.set(expected_miss_io);
             }
         }
     }
@@ -317,19 +324,39 @@ fn log_catalog_diff(old: &ActiveCatalog, new: &ActiveCatalog, generation: u64) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Refresh `mcf_expected_miss_io_rate{dataset}` from a catalog's datasets.
+/// Clears first so datasets removed by a swap don't linger as stale series.
+fn update_expected_miss_io_gauge(metrics: &Metrics, catalog: &ActiveCatalog) {
+    metrics.expected_miss_io_rate.clear();
+    for (dataset, rate) in catalog.expected_miss_io_rates() {
+        metrics
+            .expected_miss_io_rate
+            .get_or_create(&DatasetLabels {
+                dataset: dataset.to_string(),
+            })
+            .set(rate);
+    }
+}
+
 /// Open all datasets listed in `catalog_path` and build an [`ActiveCatalog`].
 /// Runs in the blocking thread pool since `Snapshot::open` does file I/O
 /// and residency work.
 async fn build_catalog_blocking(
     catalog_path: PathBuf,
     generation: u64,
+    metrics: &Arc<Metrics>,
 ) -> Result<ActiveCatalog, ServeError> {
-    tokio::task::spawn_blocking(move || build_catalog_sync(&catalog_path, generation))
+    let metrics = Arc::clone(metrics);
+    tokio::task::spawn_blocking(move || build_catalog_sync(&catalog_path, generation, &metrics))
         .await
         .map_err(|e| ServeError::BlockingTaskPanicked(e.to_string()))?
 }
 
-fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, ServeError> {
+fn build_catalog_sync(
+    path: &Path,
+    generation: u64,
+    metrics: &Metrics,
+) -> Result<ActiveCatalog, ServeError> {
     let file = CatalogFile::load(path)?;
     let mut datasets = HashMap::new();
     for entry in file.entries {
@@ -339,13 +366,19 @@ fn build_catalog_sync(path: &Path, generation: u64) -> Result<ActiveCatalog, Ser
                 entry.key_prefix
             )));
         }
-        let handle = DatasetHandle::open(entry.dataset, entry.version_id, &entry.mount_path)?;
+        let handle = DatasetHandle::open(
+            entry.dataset,
+            entry.version_id,
+            &entry.mount_path,
+            &metrics.lookup_total,
+        )?;
         datasets.insert(entry.key_prefix, handle);
     }
     Ok(ActiveCatalog::new(
         datasets,
         generation,
         std::time::SystemTime::now(),
+        &metrics.lookup_total,
     ))
 }
 
@@ -375,6 +408,36 @@ mod tests {
     }
 
     #[test]
+    fn expected_miss_io_gauge_set_per_dataset() {
+        let metrics = Metrics::new(&mut Registry::default());
+        let snap_a = build_snapshot();
+        let snap_b = build_snapshot();
+
+        let mut ds = HashMap::new();
+        for (prefix, name, dir) in [("pa", "ds-a", &snap_a), ("pb", "ds-b", &snap_b)] {
+            ds.insert(
+                prefix.to_string(),
+                DatasetHandle::open(name.into(), "v1".into(), dir.path(), &metrics.lookup_total)
+                    .unwrap(),
+            );
+        }
+        let catalog =
+            ActiveCatalog::new(ds, 1, std::time::SystemTime::now(), &metrics.lookup_total);
+
+        update_expected_miss_io_gauge(&metrics, &catalog);
+
+        for name in ["ds-a", "ds-b"] {
+            let rate = metrics
+                .expected_miss_io_rate
+                .get_or_create(&DatasetLabels {
+                    dataset: name.to_string(),
+                })
+                .get();
+            assert_eq!(rate, 0.0, "V4 expected rate for {name}");
+        }
+    }
+
+    #[test]
     fn duplicate_key_prefix_returns_catalog_parse_error() {
         // Two entries sharing a key_prefix must be rejected even if they
         // have distinct dataset names — key_prefix is the routing key.
@@ -389,7 +452,8 @@ mod tests {
         ]}}"#
         );
         let f = write_catalog(&json);
-        match build_catalog_sync(f.path(), 0) {
+        let metrics = Metrics::new(&mut Registry::default());
+        match build_catalog_sync(f.path(), 0, &metrics) {
             Err(ServeError::CatalogParse(msg)) => {
                 assert!(
                     msg.contains("shared"),
