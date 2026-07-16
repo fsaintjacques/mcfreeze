@@ -146,9 +146,11 @@ bytes.
 - **Sample = a prefix of one partition's arrival log.** Scatter is
   untouched: partition routing is by hash, so any single partition is
   already an unbiased sample of the key space, and its `arrival.bin`
-  is the sample pool. At `plan()`, read the first ~64 MB of partition
-  0's arrival log and parse the frames — an order of magnitude past the
-  ~100× dictionary size ZDICT wants (~6.4 MB for a 64 KiB dict), which
+  is the sample pool. At `plan()`, read the first ~64 MB of the first
+  **non-empty** partition's arrival log (a small or skewed load can
+  leave partition 0 empty; hash-routing emptiness must not degrade the
+  mode) and parse the frames — an order of magnitude past the ~100×
+  dictionary size ZDICT wants (~6.4 MB for a 64 KiB dict), which
   softens the prefix's time bias at a one-off training cost that is
   noise next to the build. No reservoir code, no transient
   `samples.bin`, no appender changes.
