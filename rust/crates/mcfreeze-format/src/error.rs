@@ -74,6 +74,15 @@ pub enum Error {
     #[error("zstd context setup failed: {0}")]
     Zstd(#[source] std::io::Error),
 
+    #[error("unsupported compression codec: {0:?}")]
+    UnsupportedCodec(String),
+
+    #[error("invalid meta.compression: {0}")]
+    InvalidCompressionMeta(&'static str),
+
+    #[error("meta.compression requires dict.bin, which cannot be read: {0}")]
+    DictUnreadable(#[source] std::io::Error),
+
     #[error("sketch construction failed: {0}")]
     SketchBuild(&'static str),
 

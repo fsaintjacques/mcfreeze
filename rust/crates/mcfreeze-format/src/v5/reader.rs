@@ -99,6 +99,9 @@ pub(crate) struct SnapshotReader {
     verify_seed: u64,
     block_size: usize,
     has_sketch: bool,
+    /// Present iff `meta.compression` declares a codec. Holds the
+    /// verified dictionary and the pooled decompression contexts.
+    codec: Option<compress::Decompressor>,
 }
 
 impl SnapshotReader {
@@ -110,6 +113,31 @@ impl SnapshotReader {
         let root = root.as_ref();
         let layout = meta.layout()?;
         let block_size = meta.block_size as u64;
+
+        // Codec first: dict.bin is read into owned memory and verified
+        // against meta.compression.dict_checksum. Value checksums cover
+        // stored bytes, so a corrupt dictionary decompresses cleanly
+        // into wrong values — the one failure mode they cannot catch
+        // (exactly like the sketch's false negatives) — and fails the
+        // open instead. `layout()` already validated codec coherence.
+        let codec = match &meta.compression {
+            Some(c) => {
+                // Keyed on the semantic flag; `layout()` guarantees the
+                // checksum accompanies it (and never appears without it).
+                let dict = if c.dict {
+                    let expected = c.dict_checksum.ok_or(Error::InvalidCompressionMeta(
+                        "dict: true requires dict_checksum",
+                    ))?;
+                    let bytes = fs::read(root.join("dict.bin")).map_err(Error::DictUnreadable)?;
+                    compress::verify_dict(&bytes, expected)?;
+                    Some(bytes)
+                } else {
+                    None
+                };
+                Some(compress::Decompressor::new(dict)?)
+            }
+            None => None,
+        };
 
         let mut partitions = Vec::with_capacity(meta.partitions.len());
         for (i, pm) in meta.partitions.iter().enumerate() {
@@ -157,6 +185,7 @@ impl SnapshotReader {
             verify_seed: meta.verify_seed,
             block_size: meta.block_size as usize,
             has_sketch: meta.sketch.is_some(),
+            codec,
         })
     }
 
@@ -194,14 +223,14 @@ impl SnapshotReader {
                 self.block_size as u32,
             )?;
             io = true;
-            // No codec is loaded yet (`meta.compression` lands with the
-            // dictionary lifecycle): `decode` passes raw records through
-            // and rejects any bit-30 record as corruption.
+            // Decompression happens only after a vfp match, through the
+            // codec loaded at open; a bit-30 record in a codec-less
+            // snapshot is corruption. Both are `decode`'s contract.
             match block::find(&buf, vfp)? {
                 Some(Record::Inline {
                     value, compressed, ..
                 }) => {
-                    let value = compress::decode(value, compressed, None)?;
+                    let value = compress::decode(value, compressed, self.codec.as_ref())?;
                     return Ok(GetOutcome::Hit(value.into_owned()));
                 }
                 Some(Record::Stub {
@@ -214,7 +243,7 @@ impl SnapshotReader {
                     if checksum32(&value) != stub.value_checksum {
                         return Err(Error::ValueChecksumMismatch);
                     }
-                    let value = compress::decode(&value, compressed, None)?;
+                    let value = compress::decode(&value, compressed, self.codec.as_ref())?;
                     return Ok(GetOutcome::Hit(value.into_owned()));
                 }
                 None => {}
@@ -243,6 +272,18 @@ mod tests {
     }
 
     fn build_opts(pairs: &[(&[u8], &[u8])], n: u32, sketch: bool) -> TempDir {
+        build_v5(
+            pairs,
+            n,
+            V5Options {
+                block_size: Some(4096),
+                sketch,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn build_v5(pairs: &[(&[u8], &[u8])], n: u32, v5: V5Options) -> TempDir {
         let dir = TempDir::new().unwrap();
         let builder = builder_for(
             FormatId::V5,
@@ -252,11 +293,7 @@ mod tests {
                 verify_seed: DEFAULT_VERIFY_SEED,
                 data_buf_bytes: 64 * 1024,
                 spill_buf_bytes: 4096,
-                v5: V5Options {
-                    block_size: Some(4096),
-                    sketch,
-                    ..Default::default()
-                },
+                v5,
             },
         )
         .unwrap();
@@ -318,6 +355,149 @@ mod tests {
         assert!(matches!(
             snap.get(b"stubbed"),
             Err(Error::ValueChecksumMismatch)
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // Compression read path (doc/plan/V5_COMPRESSION.md stage 4)
+    // -----------------------------------------------------------------
+
+    fn compressible_pairs(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        (0..n)
+            .map(|i| {
+                (
+                    format!("key-{i}").into_bytes(),
+                    format!("user-{i}|city-{}|{}", i % 50, "payload ".repeat(12)).into_bytes(),
+                )
+            })
+            .collect()
+    }
+
+    fn build_dict_snapshot(n_keys: usize) -> (TempDir, Vec<(Vec<u8>, Vec<u8>)>) {
+        let vals = compressible_pairs(n_keys);
+        let pairs: Vec<(&[u8], &[u8])> = vals.iter().map(|(k, v)| (&k[..], &v[..])).collect();
+        let dir = build_v5(
+            &pairs,
+            2,
+            V5Options {
+                block_size: Some(4096),
+                compression: crate::v5::compress::Mode::ZstdDict,
+                ..Default::default()
+            },
+        );
+        (dir, vals)
+    }
+
+    #[test]
+    fn compressed_snapshot_roundtrips_through_facade() {
+        let (dir, vals) = build_dict_snapshot(2000);
+
+        // meta.json declares the codec and anchors the dictionary.
+        let meta: crate::v5::meta::Meta =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("meta.json")).unwrap())
+                .unwrap();
+        let cm = meta.compression.expect("compression section");
+        assert_eq!(cm.codec, "zstd");
+        assert!(cm.dict, "2000 samples must train, not fall back");
+        let dict = std::fs::read(dir.path().join("dict.bin")).unwrap();
+        assert_eq!(cm.dict_checksum, Some(crate::v5::block::checksum32(&dict)));
+
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        for (k, v) in &vals {
+            assert_eq!(snap.get(k).unwrap(), GetOutcome::Hit(v.clone()), "{k:?}");
+        }
+        assert!(matches!(
+            snap.get(b"definitely-absent").unwrap(),
+            GetOutcome::Miss { .. }
+        ));
+    }
+
+    #[test]
+    fn compressed_stub_roundtrips_through_facade() {
+        // A value whose *stored* frame still exceeds the inline
+        // threshold: raw 6000 B of doubled noise compresses ~2× to
+        // ~3000 B > 2048, exercising pread → stored-byte checksum →
+        // decompress on the heap path.
+        let mut half = vec![0u8; 3000];
+        let mut h = 7u64;
+        for b in half.iter_mut() {
+            h = h.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *b = (h >> 33) as u8;
+        }
+        let big: Vec<u8> = [half.clone(), half].concat();
+        let dir = build_v5(
+            &[(b"stubbed", &big)],
+            1,
+            V5Options {
+                block_size: Some(4096),
+                compression: crate::v5::compress::Mode::Zstd,
+                ..Default::default()
+            },
+        );
+
+        let done: crate::v5::builder::IndexDone =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("index.done")).unwrap())
+                .unwrap();
+        assert_eq!(done.n_compressed, 1);
+        assert_eq!(done.n_stubs, 1, "stored size must still stub out");
+
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        assert_eq!(snap.get(b"stubbed").unwrap(), GetOutcome::Hit(big));
+    }
+
+    #[test]
+    fn corrupt_dict_fails_open() {
+        let (dir, _) = build_dict_snapshot(2000);
+        let path = dir.path().join("dict.bin");
+        let mut dict = std::fs::read(&path).unwrap();
+        let mid = dict.len() / 2;
+        dict[mid] ^= 0xFF;
+        std::fs::write(&path, &dict).unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::DictChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn truncated_dict_fails_open() {
+        let (dir, _) = build_dict_snapshot(2000);
+        let path = dir.path().join("dict.bin");
+        let len = std::fs::metadata(&path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(len / 2)
+            .unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::DictChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_dict_fails_open() {
+        let (dir, _) = build_dict_snapshot(2000);
+        std::fs::remove_file(dir.path().join("dict.bin")).unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::DictUnreadable(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_codec_fails_at_load() {
+        let (dir, _) = build_dict_snapshot(100);
+        let meta_path = dir.path().join("meta.json");
+        let json = std::fs::read_to_string(&meta_path)
+            .unwrap()
+            .replace(r#""codec": "zstd""#, r#""codec": "lz5""#);
+        assert!(json.contains("lz5"), "meta.json shape changed");
+        std::fs::write(&meta_path, json).unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::UnsupportedCodec(c)) if c == "lz5"
         ));
     }
 
