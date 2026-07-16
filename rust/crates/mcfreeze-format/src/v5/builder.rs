@@ -29,6 +29,7 @@ use crate::{
     meta::{partition_dir, Layout, Stats, HASH_ALGORITHM},
     v5::{
         block::{checksum32, encoded_len, BlockAssembler, Stub, MAX_VALUE_LEN},
+        compress::{self, Mode},
         meta::{self, validate_block_size, PartitionMeta, SketchMeta},
         verify_fingerprint,
     },
@@ -51,8 +52,16 @@ const BUCKET_PREFIX: &str = "bucket-";
 const INDEX_DONE: &str = "index.done";
 /// Root-level persisted `plan()` decision; deleted with `index.done`.
 const PLAN_FILE: &str = "v5.plan";
+/// Root-level learned dictionary (zstd-dict mode): raw ZDICT output,
+/// no framing. Ships with the snapshot — never swept.
+const DICT_BIN: &str = "dict.bin";
 
 const DEFAULT_BUCKET_BYTES: u64 = 128 * 1024 * 1024;
+/// Dictionary sample pool: the leading bytes of partition 0's arrival
+/// log. ZDICT wants ~100× the dictionary size (~6.4 MB for a 64 KiB
+/// dictionary); 64 MB of headroom softens the prefix's time bias at a
+/// one-off training cost that is noise next to the build.
+const SAMPLE_PREFIX_BYTES: u64 = 64 * 1024 * 1024;
 /// Arrival frame header: 8B fp + 8B vfp + 4B value length.
 const FRAME_HEADER: usize = 20;
 /// Log2 histogram buckets; index = bit width of the encoded record size.
@@ -76,12 +85,41 @@ struct ArrivalStats {
 /// immutable for the snapshot once the first partition builds: a
 /// resumed process's own configuration must not be able to produce a
 /// mixed partition set (e.g. some partitions built with a sketch and
-/// some without — an unopenable snapshot).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// some without — an unopenable snapshot). Compression is pinned for
+/// the same reason, and this file is the transient carrier `finalize`
+/// copies into `meta.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Plan {
     block_size: u32,
     inline_threshold: u32,
     sketch: bool,
+    /// Effective compression mode (after any training fallback).
+    #[serde(default)]
+    compression: Mode,
+    #[serde(default = "default_min_compress_len")]
+    min_compress_len: u32,
+    /// `checksum32(dict.bin)`; `Some` iff mode is `zstd-dict`. The
+    /// durability ordering (dict.bin fsynced before v5.plan publishes)
+    /// makes a plan naming a checksum imply the dictionary is durable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dict_checksum: Option<u32>,
+    /// Training provenance, carried into build stats: sample count,
+    /// trained dictionary size, and whether a `zstd-dict` request fell
+    /// back to plain `zstd` for lack of samples.
+    #[serde(default)]
+    n_samples: u64,
+    #[serde(default)]
+    dict_len: u64,
+    #[serde(default)]
+    dict_fallback: bool,
+    /// The vendored libzstd that trained the dictionary (trained bytes
+    /// are not reproducible across versions). `Some` iff compressing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zstd_version: Option<String>,
+}
+
+fn default_min_compress_len() -> u32 {
+    compress::DEFAULT_MIN_COMPRESS_LEN as u32
 }
 
 /// Per-partition build result (`build.done`). Written before the
@@ -120,6 +158,22 @@ pub struct IndexDone {
     pub sketch: bool,
     #[serde(default)]
     pub sketch_bytes: u64,
+    /// Compression provenance, copied from `v5.plan` (which does not
+    /// survive the build) for `finalize` to place in `meta.json`.
+    #[serde(default)]
+    pub compression: Mode,
+    #[serde(default)]
+    pub min_compress_len: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dict_checksum: Option<u32>,
+    #[serde(default)]
+    pub n_samples: u64,
+    #[serde(default)]
+    pub dict_len: u64,
+    #[serde(default)]
+    pub dict_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zstd_version: Option<String>,
     pub wall_secs: Option<f64>,
     pub partitions: Vec<PartitionBuildDone>,
 }
@@ -196,6 +250,8 @@ pub struct V5Builder {
     block_size_override: Option<u32>,
     bucket_bytes: u64,
     sketch: bool,
+    compression: Mode,
+    min_compress_len: u32,
     marker_mode: MarkerMode,
     /// Loaded/derived by `plan()`; consumed by `build`.
     plan: Mutex<Option<Plan>>,
@@ -216,6 +272,8 @@ impl V5Builder {
             block_size_override: config.v5.block_size,
             bucket_bytes: config.v5.bucket_bytes.unwrap_or(DEFAULT_BUCKET_BYTES),
             sketch: config.v5.sketch,
+            compression: config.v5.compression,
+            min_compress_len: config.v5.min_compress_len,
             marker_mode: config.v5.marker_mode,
             root: config.root,
             plan: Mutex::new(None),
@@ -230,16 +288,29 @@ impl V5Builder {
     /// Load or derive the plan, exactly once per snapshot: an existing
     /// `v5.plan` always wins (the decision is immutable once the first
     /// block is cut), otherwise auto-tune from the merged scatter
-    /// histograms and persist before returning.
+    /// histograms, train the dictionary if requested, and persist
+    /// before returning.
     fn ensure_plan(&self) -> Result<Plan> {
         let mut guard = self.plan.lock().expect("plan poisoned");
-        if let Some(plan) = *guard {
-            return Ok(plan);
+        if let Some(plan) = guard.as_ref() {
+            return Ok(plan.clone());
         }
 
         let path = self.root.join(PLAN_FILE);
         let plan = if path.exists() {
-            serde_json::from_str(&fs::read_to_string(&path)?)?
+            let plan: Plan = serde_json::from_str(&fs::read_to_string(&path)?)?;
+            // Resume trusts the recorded checksum (COVER retraining is
+            // not byte-stable across runs or libzstd versions). Under
+            // the durability ordering — dict.bin fsynced before v5.plan
+            // publishes — a missing or mismatched dictionary here is
+            // genuine corruption, never a torn write; deleting v5.plan
+            // and dict.bin retrains from scratch.
+            if let Some(expected) = plan.dict_checksum {
+                let dict = fs::read(self.root.join(DICT_BIN))
+                    .map_err(|source| Error::DictMissing { expected, source })?;
+                compress::verify_dict(&dict, expected)?;
+            }
+            plan
         } else {
             let mut hist = vec![0u64; HIST_BUCKETS];
             for p in 0..self.layout.n_partitions as usize {
@@ -253,16 +324,73 @@ impl V5Builder {
                 Some(bs) => bs,
                 None => auto_tune_block_size(&hist),
             };
-            let plan = Plan {
+            let mut plan = Plan {
                 block_size,
                 inline_threshold: block_size / 2,
                 sketch: self.sketch,
+                compression: self.compression,
+                min_compress_len: self.min_compress_len,
+                dict_checksum: None,
+                n_samples: 0,
+                dict_len: 0,
+                dict_fallback: false,
+                zstd_version: (self.compression != Mode::None).then(compress::zstd_version),
             };
+            // A dict.bin orphaned by a crash before its v5.plan
+            // published (or by an abandoned zstd-dict run) must not
+            // outlive a plan that never references it.
+            let _ = fs::remove_file(self.root.join(DICT_BIN));
+            if self.compression == Mode::ZstdDict {
+                self.train_dictionary(&mut plan)?;
+            }
             write_marker(&path, &serde_json::to_string(&plan)?, self.marker_mode)?;
             plan
         };
-        *guard = Some(plan);
+        *guard = Some(plan.clone());
         Ok(plan)
+    }
+
+    /// Train the `zstd-dict` dictionary from a prefix of partition 0's
+    /// arrival log (partition routing is by hash, so any one partition
+    /// is an unbiased sample of the key space — across keys; the prefix
+    /// is biased across *time*, which the recorded sample stats make
+    /// observable). Writes `dict.bin` durably **before** its checksum
+    /// is pinned into the plan. Too few samples to train falls back to
+    /// plain `zstd` with a warning, recorded in the plan.
+    fn train_dictionary(&self, plan: &mut Plan) -> Result<()> {
+        // arrival.bin exists here by ordering: the histogram loop above
+        // read every partition's arrival.stats, which the appender
+        // publishes only after creating and syncing arrival.bin (empty
+        // partitions included). An absent file is a mutilated tree and
+        // fails loudly, exactly as build_partition would right after.
+        let arrival = self.partition_dir(0).join(ARRIVAL_BIN);
+        let samples = sample_arrival_prefix(&arrival, SAMPLE_PREFIX_BYTES)?;
+        plan.n_samples = samples.len() as u64;
+
+        let trained = if samples.is_empty() {
+            Err(Error::DictTrain(std::io::Error::other("no samples")))
+        } else {
+            compress::train_dict(&samples, compress::DEFAULT_DICT_LEN)
+        };
+        match trained {
+            Ok(dict) => {
+                // Data before marker: the dictionary is fsynced before
+                // v5.plan (and a fortiori meta.json) can name it.
+                write_data_file(&self.root.join(DICT_BIN), &dict)?;
+                plan.dict_checksum = Some(checksum32(&dict));
+                plan.dict_len = dict.len() as u64;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    n_samples = plan.n_samples,
+                    error = %e,
+                    "zstd-dict training failed; falling back to plain zstd"
+                );
+                plan.compression = Mode::Zstd;
+                plan.dict_fallback = true;
+            }
+        }
+        Ok(())
     }
 
     /// Best-effort sweep of transient files that survive a crash after
@@ -441,7 +569,7 @@ impl FormatBuilder for V5Builder {
                 .map(|p| {
                     let done = build_partition(
                         &self.partition_dir(p),
-                        plan,
+                        &plan,
                         self.bucket_bytes,
                         self.data_buf_bytes,
                         self.marker_mode,
@@ -466,6 +594,13 @@ impl FormatBuilder for V5Builder {
             fences_bytes: partitions.iter().map(|p| p.n_blocks * 4).sum(),
             sketch: plan.sketch,
             sketch_bytes: partitions.iter().map(|p| p.sketch_bytes).sum(),
+            compression: plan.compression,
+            min_compress_len: plan.min_compress_len,
+            dict_checksum: plan.dict_checksum,
+            n_samples: plan.n_samples,
+            dict_len: plan.dict_len,
+            dict_fallback: plan.dict_fallback,
+            zstd_version: plan.zstd_version.clone(),
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
         };
@@ -520,7 +655,7 @@ impl FormatBuilder for V5Builder {
 
 fn build_partition(
     dir: &Path,
-    plan: Plan,
+    plan: &Plan,
     bucket_bytes: u64,
     buf_bytes: usize,
     marker_mode: MarkerMode,
@@ -729,6 +864,32 @@ fn scatter_to_buckets(
         out.flush()?;
     }
     Ok(paths)
+}
+
+/// Dictionary sample pool: the values in the leading complete frames of
+/// an arrival log's first `max_bytes`. The byte cut is not a frame
+/// boundary in general, so the walk stops cleanly at the first frame
+/// that overruns the prefix — unlike [`parse_frames`], a short tail
+/// here is expected, not corruption. Empty values are skipped (they
+/// teach ZDICT nothing).
+fn sample_arrival_prefix(arrival: &Path, max_bytes: u64) -> Result<Vec<Vec<u8>>> {
+    let mut buf = Vec::new();
+    File::open(arrival)?.take(max_bytes).read_to_end(&mut buf)?;
+
+    let mut samples = Vec::new();
+    let mut pos = 0;
+    while pos + FRAME_HEADER <= buf.len() {
+        let len = u32::from_le_bytes(buf[pos + 16..pos + 20].try_into().unwrap()) as usize;
+        let start = pos + FRAME_HEADER;
+        let Some(end) = start.checked_add(len).filter(|&e| e <= buf.len()) else {
+            break;
+        };
+        if len > 0 {
+            samples.push(buf[start..end].to_vec());
+        }
+        pos = end;
+    }
+    Ok(samples)
 }
 
 /// Read exactly `buf.len()` bytes, or return `false` on clean EOF at a
@@ -1095,6 +1256,13 @@ mod tests {
                 block_size: 4096,
                 inline_threshold: 2048,
                 sketch: true,
+                compression: Mode::None,
+                min_compress_len: default_min_compress_len(),
+                dict_checksum: None,
+                n_samples: 0,
+                dict_len: 0,
+                dict_fallback: false,
+                zstd_version: None,
             })
             .unwrap(),
         )
@@ -1155,6 +1323,233 @@ mod tests {
             b.finalize(stats, None),
             Err(Error::FinalizeBeforeBuild)
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Dictionary lifecycle (doc/plan/V5_COMPRESSION.md stage 2)
+    // -----------------------------------------------------------------
+
+    fn dict_opts() -> V5Options {
+        V5Options {
+            block_size: Some(4096),
+            compression: Mode::ZstdDict,
+            ..Default::default()
+        }
+    }
+
+    fn read_plan(root: &Path) -> Plan {
+        serde_json::from_str(&fs::read_to_string(root.join(PLAN_FILE)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn plan_trains_writes_and_pins_dictionary() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 2, dict_opts());
+        scatter(&builder, &data, 2);
+        builder.plan().unwrap();
+
+        let dict = fs::read(dir.path().join(DICT_BIN)).unwrap();
+        assert!(!dict.is_empty());
+        let plan = read_plan(dir.path());
+        assert_eq!(plan.compression, Mode::ZstdDict);
+        assert_eq!(plan.dict_checksum, Some(block::checksum32(&dict)));
+        assert_eq!(plan.dict_len, dict.len() as u64);
+        assert!(plan.n_samples > 0);
+        assert!(!plan.dict_fallback);
+        assert!(plan.zstd_version.is_some());
+    }
+
+    #[test]
+    fn resume_reuses_pinned_dictionary() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        {
+            let b1 = make_builder(dir.path(), 1, dict_opts());
+            scatter(&b1, &data, 1);
+            b1.plan().unwrap();
+        }
+        let dict_before = fs::read(dir.path().join(DICT_BIN)).unwrap();
+        let plan_before = fs::read_to_string(dir.path().join(PLAN_FILE)).unwrap();
+
+        // Fresh process: the pinned plan wins; no retraining (COVER is
+        // not assumed byte-stable, so retraining would break the pin).
+        let b2 = make_builder(dir.path(), 1, dict_opts());
+        b2.plan().unwrap();
+        assert_eq!(fs::read(dir.path().join(DICT_BIN)).unwrap(), dict_before);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(PLAN_FILE)).unwrap(),
+            plan_before
+        );
+    }
+
+    #[test]
+    fn corrupt_dict_on_resume_fails_loudly() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        {
+            let b1 = make_builder(dir.path(), 1, dict_opts());
+            scatter(&b1, &data, 1);
+            b1.plan().unwrap();
+        }
+        let dict_path = dir.path().join(DICT_BIN);
+        let mut dict = fs::read(&dict_path).unwrap();
+        let mid = dict.len() / 2;
+        dict[mid] ^= 0xFF;
+        fs::write(&dict_path, &dict).unwrap();
+
+        let b2 = make_builder(dir.path(), 1, dict_opts());
+        assert!(matches!(b2.plan(), Err(Error::DictChecksumMismatch { .. })));
+    }
+
+    #[test]
+    fn missing_dict_on_resume_fails_loudly() {
+        // Under the data-before-marker ordering a v5.plan naming a
+        // dictionary implies dict.bin is durable — its absence is
+        // corruption, not a state to silently retrain over.
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        {
+            let b1 = make_builder(dir.path(), 1, dict_opts());
+            scatter(&b1, &data, 1);
+            b1.plan().unwrap();
+        }
+        fs::remove_file(dir.path().join(DICT_BIN)).unwrap();
+
+        let b2 = make_builder(dir.path(), 1, dict_opts());
+        assert!(matches!(b2.plan(), Err(Error::DictMissing { .. })));
+    }
+
+    #[test]
+    fn deleting_plan_and_dict_retrains_from_scratch() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        {
+            let b1 = make_builder(dir.path(), 1, dict_opts());
+            scatter(&b1, &data, 1);
+            b1.plan().unwrap();
+        }
+        // The documented recovery for dictionary corruption.
+        fs::remove_file(dir.path().join(PLAN_FILE)).unwrap();
+        fs::remove_file(dir.path().join(DICT_BIN)).unwrap();
+
+        let b2 = make_builder(dir.path(), 1, dict_opts());
+        b2.plan().unwrap();
+        let dict = fs::read(dir.path().join(DICT_BIN)).unwrap();
+        assert_eq!(
+            read_plan(dir.path()).dict_checksum,
+            Some(block::checksum32(&dict))
+        );
+    }
+
+    #[test]
+    fn torn_dict_without_plan_is_overwritten_by_retraining() {
+        // Crash after dict.bin, before v5.plan: the orphan is garbage
+        // (never referenced) and the fresh derivation replaces it.
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 1, dict_opts());
+        scatter(&builder, &data, 1);
+        fs::write(dir.path().join(DICT_BIN), b"torn garbage").unwrap();
+
+        builder.plan().unwrap();
+        let dict = fs::read(dir.path().join(DICT_BIN)).unwrap();
+        assert_ne!(dict, b"torn garbage");
+        assert_eq!(
+            read_plan(dir.path()).dict_checksum,
+            Some(block::checksum32(&dict))
+        );
+    }
+
+    #[test]
+    fn stale_dict_removed_when_plan_does_not_compress() {
+        let data = pairs(10, 100);
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 1, opts(4096));
+        scatter(&builder, &data, 1);
+        fs::write(dir.path().join(DICT_BIN), b"abandoned").unwrap();
+
+        builder.plan().unwrap();
+        assert!(
+            !dir.path().join(DICT_BIN).exists(),
+            "a plan that never references dict.bin must not leave one in the snapshot"
+        );
+    }
+
+    #[test]
+    fn too_few_samples_falls_back_to_plain_zstd() {
+        // Empty partition: no samples at all — the deterministic floor
+        // of the too-few-samples spectrum.
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 1, dict_opts());
+        scatter(&builder, &[], 1);
+        builder.plan().unwrap();
+
+        let plan = read_plan(dir.path());
+        assert_eq!(plan.compression, Mode::Zstd);
+        assert!(plan.dict_fallback);
+        assert_eq!(plan.n_samples, 0);
+        assert_eq!(plan.dict_checksum, None);
+        assert!(!dir.path().join(DICT_BIN).exists());
+    }
+
+    #[test]
+    fn build_carries_compression_into_index_done_and_dict_survives() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 2, dict_opts());
+        scatter(&builder, &data, 2);
+        builder.plan().unwrap();
+        builder.build(2, None).unwrap();
+
+        // v5.plan is gone; its compression decision must survive in the
+        // phase sentinel for finalize.
+        assert!(!dir.path().join(PLAN_FILE).exists());
+        let done: IndexDone =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(INDEX_DONE)).unwrap())
+                .unwrap();
+        assert_eq!(done.compression, Mode::ZstdDict);
+        assert!(done.dict_checksum.is_some());
+        assert!(done.n_samples > 0);
+        assert!(done.zstd_version.is_some());
+
+        // dict.bin ships with the snapshot: the transient sweep must
+        // not touch it.
+        let dict = fs::read(dir.path().join(DICT_BIN)).unwrap();
+        assert_eq!(done.dict_checksum, Some(block::checksum32(&dict)));
+    }
+
+    #[test]
+    fn sample_prefix_stops_at_incomplete_tail_and_skips_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(ARRIVAL_BIN);
+        let mut buf = Vec::new();
+        let mut frame = |value: &[u8]| {
+            buf.extend_from_slice(&1u64.to_le_bytes()); // fp
+            buf.extend_from_slice(&2u64.to_le_bytes()); // vfp
+            buf.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            buf.extend_from_slice(value);
+        };
+        frame(b"first value");
+        frame(b""); // teaches ZDICT nothing; skipped
+        frame(b"second value");
+        fs::write(&path, &buf).unwrap();
+
+        // Whole file: both non-empty values.
+        let samples = sample_arrival_prefix(&path, u64::MAX).unwrap();
+        assert_eq!(
+            samples,
+            vec![b"first value".to_vec(), b"second value".to_vec()]
+        );
+
+        // Prefix cutting the last frame mid-value: clean stop, no error
+        // — unlike parse_frames, a short tail here is expected.
+        let samples = sample_arrival_prefix(&path, (buf.len() - 3) as u64).unwrap();
+        assert_eq!(samples, vec![b"first value".to_vec()]);
+
+        // Prefix cutting a header mid-way: same.
+        let samples = sample_arrival_prefix(&path, (FRAME_HEADER + 11 + 5) as u64).unwrap();
+        assert_eq!(samples, vec![b"first value".to_vec()]);
     }
 
     #[test]

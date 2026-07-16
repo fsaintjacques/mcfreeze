@@ -146,10 +146,12 @@ bytes.
 - **Sample = a prefix of one partition's arrival log.** Scatter is
   untouched: partition routing is by hash, so any single partition is
   already an unbiased sample of the key space, and its `arrival.bin`
-  is the sample pool. At `plan()`, read the first ~10 MB of partition
-  0's arrival log and parse the frames — that comfortably covers the
-  ~100× dictionary size ZDICT wants (~6.4 MB for a 64 KiB dict). No
-  reservoir code, no transient `samples.bin`, no appender changes.
+  is the sample pool. At `plan()`, read the first ~64 MB of partition
+  0's arrival log and parse the frames — an order of magnitude past the
+  ~100× dictionary size ZDICT wants (~6.4 MB for a 64 KiB dict), which
+  softens the prefix's time bias at a one-off training cost that is
+  noise next to the build. No reservoir code, no transient
+  `samples.bin`, no appender changes.
 - **Train at plan()**: the existing scatter→build barrier is the
   natural home (it already decides `block_size`). Train via ZDICT
   (COVER), write `dict.bin`, record the mode + dictionary checksum in

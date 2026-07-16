@@ -26,6 +26,8 @@ use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
 use crate::v5::block::{checksum32, MAX_VALUE_LEN};
 use crate::{Error, Result};
 
@@ -34,11 +36,16 @@ pub const DEFAULT_LEVEL: i32 = 3;
 /// Values shorter than this skip the compression attempt entirely
 /// (writer-side knob, recorded in `meta.json` for provenance only).
 pub const DEFAULT_MIN_COMPRESS_LEN: usize = 64;
+/// Default learned-dictionary size (the ZDICT training target). ZDICT
+/// has diminishing returns past ~110 KiB for small values; measure
+/// before changing.
+pub const DEFAULT_DICT_LEN: usize = 64 * 1024;
 
 /// Snapshot compression mode — a plan-time decision, pinned in
 /// `v5.plan` and declared once by `meta.compression`. The per-record
 /// bit only selects between the snapshot's codec and the raw fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Mode {
     /// Bytes stored verbatim; on-disk output byte-identical to
     /// compression-less V5.
