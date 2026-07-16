@@ -58,7 +58,9 @@ pub struct LoadArgs {
     pub no_sketch: bool,
 
     /// V5: radix bucket target bytes for the build sort (default 128 MiB).
-    /// Peak build RAM scales with index-parallelism x bucket-bytes.
+    /// Peak build RAM ~= index-parallelism x (bucket-bytes + ~20 B per
+    /// key-per-partition while the sketch builds; the sketch cost is
+    /// independent of bucket-bytes).
     #[arg(long)]
     pub bucket_bytes: Option<u64>,
 
@@ -327,6 +329,12 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
             "--block-size/--no-sketch/--bucket-bytes are V5 build knobs; ignored by this format"
         );
     }
+    // Validate flag-derived configuration up front so --dry-run keeps
+    // its promise: a bad --block-size must fail here, not hours into
+    // the real run at builder construction.
+    if let Some(bs) = args.block_size {
+        mcfreeze_format::v5::meta::validate_block_size(bs).context("invalid --block-size")?;
+    }
     // In config mode, the WorkerConfig is authoritative for output,
     // partitions, and index_parallelism. Parse it once and pass it through
     // to build_pipeline to avoid double-reading the file.
@@ -408,6 +416,17 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         .output
         .clone()
         .context("--output is required for index-only resume")?;
+
+    // block_size and sketch are pinned in the snapshot's v5.plan the
+    // moment plan() first runs; on a resume the flags cannot change the
+    // outcome and silently no-op — say so instead of surprising the
+    // operator (--bucket-bytes is a per-run RAM knob and still applies).
+    if args.block_size.is_some() || args.no_sketch {
+        tracing::warn!(
+            "resuming an existing build: --block-size/--no-sketch are pinned by the \
+             snapshot's v5.plan from the original run and will not change the output"
+        );
+    }
 
     let loader_config = LoaderConfig {
         format: args.format,
@@ -1014,5 +1033,51 @@ impl ProgressReporter {
 
     pub fn stop(self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: LoadArgs,
+    }
+
+    fn parse(argv: &[&str]) -> LoadArgs {
+        TestCli::try_parse_from(argv).expect("argv must parse").args
+    }
+
+    #[test]
+    fn v5_flags_default_to_sketch_on_and_auto_tune() {
+        let args = parse(&["mcf", "csv", "--file", "x.csv"]);
+        let v5 = v5_options(&args);
+        assert!(v5.sketch, "sketch must default on");
+        assert_eq!(v5.block_size, None);
+        assert_eq!(v5.bucket_bytes, None);
+    }
+
+    #[test]
+    fn v5_flags_map_to_options() {
+        // --no-sketch is a negation: the mapping is the kind of thing
+        // that silently inverts.
+        let args = parse(&[
+            "mcf",
+            "--no-sketch",
+            "--block-size",
+            "8192",
+            "--bucket-bytes",
+            "1048576",
+            "csv",
+            "--file",
+            "x.csv",
+        ]);
+        let v5 = v5_options(&args);
+        assert!(!v5.sketch);
+        assert_eq!(v5.block_size, Some(8192));
+        assert_eq!(v5.bucket_bytes, Some(1_048_576));
     }
 }
