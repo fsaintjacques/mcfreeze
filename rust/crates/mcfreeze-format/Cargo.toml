@@ -21,6 +21,10 @@ bytes       = "1"
 thiserror   = "2"
 bytemuck    = { version = "1", features = ["derive"] }
 xorf = "0.12.0"
+# `experimental` gates the magicless-frame format (ZSTD_f_zstd1_magicless,
+# libzstd's ZSTD_STATIC_LINKING_ONLY section). Safe here: the crate vendors
+# and statically links its libzstd, so the API surface is pinned by Cargo.
+zstd = { version = "0.13", features = ["experimental"] }
 
 [dev-dependencies]
 tempfile = "3"

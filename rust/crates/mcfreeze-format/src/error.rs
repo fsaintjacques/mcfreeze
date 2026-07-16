@@ -27,7 +27,7 @@ pub enum Error {
     #[error("record encoding of {encoded} bytes exceeds block capacity {capacity}")]
     RecordTooLarge { encoded: usize, capacity: usize },
 
-    #[error("value of {len} bytes exceeds the 31-bit length field (max {max})")]
+    #[error("value of {len} bytes exceeds the 30-bit length field (max {max})")]
     ValueTooLarge { len: u64, max: u32 },
 
     #[error("block assembler used after a sink error")]
@@ -41,6 +41,29 @@ pub enum Error {
 
     #[error("heap value checksum mismatch")]
     ValueChecksumMismatch,
+
+    #[error("compressed record in a snapshot that declares no compression codec")]
+    CompressedValueWithoutCodec,
+
+    #[error("corrupt compressed value: {0}")]
+    CorruptFrame(&'static str),
+
+    #[error("compressed value claims {got} bytes, exceeding the value limit ({max})")]
+    FrameContentTooLarge { got: u64, max: u32 },
+
+    #[error("value decompression failed: {0}")]
+    Decompress(#[source] std::io::Error),
+
+    #[error(
+        "compression dictionary checksum mismatch: got {got:#010x}, expected {expected:#010x}"
+    )]
+    DictChecksumMismatch { got: u32, expected: u32 },
+
+    #[error("compression dictionary training failed: {0}")]
+    DictTrain(#[source] std::io::Error),
+
+    #[error("zstd context setup failed: {0}")]
+    Zstd(#[source] std::io::Error),
 
     #[error("sketch construction failed: {0}")]
     SketchBuild(&'static str),

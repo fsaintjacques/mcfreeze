@@ -16,9 +16,15 @@
 //!
 //! - `verify_fingerprint` is non-zero by construction (biased 0 → 1);
 //!   the scanner stops at vfp == 0, the padding sentinel.
-//! - `length|flags`: low 31 bits = the value's true byte length; top bit
-//!   set = out-of-line. Inline payload is the value itself; out-of-line
-//!   payload is a 12-byte stub `[8B heap_offset] [4B value_checksum]`.
+//! - `length|flags`: bit 31 = out-of-line, bit 30 = compressed (the
+//!   stored bytes are a bare zstd frame, see [`super::compress`]). The
+//!   low 30 bits are ALWAYS the stored byte count at the value's
+//!   location — inline payload bytes, or the heap extent a stub preads;
+//!   the compressed length when bit 30 is set. Inline payload is the
+//!   stored value; out-of-line payload is a 12-byte stub
+//!   `[8B heap_offset] [4B value_checksum]`.
+//! - The decoder masks `length` with `MAX_VALUE_LEN` unconditionally:
+//!   bit 30 is always decoded as a flag, never folded into length.
 //!
 //! The checksum is verified after every block `pread`, *before* the scan
 //! trusts any `length` field. A mismatch is an error, never a miss.
@@ -35,10 +41,11 @@ pub const HEADER_LEN: usize = 12;
 pub const RECORD_ALIGN: usize = 8;
 /// Out-of-line payload: 8-byte heap offset + 4-byte value checksum.
 pub const STUB_PAYLOAD_LEN: usize = 12;
-/// Maximum value byte length representable in the 31-bit length field.
-pub const MAX_VALUE_LEN: u32 = (1 << 31) - 1;
+/// Maximum stored byte length representable in the 30-bit length field.
+pub const MAX_VALUE_LEN: u32 = (1 << 30) - 1;
 
 const FLAG_OUT_OF_LINE: u32 = 1 << 31;
+const FLAG_COMPRESSED: u32 = 1 << 30;
 
 #[inline]
 fn align8(n: usize) -> usize {
@@ -58,20 +65,33 @@ pub fn checksum32(bytes: &[u8]) -> u32 {
     xxh64(bytes, 0) as u32
 }
 
-/// Out-of-line value locator, stored as a record's payload. The value's
-/// true byte length lives in the record's `length` field, not here.
+/// Out-of-line value locator, stored as a record's payload. The stored
+/// extent's byte length lives in the record's `length` field, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stub {
     pub heap_offset: u64,
-    pub value_len: u32,
+    /// Byte count of the stored heap extent — the compressed length
+    /// when the record's compressed flag is set.
+    pub stored_len: u32,
+    /// Checksum of the stored heap extent (before any decompression).
     pub value_checksum: u32,
 }
 
-/// One decoded record, borrowing from the block buffer.
+/// One decoded record, borrowing from the block buffer. `compressed`
+/// means the stored bytes (inline payload or heap extent) are a bare
+/// zstd frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Record<'a> {
-    Inline { vfp: u64, value: &'a [u8] },
-    Stub { vfp: u64, stub: Stub },
+    Inline {
+        vfp: u64,
+        value: &'a [u8],
+        compressed: bool,
+    },
+    Stub {
+        vfp: u64,
+        stub: Stub,
+        compressed: bool,
+    },
 }
 
 impl Record<'_> {
@@ -139,29 +159,45 @@ impl<F: FnMut(&[u8]) -> Result<()>> BlockAssembler<F> {
         }
     }
 
-    /// Append an inline record. Records must arrive sorted by `fp`.
-    pub fn push_inline(&mut self, fp: u64, vfp: u64, value: &[u8]) -> Result<()> {
-        if value.len() as u64 > MAX_VALUE_LEN as u64 {
+    /// Append an inline record; `stored` is what lands in the block —
+    /// the compressed frame when `compressed`, the raw value otherwise.
+    /// Records must arrive sorted by `fp`.
+    pub fn push_inline(
+        &mut self,
+        fp: u64,
+        vfp: u64,
+        stored: &[u8],
+        compressed: bool,
+    ) -> Result<()> {
+        if stored.len() as u64 > MAX_VALUE_LEN as u64 {
             return Err(Error::ValueTooLarge {
-                len: value.len() as u64,
+                len: stored.len() as u64,
                 max: MAX_VALUE_LEN,
             });
         }
-        self.push_header(fp, vfp, value.len(), value.len() as u32)?;
-        self.push_payload(value);
+        let mut lf = stored.len() as u32;
+        if compressed {
+            lf |= FLAG_COMPRESSED;
+        }
+        self.push_header(fp, vfp, stored.len(), lf)?;
+        self.push_payload(stored);
         Ok(())
     }
 
-    /// Append an out-of-line record. `stub.value_len` is the heap value's
-    /// true byte length, carried in the record's `length` field.
-    pub fn push_stub(&mut self, fp: u64, vfp: u64, stub: Stub) -> Result<()> {
-        if stub.value_len > MAX_VALUE_LEN {
+    /// Append an out-of-line record. `stub.stored_len` is the heap
+    /// extent's byte length, carried in the record's `length` field.
+    pub fn push_stub(&mut self, fp: u64, vfp: u64, stub: Stub, compressed: bool) -> Result<()> {
+        if stub.stored_len > MAX_VALUE_LEN {
             return Err(Error::ValueTooLarge {
-                len: stub.value_len as u64,
+                len: stub.stored_len as u64,
                 max: MAX_VALUE_LEN,
             });
         }
-        self.push_header(fp, vfp, STUB_PAYLOAD_LEN, stub.value_len | FLAG_OUT_OF_LINE)?;
+        let mut lf = stub.stored_len | FLAG_OUT_OF_LINE;
+        if compressed {
+            lf |= FLAG_COMPRESSED;
+        }
+        self.push_header(fp, vfp, STUB_PAYLOAD_LEN, lf)?;
         let mut payload = [0u8; STUB_PAYLOAD_LEN];
         payload[..8].copy_from_slice(&stub.heap_offset.to_le_bytes());
         payload[8..].copy_from_slice(&stub.value_checksum.to_le_bytes());
@@ -277,8 +313,11 @@ impl<'a> Iterator for Records<'a> {
                 .try_into()
                 .unwrap(),
         );
+        // Unconditional 30-bit mask: bits 30/31 are always flags, never
+        // part of length — a foreign flag can inflate a length otherwise.
         let length = lf & MAX_VALUE_LEN;
         let out_of_line = lf & FLAG_OUT_OF_LINE != 0;
+        let compressed = lf & FLAG_COMPRESSED != 0;
         let payload_len = if out_of_line {
             STUB_PAYLOAD_LEN
         } else {
@@ -299,14 +338,16 @@ impl<'a> Iterator for Records<'a> {
                 vfp,
                 stub: Stub {
                     heap_offset: u64::from_le_bytes(payload[..8].try_into().unwrap()),
-                    value_len: length,
+                    stored_len: length,
                     value_checksum: u32::from_le_bytes(payload[8..].try_into().unwrap()),
                 },
+                compressed,
             }
         } else {
             Record::Inline {
                 vfp,
                 value: payload,
+                compressed,
             }
         }))
     }
@@ -340,7 +381,7 @@ mod tests {
             Ok(())
         });
         for &(fp, vfp, value) in recs {
-            asm.push_inline(fp, vfp, value).unwrap();
+            asm.push_inline(fp, vfp, value, false).unwrap();
         }
         let fences = asm.finish().unwrap();
         (blocks, fences)
@@ -362,9 +403,14 @@ mod tests {
         assert_eq!(got.len(), 3);
         for (rec, &(_, vfp, value)) in got.iter().zip(recs) {
             match rec {
-                Record::Inline { vfp: v, value: val } => {
+                Record::Inline {
+                    vfp: v,
+                    value: val,
+                    compressed,
+                } => {
                     assert_eq!(*v, vfp);
                     assert_eq!(*val, value);
+                    assert!(!compressed);
                 }
                 other => panic!("expected inline, got {other:?}"),
             }
@@ -380,7 +426,7 @@ mod tests {
         );
         let stub = Stub {
             heap_offset: u64::MAX - 7,
-            value_len: MAX_VALUE_LEN,
+            stored_len: MAX_VALUE_LEN,
             value_checksum: 0xCAFE_F00D,
         };
         let mut blocks = Vec::new();
@@ -388,16 +434,66 @@ mod tests {
             blocks.push(b.to_vec());
             Ok(())
         });
-        asm.push_stub(7 << 32, 77, stub).unwrap();
+        asm.push_stub(7 << 32, 77, stub, false).unwrap();
         asm.finish().unwrap();
 
         match find(&blocks[0], 77).unwrap() {
-            Some(Record::Stub { vfp, stub: s }) => {
+            Some(Record::Stub {
+                vfp,
+                stub: s,
+                compressed,
+            }) => {
                 assert_eq!(vfp, 77);
                 assert_eq!(s, stub);
+                assert!(!compressed);
             }
             other => panic!("expected stub, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compressed_flag_roundtrips_and_never_inflates_length() {
+        // The stored bytes of a compressed record are opaque here; the
+        // block layer must carry them verbatim, expose the flag, and
+        // decode `length` as the stored count with bit 30 masked out —
+        // including on a stub, where bits 30 and 31 are both set.
+        let frame = b"\x28\xb5\x2f\xfdnot really a frame";
+        let stub = Stub {
+            heap_offset: 4096,
+            stored_len: 999,
+            value_checksum: 0xBEEF,
+        };
+        let mut blocks = Vec::new();
+        let mut asm = BlockAssembler::new(4096, |b: &[u8]| {
+            blocks.push(b.to_vec());
+            Ok(())
+        });
+        asm.push_inline(1 << 32, 11, frame, true).unwrap();
+        asm.push_stub(2 << 32, 22, stub, true).unwrap();
+        asm.push_inline(3 << 32, 33, b"raw", false).unwrap();
+        asm.finish().unwrap();
+
+        let got: Vec<_> = records(&blocks[0]).map(|r| r.unwrap()).collect();
+        assert_eq!(
+            got,
+            vec![
+                Record::Inline {
+                    vfp: 11,
+                    value: frame,
+                    compressed: true,
+                },
+                Record::Stub {
+                    vfp: 22,
+                    stub,
+                    compressed: true,
+                },
+                Record::Inline {
+                    vfp: 33,
+                    value: b"raw",
+                    compressed: false,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -413,7 +509,7 @@ mod tests {
             Ok(())
         });
         for (fp, vfp, v) in &recs {
-            asm.push_inline(*fp, *vfp, v).unwrap();
+            asm.push_inline(*fp, *vfp, v, false).unwrap();
         }
         let fences = asm.finish().unwrap();
 
@@ -454,7 +550,7 @@ mod tests {
     fn oversized_record_is_an_error() {
         let mut asm = BlockAssembler::new(64, |_: &[u8]| Ok(()));
         let too_big = vec![0u8; 64];
-        match asm.push_inline(1 << 32, 1, &too_big) {
+        match asm.push_inline(1 << 32, 1, &too_big, false) {
             Err(Error::RecordTooLarge { encoded, capacity }) => {
                 assert_eq!(encoded, encoded_len(64));
                 assert_eq!(capacity, 60);
@@ -509,8 +605,8 @@ mod tests {
             blocks.push(b.to_vec());
             Ok(())
         });
-        asm.push_inline(1 << 32, 1, &v).unwrap();
-        asm.push_inline(2 << 32, 2, b"x").unwrap();
+        asm.push_inline(1 << 32, 1, &v, false).unwrap();
+        asm.push_inline(2 << 32, 2, b"x", false).unwrap();
         let fences = asm.finish().unwrap();
 
         assert_eq!(blocks.len(), 2);
@@ -531,11 +627,11 @@ mod tests {
         let mut asm = BlockAssembler::new(64, |_: &[u8]| Ok(()));
         let stub = Stub {
             heap_offset: 0,
-            value_len: MAX_VALUE_LEN + 1,
+            stored_len: MAX_VALUE_LEN + 1,
             value_checksum: 0,
         };
         assert!(matches!(
-            asm.push_stub(1 << 32, 1, stub),
+            asm.push_stub(1 << 32, 1, stub, false),
             Err(Error::ValueTooLarge { .. })
         ));
     }
@@ -544,16 +640,16 @@ mod tests {
     fn sink_error_poisons_assembler() {
         let mut asm = BlockAssembler::new(64, |_: &[u8]| Err(Error::CorruptBlock("sink failure")));
         // Fills the block exactly; no cut yet.
-        asm.push_inline(1 << 32, 1, &[0u8; 44]).unwrap();
+        asm.push_inline(1 << 32, 1, &[0u8; 44], false).unwrap();
         // Forces a cut: the sink error surfaces here...
         assert!(matches!(
-            asm.push_inline(2 << 32, 2, b"x"),
+            asm.push_inline(2 << 32, 2, b"x", false),
             Err(Error::CorruptBlock(_))
         ));
         // ...and every subsequent operation fails instead of silently
         // emitting a block sequence with a hole in it.
         assert!(matches!(
-            asm.push_inline(3 << 32, 3, b"y"),
+            asm.push_inline(3 << 32, 3, b"y", false),
             Err(Error::AssemblerPoisoned)
         ));
         assert!(matches!(asm.finish(), Err(Error::AssemblerPoisoned)));
@@ -563,7 +659,7 @@ mod tests {
     #[should_panic(expected = "padding sentinel")]
     fn zero_vfp_is_rejected() {
         let mut asm = BlockAssembler::new(64, |_: &[u8]| Ok(()));
-        let _ = asm.push_inline(1 << 32, 0, b"v");
+        let _ = asm.push_inline(1 << 32, 0, b"v", false);
     }
 
     #[test]
