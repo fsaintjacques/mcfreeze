@@ -71,6 +71,19 @@ pub struct LoadArgs {
     #[arg(long)]
     pub direct_markers: bool,
 
+    /// V5: transparent value compression: "none", "zstd" (per-value,
+    /// wins on values >~1 KiB), or "zstd-dict" (per-snapshot learned
+    /// dictionary — the mode for small-value datasets). A plan-time
+    /// decision, pinned for the snapshot. Default none: measure first
+    /// against the build stats before enabling.
+    #[arg(long, default_value_t = mcfreeze_format::v5::compress::Mode::None)]
+    pub compression: mcfreeze_format::v5::compress::Mode,
+
+    /// V5: skip the compression attempt for values shorter than this
+    /// many bytes (build-CPU guard; meaningful only with --compression).
+    #[arg(long, default_value_t = mcfreeze_format::v5::compress::DEFAULT_MIN_COMPRESS_LEN as u32)]
+    pub min_compress_len: u32,
+
     /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
@@ -324,31 +337,42 @@ fn v5_options(args: &LoadArgs) -> mcfreeze_loader::V5Options {
         block_size: args.block_size,
         bucket_bytes: args.bucket_bytes,
         sketch: !args.no_sketch,
+        compression: args.compression,
+        min_compress_len: args.min_compress_len,
         marker_mode: if args.direct_markers {
             mcfreeze_loader::MarkerMode::DirectWrite
         } else {
             mcfreeze_loader::MarkerMode::Rename
         },
-        // --compression lands with the CLI stage of the V5 compression
-        // plan; until then loads build uncompressed.
-        ..Default::default()
     }
 }
 
 pub async fn run(mut args: LoadArgs) -> Result<()> {
+    use mcfreeze_format::v5::compress::Mode;
+
     if args.format != mcfreeze_format::FormatId::V5
-        && (args.block_size.is_some() || args.no_sketch || args.bucket_bytes.is_some())
+        && (args.block_size.is_some()
+            || args.no_sketch
+            || args.bucket_bytes.is_some()
+            || args.compression != Mode::None)
     {
         tracing::warn!(
             format = %args.format,
-            "--block-size/--no-sketch/--bucket-bytes are V5 build knobs; ignored by this format"
+            "--block-size/--no-sketch/--bucket-bytes/--compression are V5 build knobs; \
+             ignored by this format"
         );
     }
     // Validate flag-derived configuration up front so --dry-run keeps
     // its promise: a bad --block-size must fail here, not hours into
-    // the real run at builder construction.
+    // the real run at builder construction. (--compression itself is
+    // validated by clap's parse.)
     if let Some(bs) = args.block_size {
         mcfreeze_format::v5::meta::validate_block_size(bs).context("invalid --block-size")?;
+    }
+    if args.compression == Mode::None
+        && args.min_compress_len != mcfreeze_format::v5::compress::DEFAULT_MIN_COMPRESS_LEN as u32
+    {
+        tracing::warn!("--min-compress-len has no effect with --compression none");
     }
     // In config mode, the WorkerConfig is authoritative for output,
     // partitions, and index_parallelism. Parse it once and pass it through
@@ -432,18 +456,24 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         .clone()
         .context("--output is required for index-only resume")?;
 
-    // block_size and sketch are pinned in v5.plan the moment plan()
-    // first runs. The common index-only resume (scatter finished, index
-    // never started) has no plan yet and the flags DO apply — only warn
-    // when a pinned plan actually exists and will override them
-    // (--bucket-bytes is a per-run RAM knob and always applies).
+    // block_size, sketch, and compression are pinned in v5.plan the
+    // moment plan() first runs. The common index-only resume (scatter
+    // finished, index never started) has no plan yet and the flags DO
+    // apply — only warn when a pinned plan actually exists and will
+    // override them (--bucket-bytes is a per-run RAM knob and always
+    // applies).
     if args.format == mcfreeze_format::FormatId::V5
         && output.join("v5.plan").exists()
-        && (args.block_size.is_some() || args.no_sketch)
+        && (args.block_size.is_some()
+            || args.no_sketch
+            || args.compression != mcfreeze_format::v5::compress::Mode::None
+            || args.min_compress_len
+                != mcfreeze_format::v5::compress::DEFAULT_MIN_COMPRESS_LEN as u32)
     {
         tracing::warn!(
-            "resuming a build whose v5.plan is already written: --block-size/--no-sketch \
-             are pinned by the original run and will not change the output"
+            "resuming a build whose v5.plan is already written: \
+             --block-size/--no-sketch/--compression/--min-compress-len are pinned \
+             by the original run and will not change the output"
         );
     }
 
@@ -1078,6 +1108,49 @@ mod tests {
         assert_eq!(v5.block_size, None);
         assert_eq!(v5.bucket_bytes, None);
         assert_eq!(v5.marker_mode, mcfreeze_loader::MarkerMode::Rename);
+        assert_eq!(
+            v5.compression,
+            mcfreeze_format::v5::compress::Mode::None,
+            "compression must default off: measure first"
+        );
+    }
+
+    #[test]
+    fn compression_flag_parses_every_mode_and_rejects_unknown() {
+        use mcfreeze_format::v5::compress::Mode;
+        for (s, mode) in [
+            ("none", Mode::None),
+            ("zstd", Mode::Zstd),
+            ("zstd-dict", Mode::ZstdDict),
+        ] {
+            let args = parse(&["mcf", "--compression", s, "csv", "--file", "x.csv"]);
+            assert_eq!(v5_options(&args).compression, mode);
+        }
+        assert!(
+            TestCli::try_parse_from(["mcf", "--compression", "lz4", "csv", "--file", "x.csv"])
+                .is_err(),
+            "unknown codec must fail at parse, the dry-run promise"
+        );
+    }
+
+    #[test]
+    fn min_compress_len_maps_through() {
+        let args = parse(&[
+            "mcf",
+            "--compression",
+            "zstd-dict",
+            "--min-compress-len",
+            "128",
+            "csv",
+            "--file",
+            "x.csv",
+        ]);
+        let v5 = v5_options(&args);
+        assert_eq!(
+            v5.compression,
+            mcfreeze_format::v5::compress::Mode::ZstdDict
+        );
+        assert_eq!(v5.min_compress_len, 128);
     }
 
     #[test]
