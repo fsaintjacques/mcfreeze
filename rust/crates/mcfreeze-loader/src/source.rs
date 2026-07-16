@@ -176,6 +176,80 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Row limit — a shared budget across parallel sources
+// ---------------------------------------------------------------------------
+
+/// Cap the total rows drawn from `sources` at `limit`, shared across
+/// all of them (the loader drives sources concurrently). The final
+/// batch is sliced so the cap is exact; every source reports
+/// end-of-stream once the budget is spent, which drops the remaining
+/// upstream state (for BigQuery, cancelling the streams).
+///
+/// The cut is arbitrary — whatever rows the streams delivered first —
+/// not a uniform sample. Meant for capped test loads and sizing
+/// experiments, not statistics.
+pub fn limit_sources(
+    sources: Vec<BoxedRecordBatchSource>,
+    limit: u64,
+) -> Vec<BoxedRecordBatchSource> {
+    let remaining = Arc::new(std::sync::atomic::AtomicI64::new(
+        limit.min(i64::MAX as u64) as i64,
+    ));
+    sources
+        .into_iter()
+        .map(|inner| {
+            BoxedRecordBatchSource::new(LimitedSource {
+                inner,
+                remaining: Arc::clone(&remaining),
+            })
+        })
+        .collect()
+}
+
+struct LimitedSource {
+    inner: BoxedRecordBatchSource,
+    remaining: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl RecordBatchSource for LimitedSource {
+    type Error = LoaderError;
+
+    async fn next_batch(&mut self) -> Result<Option<RecordBatch>, LoaderError> {
+        // Budget already spent: end of stream without touching the
+        // upstream (no wasted fetch, no decode).
+        if self.remaining.load(std::sync::atomic::Ordering::Acquire) <= 0 {
+            return Ok(None);
+        }
+        let Some(batch) = self.inner.next_batch().await? else {
+            return Ok(None);
+        };
+        Ok(take_from_budget(&self.remaining, batch))
+    }
+
+    fn metadata(&self) -> SourceMetadata {
+        self.inner.metadata()
+    }
+}
+
+/// Reserve `batch`'s rows from the shared budget: the whole batch,
+/// a slice landing exactly on the cap, or `None` when a concurrent
+/// source drained the budget between the caller's check and here
+/// (the reservation then leaves it negative, which every later check
+/// reads as spent).
+fn take_from_budget(
+    remaining: &std::sync::atomic::AtomicI64,
+    batch: RecordBatch,
+) -> Option<RecordBatch> {
+    let n = batch.num_rows() as i64;
+    let prev = remaining.fetch_sub(n, std::sync::atomic::Ordering::AcqRel);
+    match prev {
+        p if p <= 0 => None,
+        p if p < n => Some(batch.slice(0, p as usize)),
+        _ => Some(batch),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VecBatch — simple owned batch
 // ---------------------------------------------------------------------------
 
@@ -530,6 +604,116 @@ mod tests {
     use super::*;
     use arrow_array::cast::AsArray;
     use arrow_schema::{DataType, Field, Schema};
+
+    fn int_batch(rows: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let col = arrow_array::Int64Array::from_iter_values(0..rows as i64);
+        RecordBatch::try_new(schema, vec![Arc::new(col)]).unwrap()
+    }
+
+    /// Yields `batches` batches of `rows` rows each.
+    struct FakeSource {
+        left: usize,
+        rows: usize,
+    }
+
+    impl RecordBatchSource for FakeSource {
+        type Error = LoaderError;
+
+        async fn next_batch(&mut self) -> Result<Option<RecordBatch>, LoaderError> {
+            if self.left == 0 {
+                return Ok(None);
+            }
+            self.left -= 1;
+            Ok(Some(int_batch(self.rows)))
+        }
+    }
+
+    #[test]
+    fn budget_overdraw_returns_none_never_slices_negative() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        // The race outcomes as states: a sibling source can drain the
+        // budget between a caller's early check and its reservation, so
+        // take_from_budget must handle a zero or negative budget — the
+        // paths sequential draining can never reach.
+        for spent in [0i64, -5] {
+            let remaining = AtomicI64::new(spent);
+            assert!(take_from_budget(&remaining, int_batch(100)).is_none());
+            assert!(
+                remaining.load(Ordering::Acquire) < spent,
+                "the failed reservation must leave the budget spent for every later check"
+            );
+        }
+        // Partial: the slice lands exactly on the cap.
+        let remaining = AtomicI64::new(60);
+        assert_eq!(
+            take_from_budget(&remaining, int_batch(100))
+                .unwrap()
+                .num_rows(),
+            60
+        );
+        // Full batch within budget passes through untouched.
+        let remaining = AtomicI64::new(100);
+        assert_eq!(
+            take_from_budget(&remaining, int_batch(100))
+                .unwrap()
+                .num_rows(),
+            100
+        );
+    }
+
+    #[test]
+    fn limit_sources_caps_exactly_across_sources() {
+        // Two sources sharing a 250-row budget, batches of 100: the
+        // budget is global, the final batch is sliced to land exactly
+        // on the cap, and both sources then report end-of-stream.
+        let sources = vec![
+            BoxedRecordBatchSource::new(FakeSource {
+                left: 10,
+                rows: 100,
+            }),
+            BoxedRecordBatchSource::new(FakeSource {
+                left: 10,
+                rows: 100,
+            }),
+        ];
+        let mut limited = limit_sources(sources, 250);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut total = 0;
+        // Drain alternately, as the concurrent loader effectively does.
+        loop {
+            let mut any = false;
+            for src in limited.iter_mut() {
+                if let Some(b) = rt.block_on(src.next_batch()).unwrap() {
+                    total += b.num_rows();
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        assert_eq!(total, 250);
+        for src in limited.iter_mut() {
+            assert!(rt.block_on(src.next_batch()).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn limit_larger_than_source_is_inert() {
+        let sources = vec![BoxedRecordBatchSource::new(FakeSource {
+            left: 2,
+            rows: 10,
+        })];
+        let mut limited = limit_sources(sources, 1_000_000);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut total = 0;
+        while let Some(b) = rt.block_on(limited[0].next_batch()).unwrap() {
+            total += b.num_rows();
+        }
+        assert_eq!(total, 20, "an unreached cap must not drop rows");
+    }
 
     #[test]
     fn csv_source_with_schema() {

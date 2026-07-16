@@ -84,6 +84,13 @@ pub struct LoadArgs {
     #[arg(long, default_value_t = mcfreeze_format::v5::compress::DEFAULT_MIN_COMPRESS_LEN as u32)]
     pub min_compress_len: u32,
 
+    /// Stop consuming from the source after this many rows, total
+    /// across all streams. The cut is arbitrary (whatever the streams
+    /// deliver first), not a uniform sample — meant for capped test
+    /// loads and sizing experiments.
+    #[arg(long)]
+    pub max_rows: Option<u64>,
+
     /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
@@ -413,7 +420,12 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
         }
     }
 
-    let pipeline = build_pipeline(&args, worker_config).await?;
+    let mut pipeline = build_pipeline(&args, worker_config).await?;
+    if let Some(limit) = args.max_rows {
+        pipeline.sources = mcfreeze_loader::limit_sources(pipeline.sources, limit);
+        // Keep the progress denominator honest under the cap.
+        pipeline.estimated_rows = Some(pipeline.estimated_rows.map_or(limit, |e| e.min(limit)));
+    }
 
     if args.dry_run {
         info!("dry-run: source validated, no data written");
