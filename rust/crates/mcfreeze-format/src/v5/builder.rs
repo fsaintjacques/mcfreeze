@@ -112,6 +112,15 @@ struct Plan {
     dict_len: u64,
     #[serde(default)]
     dict_fallback: bool,
+    /// Sample-measured compression: raw and stored bytes of the sample
+    /// pool under the fresh codec (fallback rules and frame overhead
+    /// included) — the ratio the stored-size auto-tune ran on.
+    /// Divergence from the build-time achieved ratio is the signature
+    /// of a biased (time-skewed) sample.
+    #[serde(default)]
+    sample_bytes_raw: u64,
+    #[serde(default)]
+    sample_bytes_stored: u64,
     /// The vendored libzstd that trained the dictionary (trained bytes
     /// are not reproducible across versions). `Some` iff compressing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,6 +146,17 @@ pub struct PartitionBuildDone {
     pub heap_bytes: u64,
     #[serde(default)]
     pub sketch_bytes: u64,
+    /// Compression outcome: logical vs stored value bytes and how many
+    /// records took each path. The achieved ratio is a first-class
+    /// observable per partition, not something derived from `du`.
+    #[serde(default)]
+    pub value_bytes_raw: u64,
+    #[serde(default)]
+    pub value_bytes_stored: u64,
+    #[serde(default)]
+    pub n_compressed: u64,
+    #[serde(default)]
+    pub n_raw: u64,
 }
 
 /// Phase sentinel (`index.done`; stable schema, embedded into
@@ -172,6 +192,21 @@ pub struct IndexDone {
     pub dict_len: u64,
     #[serde(default)]
     pub dict_fallback: bool,
+    /// Sample-measured bytes (plan-time) vs achieved bytes (build-time):
+    /// divergence between the two ratios is the signature of a biased
+    /// (time-skewed) sample.
+    #[serde(default)]
+    pub sample_bytes_raw: u64,
+    #[serde(default)]
+    pub sample_bytes_stored: u64,
+    #[serde(default)]
+    pub value_bytes_raw: u64,
+    #[serde(default)]
+    pub value_bytes_stored: u64,
+    #[serde(default)]
+    pub n_compressed: u64,
+    #[serde(default)]
+    pub n_raw: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zstd_version: Option<String>,
     pub wall_secs: Option<f64>,
@@ -287,9 +322,10 @@ impl V5Builder {
 
     /// Load or derive the plan, exactly once per snapshot: an existing
     /// `v5.plan` always wins (the decision is immutable once the first
-    /// block is cut), otherwise auto-tune from the merged scatter
-    /// histograms, train the dictionary if requested, and persist
-    /// before returning.
+    /// block is cut). Otherwise: train the dictionary if requested,
+    /// auto-tune `block_size` — from sampled **stored** sizes when
+    /// compressing, from the merged raw scatter histograms otherwise —
+    /// and persist before returning.
     fn ensure_plan(&self) -> Result<Plan> {
         let mut guard = self.plan.lock().expect("plan poisoned");
         if let Some(plan) = guard.as_ref() {
@@ -320,13 +356,9 @@ impl V5Builder {
                     *h += s;
                 }
             }
-            let block_size = match self.block_size_override {
-                Some(bs) => bs,
-                None => auto_tune_block_size(&hist),
-            };
             let mut plan = Plan {
-                block_size,
-                inline_threshold: block_size / 2,
+                block_size: 0, // decided below, after sampling
+                inline_threshold: 0,
                 sketch: self.sketch,
                 compression: self.compression,
                 min_compress_len: self.min_compress_len,
@@ -334,15 +366,35 @@ impl V5Builder {
                 n_samples: 0,
                 dict_len: 0,
                 dict_fallback: false,
+                sample_bytes_raw: 0,
+                sample_bytes_stored: 0,
                 zstd_version: (self.compression != Mode::None).then(compress::zstd_version),
             };
             // A dict.bin orphaned by a crash before its v5.plan
             // published (or by an abandoned zstd-dict run) must not
             // outlive a plan that never references it.
             let _ = fs::remove_file(self.root.join(DICT_BIN));
-            if self.compression == Mode::ZstdDict {
-                self.train_dictionary(&mut plan)?;
+            if self.compression != Mode::None {
+                // Auto-tune must see stored sizes directly: scaling the
+                // raw median by an average ratio mis-tunes whenever
+                // compressibility correlates with size (it usually
+                // does). Note the scope narrows with the substitution:
+                // the raw histogram spans every partition, the stored
+                // one only partition 0's sampled prefix — a hash-
+                // unbiased but time-biased pool, the same tradeoff the
+                // dictionary makes, observable via the recorded sample
+                // stats. An empty sample pool (empty partition 0)
+                // leaves the raw histogram in charge.
+                let stored_hist = self.plan_compression(&mut plan)?;
+                if plan.n_samples > 0 {
+                    hist = stored_hist;
+                }
             }
+            plan.block_size = match self.block_size_override {
+                Some(bs) => bs,
+                None => auto_tune_block_size(&hist),
+            };
+            plan.inline_threshold = plan.block_size / 2;
             write_marker(&path, &serde_json::to_string(&plan)?, self.marker_mode)?;
             plan
         };
@@ -350,14 +402,18 @@ impl V5Builder {
         Ok(plan)
     }
 
-    /// Train the `zstd-dict` dictionary from a prefix of partition 0's
-    /// arrival log (partition routing is by hash, so any one partition
-    /// is an unbiased sample of the key space — across keys; the prefix
-    /// is biased across *time*, which the recorded sample stats make
-    /// observable). Writes `dict.bin` durably **before** its checksum
-    /// is pinned into the plan. Too few samples to train falls back to
-    /// plain `zstd` with a warning, recorded in the plan.
-    fn train_dictionary(&self, plan: &mut Plan) -> Result<()> {
+    /// Compression planning: sample a prefix of partition 0's arrival
+    /// log (partition routing is by hash, so any one partition is an
+    /// unbiased sample of the key space — across keys; the prefix is
+    /// biased across *time*, which the recorded sample stats make
+    /// observable), train the `zstd-dict` dictionary if requested, then
+    /// compress every sample with the fresh codec and return the
+    /// stored-size histogram for the block-size rule.
+    ///
+    /// `dict.bin` is written durably **before** its checksum is pinned
+    /// into the plan. Too few samples to train falls back to plain
+    /// `zstd` with a warning, recorded in the plan.
+    fn plan_compression(&self, plan: &mut Plan) -> Result<Vec<u64>> {
         // arrival.bin exists here by ordering: the histogram loop above
         // read every partition's arrival.stats, which the appender
         // publishes only after creating and syncing arrival.bin (empty
@@ -367,30 +423,51 @@ impl V5Builder {
         let samples = sample_arrival_prefix(&arrival, SAMPLE_PREFIX_BYTES)?;
         plan.n_samples = samples.len() as u64;
 
-        let trained = if samples.is_empty() {
-            Err(Error::DictTrain(std::io::Error::other("no samples")))
-        } else {
-            compress::train_dict(&samples, compress::DEFAULT_DICT_LEN)
-        };
-        match trained {
-            Ok(dict) => {
-                // Data before marker: the dictionary is fsynced before
-                // v5.plan (and a fortiori meta.json) can name it.
-                write_data_file(&self.root.join(DICT_BIN), &dict)?;
-                plan.dict_checksum = Some(checksum32(&dict));
-                plan.dict_len = dict.len() as u64;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    n_samples = plan.n_samples,
-                    error = %e,
-                    "zstd-dict training failed; falling back to plain zstd"
-                );
-                plan.compression = Mode::Zstd;
-                plan.dict_fallback = true;
+        let mut dict = None;
+        if self.compression == Mode::ZstdDict {
+            let trained = if samples.is_empty() {
+                Err(Error::DictTrain(std::io::Error::other("no samples")))
+            } else {
+                compress::train_dict(&samples, compress::DEFAULT_DICT_LEN)
+            };
+            match trained {
+                Ok(bytes) => {
+                    // Data before marker: the dictionary is fsynced
+                    // before v5.plan (and a fortiori meta.json) can
+                    // name it.
+                    write_data_file(&self.root.join(DICT_BIN), &bytes)?;
+                    plan.dict_checksum = Some(checksum32(&bytes));
+                    plan.dict_len = bytes.len() as u64;
+                    dict = Some(bytes);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        n_samples = plan.n_samples,
+                        error = %e,
+                        "zstd-dict training failed; falling back to plain zstd"
+                    );
+                    plan.compression = Mode::Zstd;
+                    plan.dict_fallback = true;
+                }
             }
         }
-        Ok(())
+
+        // Measure the samples under the effective codec (post-fallback),
+        // exactly as build_partition will store them.
+        let mut compressor = compress::Compressor::new(
+            compress::DEFAULT_LEVEL,
+            dict.as_deref(),
+            plan.min_compress_len as usize,
+        )?;
+        let mut hist = vec![0u64; HIST_BUCKETS];
+        for v in &samples {
+            let stored = compressor.compress(v)?.map_or(v.len(), |f| f.len());
+            let rec = encoded_len(stored) as u64;
+            hist[(u64::BITS - rec.leading_zeros()) as usize] += 1;
+            plan.sample_bytes_raw += v.len() as u64;
+            plan.sample_bytes_stored += stored as u64;
+        }
+        Ok(hist)
     }
 
     /// Best-effort sweep of transient files that survive a crash after
@@ -555,6 +632,21 @@ impl FormatBuilder for V5Builder {
         }
 
         let plan = self.ensure_plan()?;
+        // The dictionary is shared read-only across build threads; each
+        // partition digests its own compression context from it. Re-read
+        // and re-verify here: in a resumed process the in-memory plan
+        // came from disk, and the bytes about to be compiled into every
+        // partition must be the ones the checksum pinned.
+        let dict: Option<Vec<u8>> = match plan.dict_checksum {
+            Some(expected) => {
+                let bytes = fs::read(self.root.join(DICT_BIN))
+                    .map_err(|source| Error::DictMissing { expected, source })?;
+                compress::verify_dict(&bytes, expected)?;
+                Some(bytes)
+            }
+            None => None,
+        };
+        let dict = dict.as_deref();
         let start = Instant::now();
         let cb = &progress;
 
@@ -570,6 +662,7 @@ impl FormatBuilder for V5Builder {
                     let done = build_partition(
                         &self.partition_dir(p),
                         &plan,
+                        dict,
                         self.bucket_bytes,
                         self.data_buf_bytes,
                         self.marker_mode,
@@ -600,6 +693,12 @@ impl FormatBuilder for V5Builder {
             n_samples: plan.n_samples,
             dict_len: plan.dict_len,
             dict_fallback: plan.dict_fallback,
+            sample_bytes_raw: plan.sample_bytes_raw,
+            sample_bytes_stored: plan.sample_bytes_stored,
+            value_bytes_raw: partitions.iter().map(|p| p.value_bytes_raw).sum(),
+            value_bytes_stored: partitions.iter().map(|p| p.value_bytes_stored).sum(),
+            n_compressed: partitions.iter().map(|p| p.n_compressed).sum(),
+            n_raw: partitions.iter().map(|p| p.n_raw).sum(),
             zstd_version: plan.zstd_version.clone(),
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
@@ -656,6 +755,7 @@ impl FormatBuilder for V5Builder {
 fn build_partition(
     dir: &Path,
     plan: &Plan,
+    dict: Option<&[u8]>,
     bucket_bytes: u64,
     buf_bytes: usize,
     marker_mode: MarkerMode,
@@ -704,6 +804,21 @@ fn build_partition(
     let mut n_keys = 0u64;
     let mut n_stubs = 0u64;
     let mut heap_offset = 0u64;
+    let mut value_bytes_raw = 0u64;
+    let mut value_bytes_stored = 0u64;
+    let mut n_compressed = 0u64;
+    let mut n_raw = 0u64;
+    // One compression context per partition build: a CCtx is not
+    // thread-safe, and creating it here digests the shared dictionary
+    // once per partition instead of once per value.
+    let mut compressor = match plan.compression {
+        Mode::None => None,
+        _ => Some(compress::Compressor::new(
+            compress::DEFAULT_LEVEL,
+            dict,
+            plan.min_compress_len as usize,
+        )?),
+    };
     // Sketch input: every fp of the partition, accumulated across the
     // bucket passes (binary fuse needs the full set). Arrives sorted,
     // so adjacent dedup below satisfies the filter's uniqueness
@@ -725,21 +840,37 @@ fn build_partition(
                 sketch_fps.push(f.fp);
             }
             let value = &buf[f.start..f.start + f.len];
-            if value.len() as u32 <= plan.inline_threshold {
-                asm.push_inline(f.fp, f.vfp, value, false)?;
+            let frame = match compressor.as_mut() {
+                Some(c) => c.compress(value)?,
+                None => None,
+            };
+            let (stored, compressed) = match &frame {
+                Some(frame) => (frame.as_slice(), true),
+                None => (value, false),
+            };
+            value_bytes_raw += value.len() as u64;
+            value_bytes_stored += stored.len() as u64;
+            match compressed {
+                true => n_compressed += 1,
+                false => n_raw += 1,
+            }
+            // The inline/heap decision runs on the *stored* size —
+            // that is what keeps fat-but-compressible values inline.
+            if stored.len() as u32 <= plan.inline_threshold {
+                asm.push_inline(f.fp, f.vfp, stored, compressed)?;
             } else {
-                heap_out.write_all(value)?;
+                heap_out.write_all(stored)?;
                 asm.push_stub(
                     f.fp,
                     f.vfp,
                     Stub {
                         heap_offset,
-                        stored_len: value.len() as u32,
-                        value_checksum: checksum32(value),
+                        stored_len: stored.len() as u32,
+                        value_checksum: checksum32(stored),
                     },
-                    false,
+                    compressed,
                 )?;
-                heap_offset += value.len() as u64;
+                heap_offset += stored.len() as u64;
                 n_stubs += 1;
             }
             n_keys += 1;
@@ -782,6 +913,10 @@ fn build_partition(
         blocks_bytes: fences.len() as u64 * plan.block_size as u64,
         heap_bytes: heap_offset,
         sketch_bytes,
+        value_bytes_raw,
+        value_bytes_stored,
+        n_compressed,
+        n_raw,
     };
     // Marker before cleanup: a crash in between leaves the partition
     // skippable, with only idempotent deletion left to redo.
@@ -1011,12 +1146,15 @@ mod tests {
     }
 
     /// Reader-less lookup against the built files, using the stage-1
-    /// primitives: fences route, blocks scan, stubs follow into heap.
+    /// primitives: fences route, blocks scan, stubs follow into heap,
+    /// compressed stored bytes decode through the snapshot's dictionary
+    /// (`dict.bin`, when present).
     fn lookup(dir: &Path, n: u32, block_size: usize, key: &[u8]) -> Option<Vec<u8>> {
         let layout = Layout::new(n).unwrap();
         let fp = fingerprint(key);
         let vfp = verify_fingerprint(key, DEFAULT_VERIFY_SEED);
         let pdir = partition_dir(dir, n, layout.partition_of(fp));
+        let codec = compress::Decompressor::new(fs::read(dir.join(DICT_BIN)).ok()).unwrap();
 
         let fence_bytes = fs::read(pdir.join(FENCES_BIN)).unwrap();
         let fences: Vec<u32> = fence_bytes
@@ -1029,13 +1167,27 @@ mod tests {
         for b in fence::candidate_blocks(&fences, fence::fence_of(fp)) {
             let blk = &blocks[b * block_size..(b + 1) * block_size];
             match block::find(blk, vfp).unwrap() {
-                Some(block::Record::Inline { value, .. }) => return Some(value.to_vec()),
-                Some(block::Record::Stub { stub, .. }) => {
+                Some(block::Record::Inline {
+                    value, compressed, ..
+                }) => {
+                    return Some(
+                        compress::decode(value, compressed, Some(&codec))
+                            .unwrap()
+                            .into_owned(),
+                    )
+                }
+                Some(block::Record::Stub {
+                    stub, compressed, ..
+                }) => {
                     let heap = fs::read(pdir.join(HEAP_BIN)).unwrap();
                     let start = stub.heap_offset as usize;
-                    let value = heap[start..start + stub.stored_len as usize].to_vec();
-                    assert_eq!(block::checksum32(&value), stub.value_checksum);
-                    return Some(value);
+                    let stored = &heap[start..start + stub.stored_len as usize];
+                    assert_eq!(block::checksum32(stored), stub.value_checksum);
+                    return Some(
+                        compress::decode(stored, compressed, Some(&codec))
+                            .unwrap()
+                            .into_owned(),
+                    );
                 }
                 None => {}
             }
@@ -1262,6 +1414,8 @@ mod tests {
                 n_samples: 0,
                 dict_len: 0,
                 dict_fallback: false,
+                sample_bytes_raw: 0,
+                sample_bytes_stored: 0,
                 zstd_version: None,
             })
             .unwrap(),
@@ -1517,6 +1671,225 @@ mod tests {
         // not touch it.
         let dict = fs::read(dir.path().join(DICT_BIN)).unwrap();
         assert_eq!(done.dict_checksum, Some(block::checksum32(&dict)));
+    }
+
+    // -----------------------------------------------------------------
+    // Emit-time compression (doc/plan/V5_COMPRESSION.md stage 3)
+    // -----------------------------------------------------------------
+
+    /// Deterministic incompressible bytes without a rand dependency.
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut h = seed | 1;
+        while out.len() < len {
+            h = xxhash_rust::xxh64::xxh64(&h.to_le_bytes(), 0);
+            out.extend_from_slice(&h.to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
+    #[test]
+    fn zstd_dict_snapshot_roundtrips_and_reports_ratio() {
+        let data = pairs(2000, 100);
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 2, dict_opts());
+        scatter(&builder, &data, 2);
+        builder.plan().unwrap();
+        builder.build(2, None).unwrap();
+        assert_all_present(dir.path(), 2, 4096, &data);
+
+        let guard = builder.done.lock().unwrap();
+        let done = guard.as_ref().unwrap();
+        assert_eq!(done.n_compressed + done.n_raw, 2000);
+        assert!(done.n_compressed > 0, "dictionary must win on these values");
+        assert!(done.value_bytes_stored < done.value_bytes_raw);
+        assert!(done.sample_bytes_stored < done.sample_bytes_raw);
+        // Aggregates are exactly the per-partition sums.
+        assert_eq!(
+            done.value_bytes_stored,
+            done.partitions
+                .iter()
+                .map(|p| p.value_bytes_stored)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            done.n_compressed,
+            done.partitions.iter().map(|p| p.n_compressed).sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn plain_zstd_snapshot_roundtrips() {
+        // ≥1 KiB repetitive values: the tier plain zstd exists for.
+        let data = pairs(300, 2000);
+        let dir = TempDir::new().unwrap();
+        let v5 = V5Options {
+            block_size: Some(4096),
+            compression: Mode::Zstd,
+            ..Default::default()
+        };
+        let builder = make_builder(dir.path(), 1, v5);
+        scatter(&builder, &data, 1);
+        builder.plan().unwrap();
+        builder.build(1, None).unwrap();
+        assert_all_present(dir.path(), 1, 4096, &data);
+
+        let guard = builder.done.lock().unwrap();
+        let done = guard.as_ref().unwrap();
+        assert!(done.n_compressed > 0);
+        assert!(!dir.path().join(DICT_BIN).exists());
+    }
+
+    #[test]
+    fn incompressible_values_store_identical_to_none_mode() {
+        // Storage never expands: when nothing wins, a zstd-mode build's
+        // partition artifacts are byte-identical to a none-mode build.
+        let data: Vec<(Vec<u8>, Vec<u8>)> = (0..200)
+            .map(|i| (format!("key-{i}").into_bytes(), noise(120, i)))
+            .collect();
+        let build = |compression| {
+            let dir = TempDir::new().unwrap();
+            let v5 = V5Options {
+                block_size: Some(4096),
+                compression,
+                ..Default::default()
+            };
+            let builder = make_builder(dir.path(), 1, v5);
+            scatter(&builder, &data, 1);
+            builder.plan().unwrap();
+            builder.build(1, None).unwrap();
+            dir
+        };
+        let none = build(Mode::None);
+        let zstd = build(Mode::Zstd);
+
+        let done: IndexDone =
+            serde_json::from_str(&fs::read_to_string(zstd.path().join(INDEX_DONE)).unwrap())
+                .unwrap();
+        assert_eq!(done.n_compressed, 0);
+        assert_eq!(done.value_bytes_stored, done.value_bytes_raw);
+        for f in [BLOCKS_BIN, HEAP_BIN, FENCES_BIN] {
+            assert_eq!(
+                fs::read(partition_dir(none.path(), 1, 0).join(f)).unwrap(),
+                fs::read(partition_dir(zstd.path(), 1, 0).join(f)).unwrap(),
+                "{f} must be byte-identical when no value compresses"
+            );
+        }
+    }
+
+    #[test]
+    fn fat_but_compressible_values_stay_inline() {
+        // Raw 3000 B (over the 2048 threshold), stored well under it:
+        // the inline/heap decision runs on stored size, so no stubs.
+        let data = pairs(200, 3000);
+        let dir = TempDir::new().unwrap();
+        let v5 = V5Options {
+            block_size: Some(4096),
+            compression: Mode::Zstd,
+            ..Default::default()
+        };
+        let builder = make_builder(dir.path(), 1, v5);
+        scatter(&builder, &data, 1);
+        builder.plan().unwrap();
+        builder.build(1, None).unwrap();
+        assert_all_present(dir.path(), 1, 4096, &data);
+
+        let guard = builder.done.lock().unwrap();
+        let done = guard.as_ref().unwrap();
+        assert_eq!(done.n_compressed, 200);
+        assert_eq!(done.n_stubs, 0, "stored-size threshold keeps these inline");
+        assert_eq!(done.heap_bytes, 0);
+    }
+
+    #[test]
+    fn auto_tune_runs_on_stored_sizes() {
+        // Raw ~6 KiB records auto-tune to 16 KiB blocks; stored (a few
+        // dozen bytes after compression) must tune to the 4 KiB floor.
+        // Scaling the raw median by an average ratio could get this
+        // right too — the point is the stored histogram, measured with
+        // frame overhead and fallback rules included.
+        let data = pairs(500, 6000);
+        let dir = TempDir::new().unwrap();
+        let v5 = V5Options {
+            compression: Mode::Zstd,
+            ..Default::default()
+        };
+        let builder = make_builder(dir.path(), 1, v5);
+        scatter(&builder, &data, 1);
+        builder.plan().unwrap();
+
+        let plan = read_plan(dir.path());
+        assert_eq!(plan.block_size, 4096);
+        assert!(plan.sample_bytes_stored < plan.sample_bytes_raw / 10);
+
+        // Control: the same data without compression tunes larger.
+        let dir2 = TempDir::new().unwrap();
+        let b2 = make_builder(dir2.path(), 1, V5Options::default());
+        scatter(&b2, &data, 1);
+        b2.plan().unwrap();
+        assert_eq!(read_plan(dir2.path()).block_size, 16 * 1024);
+    }
+
+    #[test]
+    fn dict_fallback_still_measures_and_builds_with_plain_zstd() {
+        // A sample pool far too small for ZDICT (one tiny value): the
+        // plan must fall back to plain zstd AND still measure the
+        // samples under the dictless codec it fell back to — then the
+        // build must complete in that mode.
+        let data = vec![(b"only-key".to_vec(), b"o".repeat(500))];
+        let dir = TempDir::new().unwrap();
+        let builder = make_builder(dir.path(), 1, dict_opts());
+        scatter(&builder, &data, 1);
+        builder.plan().unwrap();
+
+        let plan = read_plan(dir.path());
+        assert_eq!(plan.compression, Mode::Zstd);
+        assert!(plan.dict_fallback);
+        assert_eq!(plan.n_samples, 1);
+        assert_eq!(plan.dict_checksum, None);
+        assert!(!dir.path().join(DICT_BIN).exists());
+        // Dictless framing measured: 500 repeated bytes compress.
+        assert_eq!(plan.sample_bytes_raw, 500);
+        assert!(plan.sample_bytes_stored > 0 && plan.sample_bytes_stored < 500);
+
+        builder.build(1, None).unwrap();
+        assert_all_present(dir.path(), 1, 4096, &data);
+        let guard = builder.done.lock().unwrap();
+        let done = guard.as_ref().unwrap();
+        assert_eq!(done.compression, Mode::Zstd);
+        assert_eq!(done.n_compressed, 1);
+    }
+
+    #[test]
+    fn empty_partition_zero_leaves_raw_histogram_in_charge() {
+        // All keys route to partition 1: the stored-size sample pool is
+        // empty, so block sizing must fall back to the merged raw
+        // histogram (16 KiB for ~6 KiB records), not the 4 KiB floor an
+        // all-zero stored histogram would produce.
+        let layout = Layout::new(2).unwrap();
+        let data: Vec<(Vec<u8>, Vec<u8>)> = (0..200)
+            .map(|i| format!("key-{i}").into_bytes())
+            .filter(|k| layout.partition_of(fingerprint(k)) == 1)
+            .map(|k| {
+                let v = format!("{}-{}", String::from_utf8_lossy(&k), "x".repeat(6000));
+                (k, v.into_bytes())
+            })
+            .collect();
+        assert!(!data.is_empty());
+
+        let dir = TempDir::new().unwrap();
+        let v5 = V5Options {
+            compression: Mode::Zstd,
+            ..Default::default()
+        };
+        let builder = make_builder(dir.path(), 2, v5);
+        scatter(&builder, &data, 2);
+        builder.plan().unwrap();
+
+        let plan = read_plan(dir.path());
+        assert_eq!(plan.n_samples, 0);
+        assert_eq!(plan.block_size, 16 * 1024);
     }
 
     #[test]
