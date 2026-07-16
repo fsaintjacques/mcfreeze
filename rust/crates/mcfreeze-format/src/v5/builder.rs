@@ -22,7 +22,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    builder::{BuildDone, BuilderConfig, FormatBuilder, PartitionAppender, ScatterProbe},
+    builder::{
+        BuildDone, BuilderConfig, FormatBuilder, MarkerMode, PartitionAppender, ScatterProbe,
+    },
     desc::FormatId,
     meta::{partition_dir, Layout, Stats, HASH_ALGORITHM},
     v5::{
@@ -130,6 +132,7 @@ struct V5Appender {
     dir: PathBuf,
     out: BufWriter<File>,
     verify_seed: u64,
+    marker_mode: MarkerMode,
     n_keys: u64,
     data_bytes: u64,
     hist: Vec<u64>,
@@ -170,6 +173,7 @@ impl PartitionAppender for V5Appender {
         write_marker(
             &self.dir.join(ARRIVAL_STATS),
             &serde_json::to_string(&stats)?,
+            self.marker_mode,
         )
     }
 }
@@ -186,6 +190,7 @@ pub struct V5Builder {
     block_size_override: Option<u32>,
     bucket_bytes: u64,
     sketch: bool,
+    marker_mode: MarkerMode,
     /// Loaded/derived by `plan()`; consumed by `build`.
     plan: Mutex<Option<Plan>>,
     /// Set by `build` (live and sentinel-skip paths); consumed by
@@ -205,6 +210,7 @@ impl V5Builder {
             block_size_override: config.v5.block_size,
             bucket_bytes: config.v5.bucket_bytes.unwrap_or(DEFAULT_BUCKET_BYTES),
             sketch: config.v5.sketch,
+            marker_mode: config.v5.marker_mode,
             root: config.root,
             plan: Mutex::new(None),
             done: Mutex::new(None),
@@ -246,7 +252,7 @@ impl V5Builder {
                 inline_threshold: block_size / 2,
                 sketch: self.sketch,
             };
-            write_marker(&path, &serde_json::to_string(&plan)?)?;
+            write_marker(&path, &serde_json::to_string(&plan)?, self.marker_mode)?;
             plan
         };
         *guard = Some(plan);
@@ -284,23 +290,34 @@ fn remove_bucket_files(dir: &Path) {
     }
 }
 
-/// Atomically publish a marker file: write + fsync a temp sibling, then
-/// rename it into place. Marker *presence* is a completion signal
-/// (`arrival.stats`, `v5.plan`, `build.done`, `index.done`, `meta.json`),
-/// so a marker must never exist truncated — a plain `fs::write`
-/// interrupted by a crash or full disk leaves a file that asserts
-/// completion while its JSON no longer parses, wedging every resume
-/// path until it is manually deleted.
-fn write_marker(path: &Path, json: &str) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all()?;
+/// Atomically publish a marker file. Marker *presence* is a completion
+/// signal (`arrival.stats`, `v5.plan`, `build.done`, `index.done`,
+/// `meta.json`), so a marker must never exist truncated — a plain
+/// interrupted write leaves a file that asserts completion while its
+/// JSON no longer parses, wedging every resume path until it is
+/// manually deleted. The atomicity mechanism is backend-dependent
+/// ([`MarkerMode`]): POSIX gets write + fsync + rename; object-store
+/// FUSE mounts get create + write + close, which is already atomic
+/// there (and where rename is unsupported or non-atomic).
+fn write_marker(path: &Path, json: &str, mode: MarkerMode) -> Result<()> {
+    match mode {
+        MarkerMode::Rename => {
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(".tmp");
+            let tmp = PathBuf::from(tmp);
+            {
+                let mut f = File::create(&tmp)?;
+                f.write_all(json.as_bytes())?;
+                f.sync_all()?;
+            }
+            fs::rename(&tmp, path)?;
+        }
+        MarkerMode::DirectWrite => {
+            let mut f = File::create(path)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
     }
-    fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -346,6 +363,7 @@ impl FormatBuilder for V5Builder {
             out: BufWriter::with_capacity(self.data_buf_bytes, file),
             dir,
             verify_seed: self.verify_seed,
+            marker_mode: self.marker_mode,
             n_keys: 0,
             data_bytes: 0,
             hist: vec![0; HIST_BUCKETS],
@@ -420,6 +438,7 @@ impl FormatBuilder for V5Builder {
                         plan,
                         self.bucket_bytes,
                         self.data_buf_bytes,
+                        self.marker_mode,
                     )?;
                     if let Some(ref f) = cb {
                         f(1, 0);
@@ -444,7 +463,11 @@ impl FormatBuilder for V5Builder {
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
         };
-        write_marker(&sentinel, &serde_json::to_string_pretty(&done)?)?;
+        write_marker(
+            &sentinel,
+            &serde_json::to_string_pretty(&done)?,
+            self.marker_mode,
+        )?;
         // The plan is never needed once the phase sentinel exists.
         let _ = fs::remove_file(self.root.join(PLAN_FILE));
 
@@ -480,6 +503,7 @@ impl FormatBuilder for V5Builder {
         write_marker(
             &self.root.join("meta.json"),
             &serde_json::to_string_pretty(&meta)?,
+            self.marker_mode,
         )
     }
 }
@@ -493,6 +517,7 @@ fn build_partition(
     plan: Plan,
     bucket_bytes: u64,
     buf_bytes: usize,
+    marker_mode: MarkerMode,
 ) -> Result<PartitionBuildDone> {
     let done_path = dir.join(BUILD_DONE);
     if done_path.exists() {
@@ -613,7 +638,7 @@ fn build_partition(
     };
     // Marker before cleanup: a crash in between leaves the partition
     // skippable, with only idempotent deletion left to redo.
-    write_marker(&done_path, &serde_json::to_string(&done)?)?;
+    write_marker(&done_path, &serde_json::to_string(&done)?, marker_mode)?;
     sweep_partition_transients(dir);
     Ok(done)
 }
@@ -985,9 +1010,16 @@ mod tests {
         // sweep must remove one orphaned by a crash.
         let dir = TempDir::new().unwrap();
         let marker = dir.path().join(BUILD_DONE);
-        write_marker(&marker, "{}").unwrap();
+        write_marker(&marker, "{}", MarkerMode::Rename).unwrap();
         assert!(marker.exists());
         assert!(!dir.path().join("build.done.tmp").exists());
+
+        // DirectWrite: no temp sibling is ever created (object-store
+        // FUSE mounts, where rename is unsupported and close is atomic).
+        let direct = dir.path().join("index.done");
+        write_marker(&direct, "{}", MarkerMode::DirectWrite).unwrap();
+        assert!(direct.exists());
+        assert!(!dir.path().join("index.done.tmp").exists());
 
         fs::write(dir.path().join("build.done.tmp"), b"orphan").unwrap();
         sweep_partition_transients(dir.path());

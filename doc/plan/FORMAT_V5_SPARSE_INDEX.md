@@ -506,6 +506,49 @@ are swept first — the radix pass and block build are deterministic, so
 rebuilding is idempotent). `meta.json`'s presence remains the snapshot
 completeness sentinel, as in V4.
 
+### Diskless / object-storage construction
+
+Construction I/O is **sequential-only** by design: every file is
+written exactly once, front to back, and read exactly once, front to
+back — no random writes, no read-modify-write, no seeks, no merge, no
+concat. This is the external-distribution-sort shape, and it makes the
+builder object-storage friendly: the only local resource it truly
+needs is RAM (`index_parallelism × (bucket + sketch builder)`), so a
+build job can run **PVC-free** against a bucket-backed FUSE mount
+(gcsfuse, mountpoint-s3), streaming arrival logs, radix buckets, and
+final blocks directly to/from object storage.
+
+Two prerequisites, both handled:
+
+- **Markers** (`--direct-markers` / `V5Options::marker_mode`): on
+  POSIX, markers publish via temp + fsync + rename; on object-store
+  FUSE mounts rename is unsupported (mountpoint-s3) or non-atomic
+  (gcsfuse copy+delete), while a plain create-write-close is already
+  atomic — the object materializes complete on close. `DirectWrite`
+  mode drops the rename dance where it would reintroduce the very
+  hazard it prevents.
+- **Resume probes**: crash recovery decides from `exists()` checks on
+  markers; the mount's stat/metadata cache TTL must be short or
+  disabled so a rescheduled job does not resume from stale answers.
+
+Diskless construction *strengthens* crash recovery: transient state
+survives pod eviction in the bucket, so a rescheduled job resumes from
+markers instead of restarting — at most one partition's in-flight work
+is lost (a good match for spot/preemptible builders). Costs: the build
+moves ~3× writes + 2× reads of the data volume over the network
+instead of local NVMe (expect ~10–30% wall-time overhead when
+bandwidth-bound), which is also where scatter-time bucketing (see Open
+questions) pays twice — it deletes a full write+read round trip of
+billable bandwidth.
+
+Serving is the opposite story: the read path is one random 4 KiB
+`pread` per lookup and belongs on local NVMe (nodes download
+sequentially from the bucket at swap). The owned-fences design does
+make a *cold tier* coherent — fences and sketch are copied to RAM at
+open, so a bucket-backed reader pays exactly one ranged GET per hit
+(~30–50 ms) and zero for sketch-rejected misses — but that is a
+different latency product, not this design's target.
+
 ## Size estimates
 
 At 256 B average record (typical for current datasets), ~16 records/block:

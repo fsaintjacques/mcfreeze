@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-pub use mcfreeze_format::builder::V5Options;
 use mcfreeze_format::builder::{builder_for, BuilderConfig, FormatBuilder, PartitionAppender};
+pub use mcfreeze_format::builder::{MarkerMode, V5Options};
 use mcfreeze_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
 use mcfreeze_format::FormatId;
 
