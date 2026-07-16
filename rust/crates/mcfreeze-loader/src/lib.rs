@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
+pub use mcfreeze_format::builder::V5Options;
 use mcfreeze_format::builder::{builder_for, BuilderConfig, FormatBuilder, PartitionAppender};
 use mcfreeze_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
 use mcfreeze_format::FormatId;
@@ -150,6 +151,10 @@ pub struct LoaderConfig {
     /// an oversized value usually means a mis-mapped source column.
     /// Default: [`DEFAULT_MAX_VALUE_BYTES`] (16 MiB).
     pub max_value_bytes: usize,
+
+    /// V5-specific build knobs (block size override, sketch, radix
+    /// bucket target); ignored by other formats.
+    pub v5: V5Options,
 }
 
 /// Default for [`LoaderConfig::max_value_bytes`]: 16 MiB — well above
@@ -169,6 +174,7 @@ impl std::fmt::Debug for LoaderConfig {
             .field("progress_interval", &self.progress_interval)
             .field("progress_fn", &self.progress_fn.as_ref().map(|_| "<fn>"))
             .field("max_value_bytes", &self.max_value_bytes)
+            .field("v5", &self.v5)
             .finish()
     }
 }
@@ -185,6 +191,7 @@ impl Default for LoaderConfig {
             progress_interval: 100_000,
             progress_fn: None,
             max_value_bytes: DEFAULT_MAX_VALUE_BYTES,
+            v5: V5Options::default(),
         }
     }
 }
@@ -245,7 +252,7 @@ impl SnapshotLoader {
                 verify_seed: DEFAULT_VERIFY_SEED,
                 data_buf_bytes: config.data_buf_bytes,
                 spill_buf_bytes: config.spill_buf_bytes,
-                v5: Default::default(),
+                v5: config.v5.clone(),
             },
         )?;
         Ok(Self {
