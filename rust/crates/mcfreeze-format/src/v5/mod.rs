@@ -11,6 +11,7 @@
 
 pub mod block;
 pub mod builder;
+pub mod compress;
 pub mod fence;
 pub mod meta;
 pub(crate) mod reader;
@@ -55,7 +56,8 @@ mod tests {
             Ok(())
         });
         for &fp in fps {
-            asm.push_inline(fp, vfp_of(fp), &fp.to_le_bytes()).unwrap();
+            asm.push_inline(fp, vfp_of(fp), &fp.to_le_bytes(), false)
+                .unwrap();
         }
         let fences = asm.finish().unwrap();
         (blocks, fences)
@@ -145,15 +147,15 @@ mod tests {
         });
         let stub = Stub {
             heap_offset: 0x00DE_ADBE_EF00,
-            value_len: 1 << 20,
+            stored_len: 1 << 20,
             value_checksum: 0x1234_5678,
         };
-        asm.push_inline(fp(10, 1), 11, b"inline").unwrap();
-        asm.push_stub(fp(20, 1), 21, stub).unwrap();
+        asm.push_inline(fp(10, 1), 11, b"inline", false).unwrap();
+        asm.push_stub(fp(20, 1), 21, stub, false).unwrap();
         let fences = asm.finish().unwrap();
 
         match lookup(&blocks, &fences, fp(20, 1), 21) {
-            Some(Record::Stub { vfp, stub: s }) => {
+            Some(Record::Stub { vfp, stub: s, .. }) => {
                 assert_eq!(vfp, 21);
                 assert_eq!(s, stub);
             }

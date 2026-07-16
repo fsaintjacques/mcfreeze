@@ -140,7 +140,7 @@ struct V5Appender {
 
 impl PartitionAppender for V5Appender {
     fn append(&mut self, key: &[u8], fp: u64, value: &[u8]) -> Result<()> {
-        // Enforce the format's 31-bit value limit at scatter time: an
+        // Enforce the format's 30-bit value limit at scatter time: an
         // oversized value must fail here, not corrupt the u32 frame
         // length (≥ 4 GiB wraps) or surface hours later when build()
         // feeds the assembler.
@@ -591,7 +591,7 @@ fn build_partition(
             }
             let value = &buf[f.start..f.start + f.len];
             if value.len() as u32 <= plan.inline_threshold {
-                asm.push_inline(f.fp, f.vfp, value)?;
+                asm.push_inline(f.fp, f.vfp, value, false)?;
             } else {
                 heap_out.write_all(value)?;
                 asm.push_stub(
@@ -599,9 +599,10 @@ fn build_partition(
                     f.vfp,
                     Stub {
                         heap_offset,
-                        value_len: value.len() as u32,
+                        stored_len: value.len() as u32,
                         value_checksum: checksum32(value),
                     },
+                    false,
                 )?;
                 heap_offset += value.len() as u64;
                 n_stubs += 1;
@@ -871,7 +872,7 @@ mod tests {
                 Some(block::Record::Stub { stub, .. }) => {
                     let heap = fs::read(pdir.join(HEAP_BIN)).unwrap();
                     let start = stub.heap_offset as usize;
-                    let value = heap[start..start + stub.value_len as usize].to_vec();
+                    let value = heap[start..start + stub.stored_len as usize].to_vec();
                     assert_eq!(block::checksum32(&value), stub.value_checksum);
                     return Some(value);
                 }

@@ -19,7 +19,7 @@ use crate::{
     snapshot::GetOutcome,
     v5::{
         block::{self, checksum32, Record},
-        fence,
+        compress, fence,
         meta::Meta,
         sketch::{Sketch, FALSE_POSITIVE_RATE},
         verify_fingerprint,
@@ -194,18 +194,28 @@ impl SnapshotReader {
                 self.block_size as u32,
             )?;
             io = true;
+            // No codec is loaded yet (`meta.compression` lands with the
+            // dictionary lifecycle): `decode` passes raw records through
+            // and rejects any bit-30 record as corruption.
             match block::find(&buf, vfp)? {
-                Some(Record::Inline { value, .. }) => {
-                    return Ok(GetOutcome::Hit(value.to_vec()));
+                Some(Record::Inline {
+                    value, compressed, ..
+                }) => {
+                    let value = compress::decode(value, compressed, None)?;
+                    return Ok(GetOutcome::Hit(value.into_owned()));
                 }
-                Some(Record::Stub { stub, .. }) => {
-                    let value = pread(&part.heap, stub.heap_offset, stub.value_len)?;
-                    // Heap bytes are outside any block checksum; the
-                    // stub carries their own.
+                Some(Record::Stub {
+                    stub, compressed, ..
+                }) => {
+                    let value = pread(&part.heap, stub.heap_offset, stub.stored_len)?;
+                    // Checksums cover stored bytes, before any
+                    // decompression: heap bytes are outside any block
+                    // checksum, so the stub carries their own.
                     if checksum32(&value) != stub.value_checksum {
                         return Err(Error::ValueChecksumMismatch);
                     }
-                    return Ok(GetOutcome::Hit(value));
+                    let value = compress::decode(&value, compressed, None)?;
+                    return Ok(GetOutcome::Hit(value.into_owned()));
                 }
                 None => {}
             }
@@ -308,6 +318,29 @@ mod tests {
         assert!(matches!(
             snap.get(b"stubbed"),
             Err(Error::ValueChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    fn bit30_without_meta_compression_is_corruption() {
+        // A stray or future-foreign compressed record in a snapshot
+        // whose meta declares no codec must fail loudly, never decode
+        // as the stored bytes. Set bit 30 on the one record's
+        // length|flags field and re-seal the block so only this rule —
+        // not the block checksum — can reject it.
+        let dir = build(&[(b"k", b"v")], 1);
+        let path = partition_dir(dir.path(), 1, 0).join("blocks.bin");
+        let mut block = std::fs::read(&path).unwrap();
+        block[11] |= 0x40; // bit 30 of the u32 at offset 8, LE
+        let body = block.len() - 4;
+        let cksum = crate::v5::block::checksum32(&block[..body]);
+        block[body..].copy_from_slice(&cksum.to_le_bytes());
+        std::fs::write(&path, &block).unwrap();
+
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        assert!(matches!(
+            snap.get(b"k"),
+            Err(Error::CompressedValueWithoutCodec)
         ));
     }
 
