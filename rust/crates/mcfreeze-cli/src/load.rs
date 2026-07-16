@@ -46,6 +46,22 @@ pub struct LoadArgs {
     #[arg(long, default_value_t = mcfreeze_loader::DEFAULT_MAX_VALUE_BYTES)]
     pub max_value_bytes: usize,
 
+    // -- V5 build knobs (ignored by --format v4) ----------------------------
+    /// V5: override the auto-tuned block size in bytes.
+    /// Power of two, >= 4096.
+    #[arg(long)]
+    pub block_size: Option<u32>,
+
+    /// V5: disable the per-partition binary-fuse sketch (on by default;
+    /// costs ~9 bits/key of serving RAM, makes misses zero-I/O).
+    #[arg(long)]
+    pub no_sketch: bool,
+
+    /// V5: radix bucket target bytes for the build sort (default 128 MiB).
+    /// Peak build RAM scales with index-parallelism x bucket-bytes.
+    #[arg(long)]
+    pub bucket_bytes: Option<u64>,
+
     /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
@@ -173,6 +189,7 @@ impl Pipeline {
         partitions: u32,
         index_parallelism: usize,
         max_value_bytes: usize,
+        v5: mcfreeze_loader::V5Options,
     ) -> Result<()> {
         let Self {
             sources,
@@ -205,6 +222,7 @@ impl Pipeline {
                         partitions,
                         index_parallelism,
                         max_value_bytes,
+                        v5: v5.clone(),
                         progress_secs,
                         estimated_rows,
                     },
@@ -231,6 +249,7 @@ impl Pipeline {
                         partitions,
                         index_parallelism,
                         max_value_bytes,
+                        v5: v5.clone(),
                         progress_secs,
                         estimated_rows,
                     },
@@ -290,7 +309,24 @@ impl Pipeline {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Assemble the V5 build knobs from CLI flags.
+fn v5_options(args: &LoadArgs) -> mcfreeze_loader::V5Options {
+    mcfreeze_loader::V5Options {
+        block_size: args.block_size,
+        bucket_bytes: args.bucket_bytes,
+        sketch: !args.no_sketch,
+    }
+}
+
 pub async fn run(mut args: LoadArgs) -> Result<()> {
+    if args.format != mcfreeze_format::FormatId::V5
+        && (args.block_size.is_some() || args.no_sketch || args.bucket_bytes.is_some())
+    {
+        tracing::warn!(
+            format = %args.format,
+            "--block-size/--no-sketch/--bucket-bytes are V5 build knobs; ignored by this format"
+        );
+    }
     // In config mode, the WorkerConfig is authoritative for output,
     // partitions, and index_parallelism. Parse it once and pass it through
     // to build_pipeline to avoid double-reading the file.
@@ -340,6 +376,7 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
     if args.download_benchmark {
         pipeline.benchmark().await
     } else {
+        let v5 = v5_options(&args);
         let output = args.output.context("--output is required")?;
         pipeline
             .load(
@@ -348,6 +385,7 @@ pub async fn run(mut args: LoadArgs) -> Result<()> {
                 args.partitions,
                 args.index_parallelism,
                 args.max_value_bytes,
+                v5,
             )
             .await
     }
@@ -375,6 +413,7 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         format: args.format,
         n_partitions: args.partitions,
         index_parallelism: args.index_parallelism,
+        v5: v5_options(args),
         ..LoaderConfig::default()
     };
     let loader =
@@ -623,6 +662,7 @@ struct LoadParams {
     partitions: u32,
     index_parallelism: usize,
     max_value_bytes: usize,
+    v5: mcfreeze_loader::V5Options,
     progress_secs: u64,
     estimated_rows: Option<u64>,
 }
@@ -637,6 +677,7 @@ where
         partitions,
         index_parallelism,
         max_value_bytes,
+        v5,
         progress_secs,
         estimated_rows,
     } = params;
@@ -647,6 +688,7 @@ where
         n_partitions: partitions,
         index_parallelism,
         max_value_bytes,
+        v5,
         progress_fn: Some(scatter_reporter.updater()),
         progress_interval: 0,
         ..LoaderConfig::default()

@@ -29,11 +29,18 @@ pub fn run(args: GetArgs) -> Result<()> {
 
     match reader.get(args.key.as_bytes()).context("lookup failed")? {
         GetOutcome::Miss { io: false } => {
-            eprintln!("not found");
+            eprintln!("not found (no I/O: absence concluded in RAM)");
             std::process::exit(1);
         }
         GetOutcome::Miss { io: true } => {
-            eprintln!("not found (paid I/O: fingerprint/filter false positive)");
+            if reader.expected_miss_io_rate() >= 1.0 {
+                // Paid misses are this snapshot's norm (no filter).
+                eprintln!("not found (paid 1+ preads: expected, snapshot has no miss filter)");
+            } else {
+                eprintln!(
+                    "not found (paid 1+ preads: sketch false positive or fingerprint collision)"
+                );
+            }
             std::process::exit(1);
         }
         GetOutcome::Hit(bytes) => {
