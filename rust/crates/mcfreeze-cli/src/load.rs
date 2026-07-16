@@ -429,14 +429,18 @@ async fn run_index_only(args: &LoadArgs) -> Result<()> {
         .clone()
         .context("--output is required for index-only resume")?;
 
-    // block_size and sketch are pinned in the snapshot's v5.plan the
-    // moment plan() first runs; on a resume the flags cannot change the
-    // outcome and silently no-op — say so instead of surprising the
-    // operator (--bucket-bytes is a per-run RAM knob and still applies).
-    if args.block_size.is_some() || args.no_sketch {
+    // block_size and sketch are pinned in v5.plan the moment plan()
+    // first runs. The common index-only resume (scatter finished, index
+    // never started) has no plan yet and the flags DO apply — only warn
+    // when a pinned plan actually exists and will override them
+    // (--bucket-bytes is a per-run RAM knob and always applies).
+    if args.format == mcfreeze_format::FormatId::V5
+        && output.join("v5.plan").exists()
+        && (args.block_size.is_some() || args.no_sketch)
+    {
         tracing::warn!(
-            "resuming an existing build: --block-size/--no-sketch are pinned by the \
-             snapshot's v5.plan from the original run and will not change the output"
+            "resuming a build whose v5.plan is already written: --block-size/--no-sketch \
+             are pinned by the original run and will not change the output"
         );
     }
 

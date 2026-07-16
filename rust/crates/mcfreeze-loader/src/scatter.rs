@@ -8,9 +8,40 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use mcfreeze_format::{builder::PartitionAppender, index::fingerprint, meta::Layout};
+use mcfreeze_format::{
+    builder::{MarkerMode, PartitionAppender},
+    index::fingerprint,
+    meta::Layout,
+};
 
 use crate::{error::LoaderError, source::KvBatch};
+
+/// Publish a loader sentinel (`scatter.done`) atomically. Presence is a
+/// completion signal, so the file must never exist truncated: POSIX
+/// gets write + fsync + rename; object-store FUSE mounts get plain
+/// create-write-close (atomic there; rename is not).
+pub(crate) fn write_sentinel(
+    path: &std::path::Path,
+    json: &str,
+    mode: MarkerMode,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let publish = |target: &std::path::Path| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(target)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()
+    };
+    match mode {
+        MarkerMode::Rename => {
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(".tmp");
+            let tmp = std::path::PathBuf::from(tmp);
+            publish(&tmp)?;
+            std::fs::rename(&tmp, path)
+        }
+        MarkerMode::DirectWrite => publish(path),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -239,6 +270,7 @@ pub struct ScatterPhase {
     senders: Vec<mpsc::Sender<PartitionBatch>>,
     handles: Vec<JoinHandle<Result<PartitionStats, LoaderError>>>,
     max_value_bytes: usize,
+    marker_mode: MarkerMode,
 }
 
 impl ScatterPhase {
@@ -249,6 +281,7 @@ impl ScatterPhase {
         appenders: Vec<Box<dyn PartitionAppender>>,
         channel_capacity: usize,
         max_value_bytes: usize,
+        marker_mode: MarkerMode,
     ) -> Result<Self, LoaderError> {
         let n = layout.n_partitions as usize;
         assert_eq!(appenders.len(), n);
@@ -271,6 +304,7 @@ impl ScatterPhase {
             senders,
             handles,
             max_value_bytes,
+            marker_mode,
         })
     }
 
@@ -354,7 +388,7 @@ impl ScatterPhase {
         };
         let json = serde_json::to_string_pretty(&done)
             .map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
-        tokio::fs::write(self.root.join("scatter.done"), json).await?;
+        write_sentinel(&self.root.join("scatter.done"), &json, self.marker_mode)?;
 
         Ok(ScatterStats { n_keys, data_bytes })
     }
@@ -440,6 +474,7 @@ mod tests {
             writers,
             4,
             usize::MAX,
+            MarkerMode::Rename,
         )
         .unwrap();
         let batch = VecBatch(
@@ -474,6 +509,7 @@ mod tests {
             make_appenders(dir.path(), 1),
             4,
             8, // max_value_bytes
+            MarkerMode::Rename,
         )
         .unwrap();
         let mut fanout = phase.fanout();
@@ -567,6 +603,7 @@ mod tests {
             make_appenders(dir.path(), 1),
             4,
             usize::MAX,
+            MarkerMode::Rename,
         )
         .unwrap();
         let mut fanout = phase.fanout();
@@ -604,6 +641,7 @@ mod tests {
             make_appenders(dir.path(), 1),
             8,
             usize::MAX,
+            MarkerMode::Rename,
         )
         .unwrap();
         let mut f0 = phase.fanout();
@@ -646,6 +684,7 @@ mod tests {
             make_appenders(dir.path(), 1),
             1,
             usize::MAX,
+            MarkerMode::Rename,
         )
         .unwrap();
         let mut fanout = phase.fanout();

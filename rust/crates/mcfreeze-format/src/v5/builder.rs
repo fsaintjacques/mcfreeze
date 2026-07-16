@@ -163,17 +163,23 @@ impl PartitionAppender for V5Appender {
         Ok(())
     }
 
-    fn finish(mut self: Box<Self>) -> Result<()> {
-        self.out.flush()?;
+    fn finish(self: Box<Self>) -> Result<()> {
+        let this = *self;
+        // arrival.bin must be durable and closed before arrival.stats
+        // asserts scatter completed: a crash between the two must read
+        // as "not scattered", never as a marker over a truncated log —
+        // parse_frames stops cleanly at a frame boundary, so a lost
+        // tail would otherwise become a silently short partition.
+        sync_and_close(this.out)?;
         let stats = ArrivalStats {
-            n_keys: self.n_keys,
-            data_bytes: self.data_bytes,
-            hist: self.hist,
+            n_keys: this.n_keys,
+            data_bytes: this.data_bytes,
+            hist: this.hist,
         };
         write_marker(
-            &self.dir.join(ARRIVAL_STATS),
+            &this.dir.join(ARRIVAL_STATS),
             &serde_json::to_string(&stats)?,
-            self.marker_mode,
+            this.marker_mode,
         )
     }
 }
@@ -608,14 +614,19 @@ fn build_partition(
     }
 
     let fences = asm.finish()?;
-    blocks_out.flush()?;
-    heap_out.flush()?;
+    // Durability ordering: every byte build.done attests must be synced
+    // and closed BEFORE the marker publishes. A marker outliving a
+    // truncated data file is exactly the torn state markers exist to
+    // prevent — and on object-store FUSE mounts, close is what uploads
+    // the object at all.
+    sync_and_close(blocks_out)?;
+    sync_and_close(heap_out)?;
 
     let mut fence_bytes = Vec::with_capacity(fences.len() * 4);
     for f in &fences {
         fence_bytes.extend_from_slice(&f.to_le_bytes());
     }
-    fs::write(dir.join(FENCES_BIN), fence_bytes)?;
+    write_data_file(&dir.join(FENCES_BIN), &fence_bytes)?;
 
     // Empty partitions get no sketch: empty fences already resolve
     // every lookup to a zero-I/O miss, and the reader skips loading.
@@ -624,7 +635,7 @@ fn build_partition(
         sketch_fps.dedup();
         let bytes = crate::v5::sketch::build(&sketch_fps)?;
         sketch_bytes = bytes.len() as u64;
-        fs::write(dir.join(SKETCH_BIN), bytes)?;
+        write_data_file(&dir.join(SKETCH_BIN), &bytes)?;
     }
 
     let done = PartitionBuildDone {
@@ -641,6 +652,23 @@ fn build_partition(
     write_marker(&done_path, &serde_json::to_string(&done)?, marker_mode)?;
     sweep_partition_transients(dir);
     Ok(done)
+}
+
+/// Flush, fsync, and close a buffered data stream. Must run before the
+/// marker that attests the file is published.
+fn sync_and_close(out: BufWriter<File>) -> Result<()> {
+    let file = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Write a whole data file and fsync it before returning, so a marker
+/// published afterwards never attests bytes the kernel still holds.
+fn write_data_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut f = File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
 }
 
 /// Radix bucket count for a partition: enough buckets to hit the target

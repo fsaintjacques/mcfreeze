@@ -10,13 +10,22 @@
 //! encodes its behavior.
 
 use mcfreeze_format::{
-    builder_for, index::fingerprint, meta::Layout, meta::DEFAULT_VERIFY_SEED, BuilderConfig,
-    FormatId, GetOutcome, Snapshot,
+    builder::V5Options, builder_for, index::fingerprint, meta::Layout, meta::DEFAULT_VERIFY_SEED,
+    BuilderConfig, FormatId, GetOutcome, Snapshot,
 };
 use tempfile::TempDir;
 
 /// Build a snapshot via the production write path.
 fn build_snapshot(format: FormatId, pairs: &[(&[u8], &[u8])], n_partitions: u32) -> TempDir {
+    build_snapshot_with(format, pairs, n_partitions, V5Options::default())
+}
+
+fn build_snapshot_with(
+    format: FormatId,
+    pairs: &[(&[u8], &[u8])],
+    n_partitions: u32,
+    v5: V5Options,
+) -> TempDir {
     let dir = TempDir::new().unwrap();
     let builder = builder_for(
         format,
@@ -26,7 +35,7 @@ fn build_snapshot(format: FormatId, pairs: &[(&[u8], &[u8])], n_partitions: u32)
             verify_seed: DEFAULT_VERIFY_SEED,
             data_buf_bytes: 1024 * 1024,
             spill_buf_bytes: 4096,
-            v5: Default::default(),
+            v5,
         },
     )
     .unwrap();
@@ -145,6 +154,42 @@ fn conformance(format: FormatId) {
     match snap.get(b"present") {
         Err(_) => {}
         Ok(o) => panic!("truncated data must error for a present key, got {o:?}"),
+    }
+
+    // --- paid-miss cost contract ---
+    // Every format in ALL currently answers absent keys without I/O
+    // (V4 by construction, V5 via the default-on sketch), so the paid
+    // branch above never runs on defaults. Exercise it through the one
+    // filter-less configuration: sketchless V5, where nearly every miss
+    // scans a block. Paid misses must (a) report io: true and (b) fail
+    // loudly on truncated data, never fabricate an answer.
+    if format == FormatId::V5 {
+        let dir = build_snapshot_with(
+            format,
+            &[(b"present", b"yes")],
+            1,
+            V5Options {
+                sketch: false,
+                ..Default::default()
+            },
+        );
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        // Find an absent key whose lookup pays I/O (only fingerprints
+        // below the partition's first fence miss for free).
+        let paid_key = (0..1000)
+            .map(|i| format!("absent-{i}"))
+            .find(|k| {
+                matches!(
+                    snap.get(k.as_bytes()).unwrap(),
+                    GetOutcome::Miss { io: true }
+                )
+            })
+            .expect("sketchless V5 must produce a paid miss");
+        truncate_data_files(dir.path());
+        assert!(
+            snap.get(paid_key.as_bytes()).is_err(),
+            "paid miss on truncated data must error"
+        );
     }
 }
 
