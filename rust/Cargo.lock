@@ -1789,6 +1789,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "xorf",
  "xxhash-rust",
 ]
 
@@ -3761,6 +3762,16 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xorf"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45e820b97864028eb5069aabf2d90ad7bc279a0ed0292f1306451ce4b91adc13"
+dependencies = [
+ "libm",
+ "rand",
+]
 
 [[package]]
 name = "xxhash-rust"

@@ -62,6 +62,11 @@ impl Meta {
             return Err(Error::UnsupportedHashAlgorithm(self.hash_algorithm.clone()));
         }
         validate_block_size(self.block_size)?;
+        if let Some(s) = &self.sketch {
+            if s.kind != crate::v5::sketch::KIND {
+                return Err(Error::UnsupportedSketchKind(s.kind.clone()));
+            }
+        }
         // Bound n_blocks so `n_blocks × block_size` (and a fortiori
         // `n_blocks × 4` for fences.bin) cannot overflow u64: a corrupt
         // meta.json must fail here with a typed error, not wrap the

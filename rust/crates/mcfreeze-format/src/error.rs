@@ -42,6 +42,15 @@ pub enum Error {
     #[error("heap value checksum mismatch")]
     ValueChecksumMismatch,
 
+    #[error("sketch construction failed: {0}")]
+    SketchBuild(&'static str),
+
+    #[error("corrupt sketch: {0}")]
+    CorruptSketch(&'static str),
+
+    #[error("unsupported sketch kind: {0:?}")]
+    UnsupportedSketchKind(String),
+
     #[error("partition {partition}: {file} is {got} bytes, expected {expected}")]
     SnapshotFileSize {
         partition: usize,

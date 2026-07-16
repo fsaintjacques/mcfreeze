@@ -9,7 +9,7 @@
 //! there is no populate step and nothing for the kernel to evict from
 //! under the reader; only `blocks.bin`/`heap.bin` fds stay open.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::Path;
 
 use crate::{
@@ -21,6 +21,7 @@ use crate::{
         block::{self, checksum32, Record},
         fence,
         meta::Meta,
+        sketch::{Sketch, FALSE_POSITIVE_RATE},
         verify_fingerprint,
     },
     Error, Result,
@@ -88,6 +89,8 @@ struct Partition {
     fences: FenceArray,
     blocks: File,
     heap: File,
+    /// Present iff `meta.sketch` is set and the partition is non-empty.
+    sketch: Option<Sketch>,
 }
 
 pub(crate) struct SnapshotReader {
@@ -95,6 +98,7 @@ pub(crate) struct SnapshotReader {
     layout: Layout,
     verify_seed: u64,
     block_size: usize,
+    has_sketch: bool,
 }
 
 impl SnapshotReader {
@@ -124,10 +128,20 @@ impl SnapshotReader {
                 });
             }
 
+            // Sketch corruption is a false-negative machine (a present
+            // key reported absent), so a sketch that exists but fails
+            // verification fails the open — never a degraded filter.
+            let sketch = if meta.sketch.is_some() && pm.n_blocks > 0 {
+                Some(Sketch::parse(fs::read(dir.join("sketch.bin"))?)?)
+            } else {
+                None
+            };
+
             partitions.push(Partition {
                 fences,
                 blocks,
                 heap: File::open(dir.join("heap.bin"))?,
+                sketch,
             });
         }
 
@@ -136,7 +150,18 @@ impl SnapshotReader {
             layout,
             verify_seed: meta.verify_seed,
             block_size: meta.block_size as usize,
+            has_sketch: meta.sketch.is_some(),
         })
+    }
+
+    /// Expected fraction of misses that pay I/O: the sketch's
+    /// false-positive rate when enabled, ≈1 otherwise.
+    pub fn expected_miss_io_rate(&self) -> f64 {
+        if self.has_sketch {
+            FALSE_POSITIVE_RATE
+        } else {
+            1.0
+        }
     }
 
     /// Look up `key`. `Miss { io: false }` only when the fence search
@@ -146,6 +171,13 @@ impl SnapshotReader {
         let fp = fingerprint(key);
         let vfp = verify_fingerprint(key, self.verify_seed);
         let part = &self.partitions[self.layout.partition_of(fp)];
+
+        // Sketch rejection: absence concluded in RAM, zero preads.
+        if let Some(sketch) = &part.sketch {
+            if !sketch.contains(fp) {
+                return Ok(GetOutcome::Miss { io: false });
+            }
+        }
         let fences = part.fences.as_slice();
 
         let mut io = false;
@@ -191,6 +223,10 @@ mod tests {
 
     /// Build a complete V5 snapshot through the production write path.
     fn build(pairs: &[(&[u8], &[u8])], n: u32) -> TempDir {
+        build_opts(pairs, n, false)
+    }
+
+    fn build_opts(pairs: &[(&[u8], &[u8])], n: u32, sketch: bool) -> TempDir {
         let dir = TempDir::new().unwrap();
         let builder = builder_for(
             FormatId::V5,
@@ -202,6 +238,7 @@ mod tests {
                 spill_buf_bytes: 4096,
                 v5: V5Options {
                     block_size: Some(4096),
+                    sketch,
                     ..Default::default()
                 },
             },
@@ -341,5 +378,83 @@ mod tests {
         let dir = build(&[(b"k", b"v")], 1);
         let snap = Snapshot::open_path(dir.path()).unwrap();
         assert_eq!(snap.expected_miss_io_rate(), 1.0);
+    }
+
+    #[test]
+    fn sketch_restores_free_misses_without_false_negatives() {
+        let vals: Vec<(Vec<u8>, Vec<u8>)> = (0..2000)
+            .map(|i| {
+                (
+                    format!("key-{i}").into_bytes(),
+                    format!("val-{i}").into_bytes(),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&[u8], &[u8])> = vals.iter().map(|(k, v)| (&k[..], &v[..])).collect();
+        let dir = build_opts(&pairs, 2, true);
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        assert_eq!(
+            snap.expected_miss_io_rate(),
+            crate::v5::sketch::FALSE_POSITIVE_RATE
+        );
+
+        // No false negatives: every present key still hits.
+        for (k, v) in &vals {
+            match snap.get(k).unwrap() {
+                GetOutcome::Hit(got) => assert_eq!(&got, v),
+                other => panic!("expected hit for {k:?}, got {other:?}"),
+            }
+        }
+
+        // Misses are overwhelmingly free again: over 1000 absent keys,
+        // expect ~4 sketch false positives (ε ≈ 0.39%).
+        let paid = (0..1000)
+            .filter(
+                |i| match snap.get(format!("absent-{i}").as_bytes()).unwrap() {
+                    GetOutcome::Miss { io } => io,
+                    GetOutcome::Hit(_) => panic!("absent key hit"),
+                },
+            )
+            .count();
+        assert!(
+            paid < 30,
+            "sketch not rejecting misses: {paid}/1000 paid I/O"
+        );
+    }
+
+    #[test]
+    fn sketch_written_and_recorded_in_meta() {
+        let dir = build_opts(&[(b"k", b"v")], 1, true);
+        assert!(partition_dir(dir.path(), 1, 0).join("sketch.bin").exists());
+        let meta: crate::v5::meta::Meta =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta.sketch.unwrap().kind, "binary_fuse8");
+    }
+
+    #[test]
+    fn corrupt_sketch_fails_open() {
+        let dir = build_opts(&[(b"k", b"v")], 1, true);
+        let path = partition_dir(dir.path(), 1, 0).join("sketch.bin");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::CorruptSketch(_))
+        ));
+    }
+
+    #[test]
+    fn sketch_with_empty_partition_opens_and_misses_free() {
+        // 2 partitions, 1 key: one partition is empty and has no
+        // sketch.bin; open must not demand one.
+        let dir = build_opts(&[(b"only", b"v")], 2, true);
+        let snap = Snapshot::open_path(dir.path()).unwrap();
+        match snap.get(b"only").unwrap() {
+            GetOutcome::Hit(v) => assert_eq!(v, b"v"),
+            other => panic!("expected hit, got {other:?}"),
+        }
     }
 }
