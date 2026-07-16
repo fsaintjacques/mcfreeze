@@ -33,12 +33,21 @@ pub fn run(args: GetArgs) -> Result<()> {
             std::process::exit(1);
         }
         GetOutcome::Miss { io: true } => {
-            if reader.expected_miss_io_rate() >= 1.0 {
+            let rate = reader.expected_miss_io_rate();
+            if rate >= 1.0 {
                 // Paid misses are this snapshot's norm (no filter).
                 eprintln!("not found (paid 1+ preads: expected, snapshot has no miss filter)");
-            } else {
+            } else if rate > 0.0 {
                 eprintln!(
-                    "not found (paid 1+ preads: sketch false positive or fingerprint collision)"
+                    "not found (paid 1+ preads: sketch false positive, expected for ~{:.2}% of misses)",
+                    rate * 100.0
+                );
+            } else {
+                // V4's expected rate is ~0: a paid miss is a
+                // compact-fingerprint collision — an anomaly, not noise.
+                eprintln!(
+                    "not found (paid 1+ preads: fingerprint collision — unexpected, \
+                     investigate if sustained)"
                 );
             }
             std::process::exit(1);
