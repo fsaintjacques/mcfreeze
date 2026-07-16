@@ -51,8 +51,13 @@ pub struct Sketch {
 }
 
 impl Sketch {
-    /// Verify the checksum and adopt the buffer. Corruption is an
-    /// error at open — never a silently degraded filter.
+    /// Verify the checksum and the descriptor's internal consistency,
+    /// then adopt the buffer. Corruption is an error at open — never a
+    /// silently degraded filter, and never a panic: `contains` indexes
+    /// the fingerprint slice with values derived purely from the
+    /// descriptor, so a checksum-valid but inconsistent file (writer
+    /// bug, crafted input) must be rejected here, not out-of-bounds on
+    /// the lookup hot path.
     pub fn parse(buf: Vec<u8>) -> Result<Self> {
         if buf.len() < DESCRIPTOR_LEN + CHECKSUM_LEN {
             return Err(Error::CorruptSketch("sketch shorter than its header"));
@@ -61,6 +66,27 @@ impl Sketch {
         let stored = u32::from_le_bytes(buf[body..].try_into().unwrap());
         if checksum32(&buf[..body]) != stored {
             return Err(Error::CorruptSketch("sketch checksum mismatch"));
+        }
+
+        // Descriptor layout (xorf DMA form): [8B seed][4B segment_length]
+        // [4B segment_length_mask][4B segment_count_length]. The bounds
+        // proof for `contains`'s three indices requires: segment_length
+        // a non-zero power of two, mask = segment_length − 1,
+        // segment_count_length a multiple of segment_length, and
+        // fingerprints.len() == segment_count_length + 2 × segment_length
+        // (xorf builds arrays as (segment_count + arity − 1) × length,
+        // arity 3).
+        let sl = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        let mask = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        let scl = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+        let n_fingerprints = (body - DESCRIPTOR_LEN) as u64;
+        if sl == 0 || !sl.is_power_of_two() || mask != sl - 1 {
+            return Err(Error::CorruptSketch("invalid sketch segment descriptor"));
+        }
+        if scl % sl != 0 || n_fingerprints != scl as u64 + 2 * sl as u64 {
+            return Err(Error::CorruptSketch(
+                "sketch descriptor/fingerprint length mismatch",
+            ));
         }
         Ok(Self { buf })
     }
@@ -113,6 +139,38 @@ mod tests {
             (8.0..11.5).contains(&bits_per_key),
             "unexpected size: {bits_per_key} bits/key"
         );
+    }
+
+    #[test]
+    fn checksum_valid_but_inconsistent_descriptor_is_rejected() {
+        // A crafted (or writer-bug) sketch whose checksum passes but
+        // whose descriptor disagrees with the fingerprint length must
+        // fail parse, not index out of bounds inside contains().
+        let good = build(&fps(1000)).unwrap();
+
+        // Truncate one fingerprint byte and re-seal the checksum.
+        let mut short = good.clone();
+        short.truncate(good.len() - CHECKSUM_LEN - 1);
+        let ck = checksum32(&short);
+        short.extend_from_slice(&ck.to_le_bytes());
+        assert!(matches!(
+            Sketch::parse(short),
+            Err(Error::CorruptSketch(
+                "sketch descriptor/fingerprint length mismatch"
+            ))
+        ));
+
+        // Zero segment_length with a re-sealed checksum.
+        let mut zeroed = good.clone();
+        zeroed[8..12].copy_from_slice(&0u32.to_le_bytes());
+        let body = zeroed.len() - CHECKSUM_LEN;
+        let ck = checksum32(&zeroed[..body]);
+        let n = zeroed.len();
+        zeroed[n - CHECKSUM_LEN..].copy_from_slice(&ck.to_le_bytes());
+        assert!(matches!(
+            Sketch::parse(zeroed),
+            Err(Error::CorruptSketch("invalid sketch segment descriptor"))
+        ));
     }
 
     #[test]

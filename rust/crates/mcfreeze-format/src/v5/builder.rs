@@ -70,11 +70,16 @@ struct ArrivalStats {
     hist: Vec<u64>,
 }
 
-/// The persisted `plan()` decision (`v5.plan`).
+/// The persisted `plan()` decision (`v5.plan`). Everything here is
+/// immutable for the snapshot once the first partition builds: a
+/// resumed process's own configuration must not be able to produce a
+/// mixed partition set (e.g. some partitions built with a sketch and
+/// some without — an unopenable snapshot).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Plan {
     block_size: u32,
     inline_threshold: u32,
+    sketch: bool,
 }
 
 /// Per-partition build result (`build.done`). Written before the
@@ -239,6 +244,7 @@ impl V5Builder {
             let plan = Plan {
                 block_size,
                 inline_threshold: block_size / 2,
+                sketch: self.sketch,
             };
             write_marker(&path, &serde_json::to_string(&plan)?)?;
             plan
@@ -414,7 +420,6 @@ impl FormatBuilder for V5Builder {
                         plan,
                         self.bucket_bytes,
                         self.data_buf_bytes,
-                        self.sketch,
                     )?;
                     if let Some(ref f) = cb {
                         f(1, 0);
@@ -434,7 +439,7 @@ impl FormatBuilder for V5Builder {
             blocks_bytes: partitions.iter().map(|p| p.blocks_bytes).sum(),
             heap_bytes: partitions.iter().map(|p| p.heap_bytes).sum(),
             fences_bytes: partitions.iter().map(|p| p.n_blocks * 4).sum(),
-            sketch: self.sketch,
+            sketch: plan.sketch,
             sketch_bytes: partitions.iter().map(|p| p.sketch_bytes).sum(),
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
@@ -488,7 +493,6 @@ fn build_partition(
     plan: Plan,
     bucket_bytes: u64,
     buf_bytes: usize,
-    sketch: bool,
 ) -> Result<PartitionBuildDone> {
     let done_path = dir.join(BUILD_DONE);
     if done_path.exists() {
@@ -537,7 +541,10 @@ fn build_partition(
     // Sketch input: every fp of the partition, accumulated across the
     // bucket passes (binary fuse needs the full set). Arrives sorted,
     // so adjacent dedup below satisfies the filter's uniqueness
-    // requirement. ~8 B/key of transient build RAM when enabled.
+    // requirement. Transient build RAM when enabled: 8 B/key for this
+    // vector plus ~10–15 B/key of xorf construction working memory —
+    // per building partition, independent of `bucket_bytes`.
+    let sketch = plan.sketch;
     let mut sketch_fps: Vec<u64> = Vec::new();
     let mut asm = BlockAssembler::new(plan.block_size as usize, |b: &[u8]| {
         blocks_out.write_all(b).map_err(Error::from)
@@ -1026,6 +1033,7 @@ mod tests {
             serde_json::to_string(&Plan {
                 block_size: 4096,
                 inline_threshold: 2048,
+                sketch: true,
             })
             .unwrap(),
         )
@@ -1129,6 +1137,42 @@ mod tests {
             v5: opts(5000),
         });
         assert!(matches!(err, Err(Error::InvalidBlockSize(5000))));
+    }
+
+    #[test]
+    fn sketch_decision_is_stable_across_resume() {
+        // A sketchless build interrupted after plan() and resumed by a
+        // process configured with the (default-on) sketch must stay
+        // sketchless: the pinned plan wins, exactly like block_size.
+        // Without the pin, a mixed partition set (some with sketch.bin,
+        // some without) under meta.sketch = Some is unopenable.
+        let dir = TempDir::new().unwrap();
+        let b1 = make_builder(
+            dir.path(),
+            1,
+            V5Options {
+                block_size: Some(4096),
+                sketch: false,
+                ..Default::default()
+            },
+        );
+        scatter(&b1, &pairs(50, 100), 1);
+        b1.plan().unwrap();
+        drop(b1);
+
+        let b2 = make_builder(dir.path(), 1, opts(4096)); // sketch on by default
+        b2.plan().unwrap();
+        b2.build(1, None).unwrap();
+
+        assert!(
+            !partition_dir(dir.path(), 1, 0).join(SKETCH_BIN).exists(),
+            "pinned sketchless plan must win over the resuming config"
+        );
+        let guard = b2.done.lock().unwrap();
+        assert!(
+            !guard.as_ref().unwrap().sketch,
+            "sentinel must record what was built"
+        );
     }
 
     #[test]

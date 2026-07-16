@@ -93,7 +93,10 @@ pub struct V5Options {
     /// Override the auto-tuned `block_size`. Power of two, ≥ 4 KiB.
     pub block_size: Option<u32>,
     /// Target radix bucket size in bytes (default 128 MiB). Peak build
-    /// RAM ≈ `index_parallelism × bucket_bytes`.
+    /// RAM ≈ `index_parallelism × (bucket_bytes + sketch build cost)`,
+    /// where the sketch (when on, the default) transiently needs
+    /// ~20 B × keys-per-partition — the filter is constructed from the
+    /// partition's full fingerprint set, independent of `bucket_bytes`.
     pub bucket_bytes: Option<u64>,
     /// Build a per-partition binary-fuse-8 sketch (~9 bits/key,
     /// < 0.4% false-positive rate) restoring zero-I/O misses.
