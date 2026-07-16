@@ -329,6 +329,9 @@ fn v5_options(args: &LoadArgs) -> mcfreeze_loader::V5Options {
         } else {
             mcfreeze_loader::MarkerMode::Rename
         },
+        // --compression lands with the CLI stage of the V5 compression
+        // plan; until then loads build uncompressed.
+        ..Default::default()
     }
 }
 

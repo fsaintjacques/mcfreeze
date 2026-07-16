@@ -62,6 +62,15 @@ pub enum Error {
     #[error("compression dictionary training failed: {0}")]
     DictTrain(#[source] std::io::Error),
 
+    #[error(
+        "v5.plan pins dictionary checksum {expected:#010x} but dict.bin is unreadable: {source} \
+         (delete v5.plan and dict.bin to retrain from scratch)"
+    )]
+    DictMissing {
+        expected: u32,
+        source: std::io::Error,
+    },
+
     #[error("zstd context setup failed: {0}")]
     Zstd(#[source] std::io::Error),
 

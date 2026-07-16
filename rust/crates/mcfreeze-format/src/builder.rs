@@ -104,6 +104,13 @@ pub struct V5Options {
     /// depend on; disable only for hit-dominated workloads where the
     /// sketch RAM buys nothing.
     pub sketch: bool,
+    /// Transparent value compression (`doc/plan/V5_COMPRESSION.md`).
+    /// A plan-time decision, pinned in `v5.plan` like `block_size`;
+    /// default `none` — measure first.
+    pub compression: v5::compress::Mode,
+    /// Values shorter than this store raw without a compression
+    /// attempt (build-CPU guard; writer-side only).
+    pub min_compress_len: u32,
     /// How completion markers are published (see [`MarkerMode`]).
     pub marker_mode: MarkerMode,
 }
@@ -114,6 +121,8 @@ impl Default for V5Options {
             block_size: None,
             bucket_bytes: None,
             sketch: true,
+            compression: v5::compress::Mode::None,
+            min_compress_len: v5::compress::DEFAULT_MIN_COMPRESS_LEN as u32,
             marker_mode: MarkerMode::Rename,
         }
     }
