@@ -88,13 +88,29 @@ pub struct BuilderConfig {
 }
 
 /// V5-specific construction knobs (`doc/plan/FORMAT_V5_SPARSE_INDEX.md`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct V5Options {
     /// Override the auto-tuned `block_size`. Power of two, ≥ 4 KiB.
     pub block_size: Option<u32>,
     /// Target radix bucket size in bytes (default 128 MiB). Peak build
     /// RAM ≈ `index_parallelism × bucket_bytes`.
     pub bucket_bytes: Option<u64>,
+    /// Build a per-partition binary-fuse-8 sketch (~9 bits/key,
+    /// < 0.4% false-positive rate) restoring zero-I/O misses.
+    /// **On by default**: free misses are the V4 behavior operators
+    /// depend on; disable only for hit-dominated workloads where the
+    /// sketch RAM buys nothing.
+    pub sketch: bool,
+}
+
+impl Default for V5Options {
+    fn default() -> Self {
+        Self {
+            block_size: None,
+            bucket_bytes: None,
+            sketch: true,
+        }
+    }
 }
 
 /// Instantiate the builder for `format`. The single dispatch point on the

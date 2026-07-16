@@ -103,15 +103,15 @@ impl Snapshot {
 
     /// Expected fraction of misses that pay I/O for this snapshot's
     /// format and configuration. V4: ≈0 (32-bit fingerprint collisions
-    /// only). V5 without a sketch: ≈1 (nearly every miss scans a block;
-    /// only a fingerprint below the partition's first fence is free). A
-    /// future V5 sketch lowers this to the filter's false-positive rate.
-    /// Exported as `mcf_expected_miss_io_rate`; dashboards compare the
-    /// observed `miss_io / (miss + miss_io)` ratio against it.
+    /// only). V5 without a sketch: ≈1 (nearly every miss scans a
+    /// block); with the binary-fuse-8 sketch: its ~0.4% false-positive
+    /// rate. Exported as `mcf_expected_miss_io_rate`; dashboards
+    /// compare the observed `miss_io / (miss + miss_io)` ratio against
+    /// it.
     pub fn expected_miss_io_rate(&self) -> f64 {
         match &self.inner {
             Inner::V4(_) => 0.0,
-            Inner::V5(_) => 1.0,
+            Inner::V5(r) => r.expected_miss_io_rate(),
         }
     }
 }

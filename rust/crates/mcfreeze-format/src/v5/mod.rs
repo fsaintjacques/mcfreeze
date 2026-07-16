@@ -14,6 +14,7 @@ pub mod builder;
 pub mod fence;
 pub mod meta;
 pub(crate) mod reader;
+pub mod sketch;
 
 use xxhash_rust::xxh64::xxh64;
 

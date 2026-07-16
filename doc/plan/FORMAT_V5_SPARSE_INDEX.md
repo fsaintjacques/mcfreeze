@@ -575,10 +575,10 @@ column or double `block_size`.
   measure first.
 - Per-block `u16` offset footer for binary search within large blocks:
   only relevant if `block_size` ≥ 16 KiB; ~1% disk, zero RAM.
-- Sketch default: the *kind* question is settled (binary-fuse-8;
+- Sketch default: **settled — on by default** (kind: binary-fuse-8;
   blocked-bloom only for the RAM-capped 10B tier — see sketch.bin).
-  Whether `--sketch` is on or off by default depends on fleet-wide miss
-  rate; ship off + the flag, decide after production numbers.
+  Free misses are the V4 behavior operators depend on, and ~9 bits/key
+  is cheap insurance; `--no-sketch` opts hit-dominated workloads out.
 - `heap_offset` width: `u64` is simple; `u40` in 64 B units would shave
   3 B/stub if stub density ever matters.
 - Radix bucket sizing: number of top-of-fingerprint bits (equivalently,

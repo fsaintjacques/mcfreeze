@@ -43,6 +43,7 @@ const BUILD_DONE: &str = "build.done";
 const BLOCKS_BIN: &str = "blocks.bin";
 const HEAP_BIN: &str = "heap.bin";
 const FENCES_BIN: &str = "fences.bin";
+const SKETCH_BIN: &str = "sketch.bin";
 const BUCKET_PREFIX: &str = "bucket-";
 /// Root-level phase sentinel (same role as V4's `index.done`).
 const INDEX_DONE: &str = "index.done";
@@ -89,6 +90,8 @@ pub struct PartitionBuildDone {
     pub n_stubs: u64,
     pub blocks_bytes: u64,
     pub heap_bytes: u64,
+    #[serde(default)]
+    pub sketch_bytes: u64,
 }
 
 /// Phase sentinel (`index.done`; stable schema, embedded into
@@ -103,6 +106,13 @@ pub struct IndexDone {
     pub blocks_bytes: u64,
     pub heap_bytes: u64,
     pub fences_bytes: u64,
+    /// Whether per-partition sketches were built — the source of truth
+    /// for `meta.sketch` (a resumed finalize must reflect what was
+    /// built, not what the resuming process was configured with).
+    #[serde(default)]
+    pub sketch: bool,
+    #[serde(default)]
+    pub sketch_bytes: u64,
     pub wall_secs: Option<f64>,
     pub partitions: Vec<PartitionBuildDone>,
 }
@@ -170,6 +180,7 @@ pub struct V5Builder {
     data_buf_bytes: usize,
     block_size_override: Option<u32>,
     bucket_bytes: u64,
+    sketch: bool,
     /// Loaded/derived by `plan()`; consumed by `build`.
     plan: Mutex<Option<Plan>>,
     /// Set by `build` (live and sentinel-skip paths); consumed by
@@ -188,6 +199,7 @@ impl V5Builder {
             data_buf_bytes: config.data_buf_bytes,
             block_size_override: config.v5.block_size,
             bucket_bytes: config.v5.bucket_bytes.unwrap_or(DEFAULT_BUCKET_BYTES),
+            sketch: config.v5.sketch,
             root: config.root,
             plan: Mutex::new(None),
             done: Mutex::new(None),
@@ -402,6 +414,7 @@ impl FormatBuilder for V5Builder {
                         plan,
                         self.bucket_bytes,
                         self.data_buf_bytes,
+                        self.sketch,
                     )?;
                     if let Some(ref f) = cb {
                         f(1, 0);
@@ -421,6 +434,8 @@ impl FormatBuilder for V5Builder {
             blocks_bytes: partitions.iter().map(|p| p.blocks_bytes).sum(),
             heap_bytes: partitions.iter().map(|p| p.heap_bytes).sum(),
             fences_bytes: partitions.iter().map(|p| p.n_blocks * 4).sum(),
+            sketch: self.sketch,
+            sketch_bytes: partitions.iter().map(|p| p.sketch_bytes).sum(),
             wall_secs: Some(start.elapsed().as_secs_f64()),
             partitions,
         };
@@ -442,7 +457,9 @@ impl FormatBuilder for V5Builder {
             verify_seed: self.verify_seed,
             block_size: done.block_size,
             inline_threshold: done.inline_threshold,
-            sketch: None::<SketchMeta>,
+            sketch: done.sketch.then(|| SketchMeta {
+                kind: crate::v5::sketch::KIND.to_string(),
+            }),
             partitions: done
                 .partitions
                 .iter()
@@ -471,6 +488,7 @@ fn build_partition(
     plan: Plan,
     bucket_bytes: u64,
     buf_bytes: usize,
+    sketch: bool,
 ) -> Result<PartitionBuildDone> {
     let done_path = dir.join(BUILD_DONE);
     if done_path.exists() {
@@ -482,7 +500,7 @@ fn build_partition(
     }
 
     // Rebuild from scratch: sweep partial outputs from a crashed build.
-    for f in [BLOCKS_BIN, HEAP_BIN, FENCES_BIN] {
+    for f in [BLOCKS_BIN, HEAP_BIN, FENCES_BIN, SKETCH_BIN] {
         let _ = fs::remove_file(dir.join(f));
     }
     remove_bucket_files(dir);
@@ -516,6 +534,11 @@ fn build_partition(
     let mut n_keys = 0u64;
     let mut n_stubs = 0u64;
     let mut heap_offset = 0u64;
+    // Sketch input: every fp of the partition, accumulated across the
+    // bucket passes (binary fuse needs the full set). Arrives sorted,
+    // so adjacent dedup below satisfies the filter's uniqueness
+    // requirement. ~8 B/key of transient build RAM when enabled.
+    let mut sketch_fps: Vec<u64> = Vec::new();
     let mut asm = BlockAssembler::new(plan.block_size as usize, |b: &[u8]| {
         blocks_out.write_all(b).map_err(Error::from)
     });
@@ -525,6 +548,9 @@ fn build_partition(
         let mut frames = parse_frames(&buf)?;
         frames.sort_unstable_by_key(|f| f.fp);
         for f in frames {
+            if sketch {
+                sketch_fps.push(f.fp);
+            }
             let value = &buf[f.start..f.start + f.len];
             if value.len() as u32 <= plan.inline_threshold {
                 asm.push_inline(f.fp, f.vfp, value)?;
@@ -559,6 +585,16 @@ fn build_partition(
     }
     fs::write(dir.join(FENCES_BIN), fence_bytes)?;
 
+    // Empty partitions get no sketch: empty fences already resolve
+    // every lookup to a zero-I/O miss, and the reader skips loading.
+    let mut sketch_bytes = 0u64;
+    if sketch && !sketch_fps.is_empty() {
+        sketch_fps.dedup();
+        let bytes = crate::v5::sketch::build(&sketch_fps)?;
+        sketch_bytes = bytes.len() as u64;
+        fs::write(dir.join(SKETCH_BIN), bytes)?;
+    }
+
     let done = PartitionBuildDone {
         n_keys,
         data_bytes: arrival_bytes,
@@ -566,6 +602,7 @@ fn build_partition(
         n_stubs,
         blocks_bytes: fences.len() as u64 * plan.block_size as u64,
         heap_bytes: heap_offset,
+        sketch_bytes,
     };
     // Marker before cleanup: a crash in between leaves the partition
     // skippable, with only idempotent deletion left to redo.
@@ -843,6 +880,7 @@ mod tests {
         let v5 = V5Options {
             block_size: Some(4096),
             bucket_bytes: Some(4096),
+            ..Default::default()
         };
         let (dir, _) = build_snapshot(&data, 1, v5);
         assert_all_present(dir.path(), 1, 4096, &data);
