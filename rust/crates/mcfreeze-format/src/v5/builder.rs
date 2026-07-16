@@ -728,6 +728,20 @@ impl FormatBuilder for V5Builder {
             sketch: done.sketch.then(|| SketchMeta {
                 kind: crate::v5::sketch::KIND.to_string(),
             }),
+            compression: match done.compression {
+                Mode::None => None,
+                // `dict` derives from the checksum actually produced,
+                // not the requested mode: training fallback downgrades
+                // the mode, and the emitted section must be internally
+                // coherent (layout() enforces it) either way.
+                _ => Some(meta::CompressionMeta {
+                    codec: meta::CODEC_ZSTD.to_string(),
+                    dict: done.dict_checksum.is_some(),
+                    dict_checksum: done.dict_checksum,
+                    min_compress_len: done.min_compress_len,
+                    zstd_version: done.zstd_version.clone(),
+                }),
+            },
             partitions: done
                 .partitions
                 .iter()
