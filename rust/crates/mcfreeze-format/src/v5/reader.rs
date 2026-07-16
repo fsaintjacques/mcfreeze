@@ -132,7 +132,13 @@ impl SnapshotReader {
             // key reported absent), so a sketch that exists but fails
             // verification fails the open — never a degraded filter.
             let sketch = if meta.sketch.is_some() && pm.n_blocks > 0 {
-                Some(Sketch::parse(fs::read(dir.join("sketch.bin"))?)?)
+                let bytes =
+                    fs::read(dir.join("sketch.bin")).map_err(|source| Error::SnapshotFileRead {
+                        partition: i,
+                        file: "sketch.bin",
+                        source,
+                    })?;
+                Some(Sketch::parse(bytes)?)
             } else {
                 None
             };
@@ -430,6 +436,20 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("meta.json")).unwrap())
                 .unwrap();
         assert_eq!(meta.sketch.unwrap().kind, "binary_fuse8");
+    }
+
+    #[test]
+    fn missing_sketch_fails_open_with_partition_context() {
+        let dir = build_opts(&[(b"k", b"v")], 1, true);
+        std::fs::remove_file(partition_dir(dir.path(), 1, 0).join("sketch.bin")).unwrap();
+        assert!(matches!(
+            Snapshot::open_path(dir.path()),
+            Err(Error::SnapshotFileRead {
+                partition: 0,
+                file: "sketch.bin",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -439,8 +439,12 @@ the merged histogram — when all sources drain.
 
 Between phases, derive `block_size` once, globally, from the merged
 histogram via the auto-tune rule (unless `--block-size` is given), and
-`inline_threshold = block_size / 2`. It must be decided before the first
-block is cut and is immutable for the snapshot.
+`inline_threshold = block_size / 2`. The sketch on/off decision is
+pinned at the same moment. Both must be decided before the first block
+is cut and are immutable for the snapshot (persisted in a transient
+`v5.plan`, so a resumed build cannot re-derive different values — a
+mixed partition set, e.g. some partitions with `sketch.bin` and some
+without, would be unopenable).
 
 ### Phase 2 — Radix + sort + build
 

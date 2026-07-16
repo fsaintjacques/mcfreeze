@@ -59,6 +59,13 @@ pub enum Error {
         expected: u64,
     },
 
+    #[error("partition {partition}: cannot read {file}: {source}")]
+    SnapshotFileRead {
+        partition: usize,
+        file: &'static str,
+        source: std::io::Error,
+    },
+
     #[error("block checksum mismatch")]
     BlockChecksumMismatch,
 
