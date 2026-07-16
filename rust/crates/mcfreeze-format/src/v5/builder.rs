@@ -402,7 +402,7 @@ impl V5Builder {
         Ok(plan)
     }
 
-    /// Compression planning: sample a prefix of partition 0's arrival
+    /// Compression planning: sample a prefix of one partition's arrival
     /// log (partition routing is by hash, so any one partition is an
     /// unbiased sample of the key space — across keys; the prefix is
     /// biased across *time*, which the recorded sample stats make
@@ -414,13 +414,24 @@ impl V5Builder {
     /// into the plan. Too few samples to train falls back to plain
     /// `zstd` with a warning, recorded in the plan.
     fn plan_compression(&self, plan: &mut Plan) -> Result<Vec<u64>> {
-        // arrival.bin exists here by ordering: the histogram loop above
-        // read every partition's arrival.stats, which the appender
-        // publishes only after creating and syncing arrival.bin (empty
-        // partitions included). An absent file is a mutilated tree and
-        // fails loudly, exactly as build_partition would right after.
-        let arrival = self.partition_dir(0).join(ARRIVAL_BIN);
-        let samples = sample_arrival_prefix(&arrival, SAMPLE_PREFIX_BYTES)?;
+        // Partition 0 is the canonical pool, but a small or skewed load
+        // can leave it empty while others hold data — falling back to
+        // the first non-empty partition keeps the dictionary degrading
+        // on genuine data scarcity, not on hash-routing emptiness.
+        // arrival.bin exists for every partition here by ordering: the
+        // histogram loop above read every partition's arrival.stats,
+        // which the appender publishes only after creating and syncing
+        // arrival.bin (empty partitions included). An absent file is a
+        // mutilated tree and fails loudly, exactly as build_partition
+        // would right after.
+        let mut samples = Vec::new();
+        for p in 0..self.layout.n_partitions as usize {
+            let arrival = self.partition_dir(p).join(ARRIVAL_BIN);
+            samples = sample_arrival_prefix(&arrival, SAMPLE_PREFIX_BYTES)?;
+            if !samples.is_empty() {
+                break;
+            }
+        }
         plan.n_samples = samples.len() as u64;
 
         let mut dict = None;
@@ -632,6 +643,17 @@ impl FormatBuilder for V5Builder {
         }
 
         let plan = self.ensure_plan()?;
+        // Re-announce a training fallback at build time: the plan may
+        // have been derived by an earlier process, and a snapshot
+        // quietly delivering plain-zstd ratios where zstd-dict was
+        // requested is exactly the surprise the stats exist to prevent.
+        if plan.dict_fallback {
+            tracing::warn!(
+                n_samples = plan.n_samples,
+                "zstd-dict was requested but no dictionary could be trained; \
+                 building with plain zstd (recorded in build stats as dict_fallback)"
+            );
+        }
         // The dictionary is shared read-only across build threads; each
         // partition digests its own compression context from it. Re-read
         // and re-verify here: in a resumed process the in-memory plan
@@ -1876,11 +1898,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_partition_zero_leaves_raw_histogram_in_charge() {
-        // All keys route to partition 1: the stored-size sample pool is
-        // empty, so block sizing must fall back to the merged raw
-        // histogram (16 KiB for ~6 KiB records), not the 4 KiB floor an
-        // all-zero stored histogram would produce.
+    fn sampling_falls_back_to_first_nonempty_partition() {
+        // All keys route to partition 1: partition 0's pool is empty,
+        // and the sampler must move on rather than declare data
+        // scarcity — hash-routing emptiness must not degrade the mode
+        // or the stored-size auto-tune (which resolves 4 KiB here; an
+        // empty pool would have left the raw histogram tuning 16 KiB
+        // for these ~6 KiB records).
         let layout = Layout::new(2).unwrap();
         let data: Vec<(Vec<u8>, Vec<u8>)> = (0..200)
             .map(|i| format!("key-{i}").into_bytes())
@@ -1902,8 +1926,12 @@ mod tests {
         builder.plan().unwrap();
 
         let plan = read_plan(dir.path());
-        assert_eq!(plan.n_samples, 0);
-        assert_eq!(plan.block_size, 16 * 1024);
+        assert_eq!(plan.n_samples, data.len() as u64);
+        assert!(!plan.dict_fallback);
+        assert_eq!(
+            plan.block_size, 4096,
+            "stored-size auto-tune must see the samples"
+        );
     }
 
     #[test]
