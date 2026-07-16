@@ -104,6 +104,8 @@ pub struct V5Options {
     /// depend on; disable only for hit-dominated workloads where the
     /// sketch RAM buys nothing.
     pub sketch: bool,
+    /// How completion markers are published (see [`MarkerMode`]).
+    pub marker_mode: MarkerMode,
 }
 
 impl Default for V5Options {
@@ -112,8 +114,27 @@ impl Default for V5Options {
             block_size: None,
             bucket_bytes: None,
             sketch: true,
+            marker_mode: MarkerMode::Rename,
         }
     }
+}
+
+/// How completion markers (`arrival.stats`, `v5.plan`, `build.done`,
+/// `index.done`, `meta.json`) are made atomic. Marker *presence* is a
+/// completion signal, so a marker must never exist truncated — but the
+/// mechanism that guarantees that differs by storage backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MarkerMode {
+    /// POSIX filesystems: write + fsync a temp sibling, then rename it
+    /// into place. The default.
+    #[default]
+    Rename,
+    /// Object-store FUSE mounts (gcsfuse, mountpoint-s3): plain
+    /// create + write + close. The object materializes atomically on
+    /// close, and `rename(2)` on these mounts is unsupported or
+    /// non-atomic — the temp+rename dance would *reintroduce* the torn-
+    /// marker hazard it exists to prevent.
+    DirectWrite,
 }
 
 /// Instantiate the builder for `format`. The single dispatch point on the

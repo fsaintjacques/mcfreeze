@@ -64,6 +64,13 @@ pub struct LoadArgs {
     #[arg(long)]
     pub bucket_bytes: Option<u64>,
 
+    /// V5: publish completion markers with plain create+write instead of
+    /// temp+rename. Required on object-store FUSE mounts (gcsfuse,
+    /// mountpoint-s3), where close is atomic and rename is unsupported
+    /// or non-atomic. Do not use on POSIX filesystems.
+    #[arg(long)]
+    pub direct_markers: bool,
+
     /// Validate the configuration without writing any data
     #[arg(long)]
     pub dry_run: bool,
@@ -317,6 +324,11 @@ fn v5_options(args: &LoadArgs) -> mcfreeze_loader::V5Options {
         block_size: args.block_size,
         bucket_bytes: args.bucket_bytes,
         sketch: !args.no_sketch,
+        marker_mode: if args.direct_markers {
+            mcfreeze_loader::MarkerMode::DirectWrite
+        } else {
+            mcfreeze_loader::MarkerMode::Rename
+        },
     }
 }
 
@@ -1058,6 +1070,16 @@ mod tests {
         assert!(v5.sketch, "sketch must default on");
         assert_eq!(v5.block_size, None);
         assert_eq!(v5.bucket_bytes, None);
+        assert_eq!(v5.marker_mode, mcfreeze_loader::MarkerMode::Rename);
+    }
+
+    #[test]
+    fn direct_markers_flag_maps_to_marker_mode() {
+        let args = parse(&["mcf", "--direct-markers", "csv", "--file", "x.csv"]);
+        assert_eq!(
+            v5_options(&args).marker_mode,
+            mcfreeze_loader::MarkerMode::DirectWrite
+        );
     }
 
     #[test]
