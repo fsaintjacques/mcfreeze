@@ -20,7 +20,7 @@ pub use mcfreeze_format::builder::{MarkerMode, V5Options};
 use mcfreeze_format::meta::{Layout, Stats, DEFAULT_VERIFY_SEED};
 use mcfreeze_format::FormatId;
 
-use scatter::{Fanout, PartitionDone, ScatterDone, ScatterPhase};
+use scatter::{write_sentinel, Fanout, PartitionDone, ScatterDone, ScatterPhase};
 
 // ---------------------------------------------------------------------------
 // Scatter completion detection
@@ -46,28 +46,39 @@ async fn check_scatter_done(
     root: &Path,
     layout: Layout,
     builder: &Arc<dyn FormatBuilder>,
+    marker_mode: MarkerMode,
 ) -> Result<Option<ScatterDoneInfo>, LoaderError> {
     let sentinel = root.join("scatter.done");
 
-    // Fast path: sentinel already written.
+    // Fast path: sentinel already written. An unparseable sentinel (a
+    // torn write from before it was published atomically) must not wedge
+    // resume: fall through to the probe-based re-derivation, which
+    // rewrites it from per-partition state — the correct self-healing.
     if sentinel.exists() {
         let json = tokio::fs::read_to_string(&sentinel).await?;
-        let done: ScatterDone = serde_json::from_str(&json).map_err(|e| {
-            LoaderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
-        // Resuming with a different --format would re-scatter new-format
-        // state into a directory still holding the old format's artifacts.
-        // Fail fast instead.
-        if done.format != builder.format() {
-            return Err(LoaderError::FormatMismatch {
-                requested: builder.format(),
-                found: done.format,
-            });
+        match serde_json::from_str::<ScatterDone>(&json) {
+            Ok(done) => {
+                // Resuming with a different --format would re-scatter
+                // new-format state into a directory still holding the
+                // old format's artifacts. Fail fast instead.
+                if done.format != builder.format() {
+                    return Err(LoaderError::FormatMismatch {
+                        requested: builder.format(),
+                        found: done.format,
+                    });
+                }
+                return Ok(Some(ScatterDoneInfo {
+                    n_keys: done.n_keys,
+                    data_bytes: 0,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "scatter.done unparseable (torn write?); re-deriving from partition state"
+                );
+            }
         }
-        return Ok(Some(ScatterDoneInfo {
-            n_keys: done.n_keys,
-            data_bytes: 0,
-        }));
     }
 
     // Fallback: derive completion from the format's transient state.
@@ -105,7 +116,7 @@ async fn check_scatter_done(
     };
     let json = serde_json::to_string_pretty(&done)
         .map_err(|e| LoaderError::Io(std::io::Error::other(e)))?;
-    tokio::fs::write(&sentinel, json).await?;
+    write_sentinel(&sentinel, &json, marker_mode)?;
 
     Ok(Some(ScatterDoneInfo {
         n_keys,
@@ -275,7 +286,14 @@ impl SnapshotLoader {
         let layout = Layout::new(self.config.n_partitions)?;
         let scatter_start = Instant::now();
 
-        if let Some(info) = check_scatter_done(&self.root, layout, &self.builder).await? {
+        if let Some(info) = check_scatter_done(
+            &self.root,
+            layout,
+            &self.builder,
+            self.config.v5.marker_mode,
+        )
+        .await?
+        {
             tracing::info!(n_keys = info.n_keys, "scatter already complete, skipping");
             Ok(ScatterResult {
                 n_keys: info.n_keys,
@@ -305,7 +323,14 @@ impl SnapshotLoader {
     /// already spilled every partition to disk.
     pub async fn scatter_result_from_done(&self) -> Result<Option<ScatterResult>, LoaderError> {
         let layout = Layout::new(self.config.n_partitions)?;
-        let Some(stats) = check_scatter_done(&self.root, layout, &self.builder).await? else {
+        let Some(stats) = check_scatter_done(
+            &self.root,
+            layout,
+            &self.builder,
+            self.config.v5.marker_mode,
+        )
+        .await?
+        else {
             return Ok(None);
         };
         Ok(Some(ScatterResult {
@@ -403,45 +428,52 @@ impl SnapshotLoader {
         let layout = Layout::new(self.config.n_partitions)?;
         let scatter_start = Instant::now();
 
-        let (n_keys, data_bytes, duration) =
-            if let Some(stats) = check_scatter_done(&self.root, layout, &self.builder).await? {
-                tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
-                (stats.n_keys, stats.data_bytes, Duration::ZERO)
-            } else {
-                let appenders = self.create_appenders(layout)?;
-                let phase = ScatterPhase::new(
-                    &self.root,
-                    layout,
-                    self.builder.format(),
-                    appenders,
-                    self.config.channel_capacity,
-                    self.config.max_value_bytes,
-                )?;
-                let mut fanout = phase.fanout();
-                let progress_fn = self.config.progress_fn.clone();
-                let interval = self.config.progress_interval;
-                let mut last_reported_keys = 0u64;
-                let mut last_reported_bytes = 0u64;
+        let (n_keys, data_bytes, duration) = if let Some(stats) = check_scatter_done(
+            &self.root,
+            layout,
+            &self.builder,
+            self.config.v5.marker_mode,
+        )
+        .await?
+        {
+            tracing::info!(n_keys = stats.n_keys, "scatter already complete, skipping");
+            (stats.n_keys, stats.data_bytes, Duration::ZERO)
+        } else {
+            let appenders = self.create_appenders(layout)?;
+            let phase = ScatterPhase::new(
+                &self.root,
+                layout,
+                self.builder.format(),
+                appenders,
+                self.config.channel_capacity,
+                self.config.max_value_bytes,
+                self.config.v5.marker_mode,
+            )?;
+            let mut fanout = phase.fanout();
+            let progress_fn = self.config.progress_fn.clone();
+            let interval = self.config.progress_interval;
+            let mut last_reported_keys = 0u64;
+            let mut last_reported_bytes = 0u64;
 
-                while let Some(batch) = source
-                    .next_batch()
-                    .await
-                    .map_err(|e| LoaderError::Source(Box::new(e)))?
-                {
-                    fanout.scatter_batch(&batch).await?;
-                    if let Some(ref cb) = progress_fn {
-                        let (n, b) = fanout.counters();
-                        if n - last_reported_keys >= interval {
-                            cb(n - last_reported_keys, b - last_reported_bytes);
-                            last_reported_keys = n;
-                            last_reported_bytes = b;
-                        }
+            while let Some(batch) = source
+                .next_batch()
+                .await
+                .map_err(|e| LoaderError::Source(Box::new(e)))?
+            {
+                fanout.scatter_batch(&batch).await?;
+                if let Some(ref cb) = progress_fn {
+                    let (n, b) = fanout.counters();
+                    if n - last_reported_keys >= interval {
+                        cb(n - last_reported_keys, b - last_reported_bytes);
+                        last_reported_keys = n;
+                        last_reported_bytes = b;
                     }
                 }
+            }
 
-                let stats = phase.finish(vec![fanout], scatter_start).await?;
-                (stats.n_keys, stats.data_bytes, scatter_start.elapsed())
-            };
+            let stats = phase.finish(vec![fanout], scatter_start).await?;
+            (stats.n_keys, stats.data_bytes, scatter_start.elapsed())
+        };
 
         self.finalize(
             ScatterResult {
@@ -485,6 +517,7 @@ impl SnapshotLoader {
             appenders,
             self.config.channel_capacity,
             self.config.max_value_bytes,
+            self.config.v5.marker_mode,
         )?;
 
         let interval = self.config.progress_interval;
