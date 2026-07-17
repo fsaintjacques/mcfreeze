@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::catalog::CatalogFile;
 use crate::listener::run_listeners;
 use crate::lookup::{CatalogLookup, LookupFactory};
-use crate::metrics::{DatasetLabels, Metrics};
+use crate::metrics::Metrics;
 use crate::registry::{ActiveCatalog, DatasetHandle, Registry as DataRegistry};
 use crate::ServeError;
 
@@ -90,7 +90,6 @@ pub async fn run(cfg: CatalogConfig) -> Result<(), ServeError> {
         &metrics.lookup_total,
     );
     log_catalog_diff(&empty, &initial, 0);
-    update_expected_miss_io_gauge(&metrics, &initial);
     let registry = DataRegistry::new(initial);
     let n_ds = registry.load().dataset_count() as i64;
 
@@ -235,7 +234,6 @@ async fn watch_catalog(
             }
             Ok(new_catalog) => {
                 let n_ds = new_catalog.dataset_count() as i64;
-                update_expected_miss_io_gauge(&metrics, &new_catalog);
                 let new_arc = Arc::new(new_catalog);
                 let old = registry.swap(Arc::clone(&new_arc));
 
@@ -322,22 +320,6 @@ fn log_catalog_diff(old: &ActiveCatalog, new: &ActiveCatalog, generation: u64) {
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
-
-/// Refresh `mcf_expected_miss_io_rate{dataset}` from a catalog's datasets.
-/// Clears first so datasets removed by a swap don't linger as stale series.
-fn update_expected_miss_io_gauge(metrics: &Metrics, catalog: &ActiveCatalog) {
-    metrics.expected_miss_io_rate.clear();
-    for (dataset, rate) in catalog.expected_miss_io_rates() {
-        metrics
-            .expected_miss_io_rate
-            .get_or_create(&DatasetLabels {
-                dataset: dataset.to_string(),
-            })
-            .set(rate);
-    }
-}
-
 /// Open all datasets listed in `catalog_path` and build an [`ActiveCatalog`].
 /// Runs in the blocking thread pool since `Snapshot::open` does file I/O
 /// and residency work.
@@ -405,36 +387,6 @@ mod tests {
         w.write(b"k", b"v").unwrap();
         w.finish().unwrap();
         dir
-    }
-
-    #[test]
-    fn expected_miss_io_gauge_set_per_dataset() {
-        let metrics = Metrics::new(&mut Registry::default());
-        let snap_a = build_snapshot();
-        let snap_b = build_snapshot();
-
-        let mut ds = HashMap::new();
-        for (prefix, name, dir) in [("pa", "ds-a", &snap_a), ("pb", "ds-b", &snap_b)] {
-            ds.insert(
-                prefix.to_string(),
-                DatasetHandle::open(name.into(), "v1".into(), dir.path(), &metrics.lookup_total)
-                    .unwrap(),
-            );
-        }
-        let catalog =
-            ActiveCatalog::new(ds, 1, std::time::SystemTime::now(), &metrics.lookup_total);
-
-        update_expected_miss_io_gauge(&metrics, &catalog);
-
-        for name in ["ds-a", "ds-b"] {
-            let rate = metrics
-                .expected_miss_io_rate
-                .get_or_create(&DatasetLabels {
-                    dataset: name.to_string(),
-                })
-                .get();
-            assert_eq!(rate, 0.0, "V4 expected rate for {name}");
-        }
     }
 
     #[test]

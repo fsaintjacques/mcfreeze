@@ -64,11 +64,6 @@ impl DatasetHandle {
         })
     }
 
-    /// Expected paid-miss rate of this dataset's snapshot format.
-    pub fn expected_miss_io_rate(&self) -> f64 {
-        self.reader.expected_miss_io_rate()
-    }
-
     /// Look up `key`.  Offloads `pread` to the blocking thread pool.
     /// Records the outcome under this dataset's `mcf_lookup_total`.
     pub async fn get(&self, key: &[u8]) -> Result<LookupOutcome, ServeError> {
@@ -138,14 +133,6 @@ impl ActiveCatalog {
 
     pub fn dataset_count(&self) -> usize {
         self.datasets.len()
-    }
-
-    /// Per-dataset expected paid-miss rates, for the
-    /// `mcf_expected_miss_io_rate{dataset}` gauge family.
-    pub fn expected_miss_io_rates(&self) -> impl Iterator<Item = (&str, f64)> {
-        self.datasets
-            .values()
-            .map(|h| (h.name.as_str(), h.expected_miss_io_rate()))
     }
 
     /// Iterator over `(key_prefix, dataset_name, version_id)` triples.
@@ -342,30 +329,6 @@ mod tests {
         // client-supplied label value.
         assert_eq!(count(UNKNOWN_DATASET, "miss"), 1);
         assert_eq!(count("nope", "miss"), 0);
-    }
-
-    #[tokio::test]
-    async fn expected_miss_io_rates_lists_all_datasets() {
-        let fam = family();
-        let dir1 = build_snapshot(&[(b"a", b"1")]);
-        let dir2 = build_snapshot(&[(b"b", b"2")]);
-        let mut ds = HashMap::new();
-        ds.insert(
-            "d1".into(),
-            DatasetHandle::open("d1".into(), "v1".into(), dir1.path(), &fam).unwrap(),
-        );
-        ds.insert(
-            "d2".into(),
-            DatasetHandle::open("d2".into(), "v1".into(), dir2.path(), &fam).unwrap(),
-        );
-        let catalog = ActiveCatalog::new(ds, 1, SystemTime::UNIX_EPOCH, &fam);
-
-        let mut rates: Vec<_> = catalog.expected_miss_io_rates().collect();
-        rates.sort_by(|a, b| a.0.cmp(b.0));
-        assert_eq!(rates, vec![("d1", 0.0), ("d2", 0.0)]); // V4: ≈0 expected
-
-        let empty = ActiveCatalog::new(HashMap::new(), 0, SystemTime::UNIX_EPOCH, &fam);
-        assert_eq!(empty.expected_miss_io_rates().count(), 0);
     }
 
     // --- Registry ---

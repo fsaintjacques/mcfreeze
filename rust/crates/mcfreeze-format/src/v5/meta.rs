@@ -61,6 +61,14 @@ pub struct CompressionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionMeta {
     pub n_blocks: u64,
+    /// `checksum32(sketch.bin)` for this partition; `Some` iff a sketch
+    /// was written — the filter is enabled and the partition is
+    /// non-empty (`n_blocks > 0`). The filter bytes carry no trailer of
+    /// their own: a flipped fingerprint is a silent false negative, so
+    /// the integrity anchor lives here in the manifest, exactly like
+    /// [`CompressionMeta::dict_checksum`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sketch_checksum: Option<u32>,
 }
 
 /// Contents of a V5 `meta.json`.
@@ -99,6 +107,27 @@ impl Meta {
         if let Some(s) = &self.sketch {
             if s.kind != crate::v5::sketch::KIND {
                 return Err(Error::UnsupportedSketchKind(s.kind.clone()));
+            }
+        }
+        // Coherence both ways: the reader loads (and must verify) a
+        // sketch exactly when the filter is enabled and the partition is
+        // non-empty, so `sketch_checksum` must be present there and
+        // absent everywhere else — a stray or missing anchor fails the
+        // open, never a silently unverified filter.
+        for pm in &self.partitions {
+            let sketch_written = self.sketch.is_some() && pm.n_blocks > 0;
+            match (sketch_written, pm.sketch_checksum.is_some()) {
+                (true, false) => {
+                    return Err(Error::InvalidSketchMeta(
+                        "non-empty partition with the filter enabled requires sketch_checksum",
+                    ))
+                }
+                (false, true) => {
+                    return Err(Error::InvalidSketchMeta(
+                        "sketch_checksum present without a written sketch",
+                    ))
+                }
+                _ => {}
             }
         }
         if let Some(c) = &self.compression {
@@ -156,7 +185,10 @@ mod tests {
             sketch: None,
             compression: None,
             partitions: (0..n_partitions)
-                .map(|_| PartitionMeta { n_blocks: 0 })
+                .map(|_| PartitionMeta {
+                    n_blocks: 0,
+                    sketch_checksum: None,
+                })
                 .collect(),
             stats: None,
             encoding: None,

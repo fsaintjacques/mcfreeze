@@ -14,7 +14,7 @@ use prometheus_client::registry::Registry;
 
 use crate::listener::run_listeners;
 use crate::lookup::{LookupFactory, SnapshotLookup};
-use crate::metrics::{DatasetLabels, LookupCounters, Metrics};
+use crate::metrics::{LookupCounters, Metrics};
 use crate::ServeError;
 
 /// The `dataset` label value for snapshot mode's single dataset.
@@ -57,13 +57,6 @@ pub async fn run(cfg: SnapshotConfig) -> Result<(), ServeError> {
     // Blocking (residency work included), but this is startup: listeners
     // have not been bound yet, so nothing is being starved.
     let reader = Snapshot::open_path(&cfg.dir)?;
-    // Snapshot mode has exactly one (anonymous) dataset: "snapshot".
-    metrics
-        .expected_miss_io_rate
-        .get_or_create(&DatasetLabels {
-            dataset: SNAPSHOT_DATASET.to_string(),
-        })
-        .set(reader.expected_miss_io_rate());
     tracing::info!(dir = %cfg.dir.display(), "snapshot opened");
 
     let counters = LookupCounters::new(&metrics.lookup_total, SNAPSHOT_DATASET);

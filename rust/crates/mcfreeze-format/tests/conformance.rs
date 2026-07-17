@@ -93,12 +93,13 @@ fn conformance(format: FormatId, v5: &V5Options) {
     }
 
     // --- absent key: a miss, with cost honest to the format's contract.
-    // Formats promising free misses (expected_miss_io_rate == 0) must
-    // report io: false; paid-miss formats may report either (a key can
-    // land below a partition's first fence and miss for free).
+    // V4 promises free misses (paid only on a 32-bit fingerprint
+    // collision, ≈0) and must report io: false; paid-miss formats may
+    // report either (a key can land below a partition's first fence and
+    // miss for free).
     match snap.get(b"definitely-absent").unwrap() {
         GetOutcome::Miss { io } => {
-            if snap.expected_miss_io_rate() == 0.0 {
+            if format == FormatId::V4 {
                 assert!(!io, "free-miss format paid I/O on a miss");
             }
         }
