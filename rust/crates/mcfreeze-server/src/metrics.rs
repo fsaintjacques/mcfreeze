@@ -6,7 +6,7 @@
 //! [`run_metrics_server`] to expose the Prometheus text exposition format.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -35,10 +35,10 @@ use serde::Serialize;
 /// Values on `mcf_request_duration_seconds`: `"hit"`, `"miss"`,
 /// `"miss_io"`, `"error"`.  `miss_io` is a miss that paid one or more
 /// `pread`s to conclude absence — a fingerprint or filter false positive.
-/// Its expected rate is format-dependent: compare the per-dataset
-/// observed ratio `miss_io / (miss + miss_io)` from `mcf_lookup_total`
-/// against `mcf_expected_miss_io_rate{dataset}` — alert when observed
-/// exceeds expected. Wire response is identical to a miss.
+/// Track the per-dataset observed ratio `miss_io / (miss + miss_io)` from
+/// `mcf_lookup_total`; its expected level is format-dependent (≈0 for V4,
+/// a sketched format's configured false-positive rate). Wire response is
+/// identical to a miss.
 ///
 /// Values on `mcf_catalog_swap_total`: `"ok"`, `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -64,12 +64,6 @@ pub struct TransportLabels {
 pub struct DatasetResultLabels {
     pub dataset: String,
     pub result: &'static str,
-}
-
-/// Label for `mcf_expected_miss_io_rate`.
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct DatasetLabels {
-    pub dataset: String,
 }
 
 /// Sentinel `dataset` label for lookups whose prefix matched no dataset.
@@ -153,14 +147,9 @@ pub struct Metrics {
     /// Per-response value-size distribution (hits only); `_sum` is total bytes sent.
     pub response_bytes: Histogram,
     /// Per-dataset lookup outcomes. The per-dataset observed miss-I/O
-    /// ratio is `miss_io / (miss + miss_io)`; alert when it exceeds
-    /// `mcf_expected_miss_io_rate{dataset}`. The latency histogram stays
+    /// ratio is `miss_io / (miss + miss_io)`. The latency histogram stays
     /// fleet-wide — the dataset dimension lives on this cheap counter.
     pub lookup_total: Family<DatasetResultLabels, Counter>,
-    /// Expected fraction of misses that pay I/O, per dataset, from the
-    /// snapshot's format (≈0 for V4; a sketched format's configured
-    /// false-positive rate). Snapshot mode uses `dataset="snapshot"`.
-    pub expected_miss_io_rate: Family<DatasetLabels, Gauge<f64, AtomicU64>>,
 
     // --- catalog (always present; snapshot mode uses static values) ---
     /// Current catalog generation; always 0 in snapshot mode.
@@ -211,12 +200,6 @@ impl Metrics {
             "Lookup outcomes by dataset and result",
             Family::<DatasetResultLabels, Counter>::default()
         );
-        let expected_miss_io_rate = reg!(
-            registry,
-            "mcf_expected_miss_io_rate",
-            "Expected fraction of misses paying I/O, by dataset",
-            Family::<DatasetLabels, Gauge<f64, AtomicU64>>::default()
-        );
         let catalog_generation = reg!(
             registry,
             "mcf_catalog_generation",
@@ -252,7 +235,6 @@ impl Metrics {
             request_duration_seconds,
             response_bytes,
             lookup_total,
-            expected_miss_io_rate,
             catalog_generation,
             catalog_swap_total,
             active_datasets,

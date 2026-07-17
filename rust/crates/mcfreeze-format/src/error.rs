@@ -89,8 +89,14 @@ pub enum Error {
     #[error("corrupt sketch: {0}")]
     CorruptSketch(&'static str),
 
+    #[error("sketch checksum mismatch: got {got:#010x}, expected {expected:#010x}")]
+    SketchChecksumMismatch { got: u32, expected: u32 },
+
     #[error("unsupported sketch kind: {0:?}")]
     UnsupportedSketchKind(String),
+
+    #[error("invalid meta sketch_checksum: {0}")]
+    InvalidSketchMeta(&'static str),
 
     #[error("partition {partition}: {file} is {got} bytes, expected {expected}")]
     SnapshotFileSize {

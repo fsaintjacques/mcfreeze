@@ -21,7 +21,7 @@ use crate::{
         block::{self, checksum32, Record},
         compress, fence,
         meta::Meta,
-        sketch::{Sketch, FALSE_POSITIVE_RATE},
+        sketch::{verify_sketch, Sketch},
         verify_fingerprint,
     },
     Error, Result,
@@ -98,7 +98,6 @@ pub(crate) struct SnapshotReader {
     layout: Layout,
     verify_seed: u64,
     block_size: usize,
-    has_sketch: bool,
     /// Present iff `meta.compression` declares a codec. Holds the
     /// verified dictionary and the pooled decompression contexts.
     codec: Option<compress::Decompressor>,
@@ -166,6 +165,14 @@ impl SnapshotReader {
                         file: "sketch.bin",
                         source,
                     })?;
+                // Coherence enforced by `Meta::layout`: a sketch-bearing
+                // partition always carries its anchor. Absent → corrupt meta.
+                let checksum = pm.sketch_checksum.ok_or(Error::InvalidSketchMeta(
+                    "sketch present without sketch_checksum",
+                ))?;
+                // Integrity first (cross-file, against the manifest), then
+                // structural parse of the now-trusted bytes.
+                verify_sketch(&bytes, checksum)?;
                 Some(Sketch::parse(bytes)?)
             } else {
                 None
@@ -184,19 +191,8 @@ impl SnapshotReader {
             layout,
             verify_seed: meta.verify_seed,
             block_size: meta.block_size as usize,
-            has_sketch: meta.sketch.is_some(),
             codec,
         })
-    }
-
-    /// Expected fraction of misses that pay I/O: the sketch's
-    /// false-positive rate when enabled, ≈1 otherwise.
-    pub fn expected_miss_io_rate(&self) -> f64 {
-        if self.has_sketch {
-            FALSE_POSITIVE_RATE
-        } else {
-            1.0
-        }
     }
 
     /// Look up `key`. `Miss { io: false }` only when the fence search
@@ -566,8 +562,8 @@ mod tests {
 
     #[test]
     fn paid_miss_reports_io_true() {
-        // Guards the exported expected_miss_io_rate contract: sketchless
-        // V5 misses that reach a block must say so. With 100 present
+        // Sketchless V5 misses that reach a block must report io: true.
+        // With 100 present
         // keys, only a fingerprint below the partition's first fence
         // misses for free (~1% of random keys), so an absent key paying
         // I/O is found within a handful of tries.
@@ -593,13 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn expected_miss_io_rate_is_one_without_sketch() {
-        let dir = build(&[(b"k", b"v")], 1);
-        let snap = Snapshot::open_path(dir.path()).unwrap();
-        assert_eq!(snap.expected_miss_io_rate(), 1.0);
-    }
-
-    #[test]
     fn sketch_restores_free_misses_without_false_negatives() {
         let vals: Vec<(Vec<u8>, Vec<u8>)> = (0..2000)
             .map(|i| {
@@ -612,10 +601,6 @@ mod tests {
         let pairs: Vec<(&[u8], &[u8])> = vals.iter().map(|(k, v)| (&k[..], &v[..])).collect();
         let dir = build_opts(&pairs, 2, true);
         let snap = Snapshot::open_path(dir.path()).unwrap();
-        assert_eq!(
-            snap.expected_miss_io_rate(),
-            crate::v5::sketch::FALSE_POSITIVE_RATE
-        );
 
         // No false negatives: every present key still hits.
         for (k, v) in &vals {
@@ -673,9 +658,11 @@ mod tests {
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xFF;
         std::fs::write(&path, bytes).unwrap();
+        // Checksum is verified before the structural parse, so a flipped
+        // byte surfaces as the manifest-reconciliation mismatch.
         assert!(matches!(
             Snapshot::open_path(dir.path()),
-            Err(Error::CorruptSketch(_))
+            Err(Error::SketchChecksumMismatch { .. })
         ));
     }
 

@@ -146,6 +146,10 @@ pub struct PartitionBuildDone {
     pub heap_bytes: u64,
     #[serde(default)]
     pub sketch_bytes: u64,
+    /// `checksum32(sketch.bin)` for this partition; `Some` iff a sketch
+    /// was written. Carried to `PartitionMeta.sketch_checksum`.
+    #[serde(default)]
+    pub sketch_checksum: Option<u32>,
     /// Compression outcome: logical vs stored value bytes and how many
     /// records took each path. The achieved ratio is a first-class
     /// observable per partition, not something derived from `du`.
@@ -769,6 +773,7 @@ impl FormatBuilder for V5Builder {
                 .iter()
                 .map(|p| PartitionMeta {
                     n_blocks: p.n_blocks,
+                    sketch_checksum: p.sketch_checksum,
                 })
                 .collect(),
             stats: Some(stats),
@@ -934,10 +939,14 @@ fn build_partition(
     // Empty partitions get no sketch: empty fences already resolve
     // every lookup to a zero-I/O miss, and the reader skips loading.
     let mut sketch_bytes = 0u64;
+    let mut sketch_checksum = None;
     if sketch && !sketch_fps.is_empty() {
         sketch_fps.dedup();
         let bytes = crate::v5::sketch::build(&sketch_fps)?;
         sketch_bytes = bytes.len() as u64;
+        // The sketch file carries no trailer: its integrity anchor is
+        // this checksum, recorded in PartitionMeta.sketch_checksum.
+        sketch_checksum = Some(checksum32(&bytes));
         write_data_file(&dir.join(SKETCH_BIN), &bytes)?;
     }
 
@@ -949,6 +958,7 @@ fn build_partition(
         blocks_bytes: fences.len() as u64 * plan.block_size as u64,
         heap_bytes: heap_offset,
         sketch_bytes,
+        sketch_checksum,
         value_bytes_raw,
         value_bytes_stored,
         n_compressed,

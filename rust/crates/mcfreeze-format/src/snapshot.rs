@@ -36,8 +36,7 @@ use crate::{
 ///   absence. V4 reaches this through a compact-fingerprint collision
 ///   (expected rate ≈ 0; a sustained rise signals a hashing anomaly).
 ///   Formats with probabilistic filters reach it at their configured
-///   false-positive rate. Alert on divergence from
-///   [`Snapshot::expected_miss_io_rate`], not on absolute counts.
+///   false-positive rate.
 #[derive(Debug, PartialEq, Eq)]
 pub enum GetOutcome {
     Hit(Vec<u8>),
@@ -99,20 +98,6 @@ impl Snapshot {
 
     pub fn desc(&self) -> &SnapshotDesc {
         &self.desc
-    }
-
-    /// Expected fraction of misses that pay I/O for this snapshot's
-    /// format and configuration. V4: ≈0 (32-bit fingerprint collisions
-    /// only). V5 without a sketch: ≈1 (nearly every miss scans a
-    /// block); with the binary-fuse-8 sketch: its ~0.4% false-positive
-    /// rate. Exported as `mcf_expected_miss_io_rate`; dashboards
-    /// compare the observed `miss_io / (miss + miss_io)` ratio against
-    /// it.
-    pub fn expected_miss_io_rate(&self) -> f64 {
-        match &self.inner {
-            Inner::V4(_) => 0.0,
-            Inner::V5(r) => r.expected_miss_io_rate(),
-        }
     }
 }
 
